@@ -1,0 +1,365 @@
+# Ankur
+
+![Ankur: the program manager at the top, crews led by project managers in the middle, the design engineer and QC engineer at the two ends](docs/ankur.svg)
+
+Ankur is a Claude Code plugin that sets up a software factory for a project, then runs it. For a given domain and tech stack it first builds the factory: the agents, skills, architecture doc, ADRs and quality gates the project needs. Then it uses that factory to build goals in parallel crews, each led by a project manager, checked by tests and a QC engineer, and merged only when the gates pass. The client is asked only for decisions the repo cannot answer.
+
+The name is Sanskrit: ankur (अंकुर) means "sprout".
+
+Ankur runs a large coding goal the way a small engineering team would: a design engineer plans it, crews build it in parallel, and an independent reviewer signs off before anything merges.
+
+One Claude Code session handles a task that fits in its head. Give it something bigger, such as a feature across several modules, a refactor or a new subsystem, and the same things go wrong. The context fills and compaction drops details. The agent grades its own work. Tests get written to fit the code. Parallel agents edit the same files, and extras nobody asked for creep in.
+
+Ankur splits the goal into crews. Each crew owns its files and works in its own git worktree, and test-writers go before builders. A read-only QC engineer that never saw the builder's reasoning must rule PASS on proof, such as test output, before a crew's branch merges. Your main session becomes the program manager (PM): it plans, decides and merges, writes no feature code, and is the only agent that talks to you. You're asked about scope, deploys and pushes, not trivia.
+
+```
+claude plugin marketplace add AbhiramDwivedi/claude-ops
+claude plugin marketplace add AbhiramDwivedi/ankur
+claude plugin install ankur@ankur
+```
+
+The first command adds the `claude-ops` catalog, and the second the `ankur` catalog. The third installs `plugins/ankur/` from the repo's `main` branch, with three plugins from claude-ops as its dependencies: [kit](https://github.com/AbhiramDwivedi/claude-ops/tree/main/plugins/kit) `>=0.4.0`, [worktrees](https://github.com/AbhiramDwivedi/claude-ops/tree/main/plugins/worktrees) `>=0.8.4 <0.11.0` and [subagent-limits](https://github.com/AbhiramDwivedi/claude-ops/tree/main/plugins/subagent-limits) `^0.3.2`. Ankur installs kit, which builds the project's team of agents, and `/ankur:init` runs kit's set-up for you. Nothing else installs: a plugin-only install gets no `ui/`. The optional [local web UI](https://github.com/AbhiramDwivedi/ankur/blob/main/ui/README.md) comes only from a clone of the repo.
+
+Ankur bundles the [clarity](https://github.com/addyosmani/clarity) writing skill as `ankur:clarity`, so there is nothing more to install. The design engineer and the writer load it for every ADR and doc. Clarity is MIT-licensed and written by Addy Osmani; ankur vendors it unchanged under `skills/clarity/` (see `UPSTREAM.md` there for the source commit and how to refresh it).
+
+Without the claude-ops marketplace, ankur fails to load. To fix it, run `claude plugin marketplace add AbhiramDwivedi/claude-ops`, then reinstall ankur with `claude plugin install ankur@ankur`.
+
+Then run `/ankur:run <goal>`. The first run writes your project's architecture doc if it has none.
+
+## Why use it
+
+Each row is a failure that shows up on long agent work, and the part of Ankur that stops it.
+
+| Problem | In plain Claude Code | How Ankur handles it |
+| --- | --- | --- |
+| Context runs out | One session holds everything; compaction drops details mid-task. | Each crew starts with a fresh context sized to one job. Run state lives on disk (`plan.json`, goal files, `decisions.md`), so it survives compaction. |
+| The agent grades its own work | The same model writes the code and declares it done. | A read-only QC engineer that never built the work rules on it. A hook blocks the merge without a `PASS`. |
+| Tests fit the code, not the goal | Tests are written after the code, from the code. | Tests come first, from the brief, and must fail before the build starts. The builder can't touch them. |
+| Parallel agents collide | Two agents edit one file, or one agent's half-finished work breaks another's. | One worktree per crew, each crew's edit scope declared in the plan, and merges one crew at a time: a later crew merges the target in, resolves conflicts and re-runs its checks before it lands. |
+| Scope creep | The agent adds "helpful" extras nobody asked for. | Every brief cites the decisions it implements. The QC engineer flags anything else as outside approved scope, and extras go through a proposal first. |
+| Too many questions, or too few | You're interrupted for trivia, or a big call is made silently. | The PM fills every gap the repo or a sensible default settles, and logs it. It asks you only the questions whose answer changes the work: a stored data shape, an external service, a user-facing surface, security or a recurring cost. You also hear about scope changes, deploys, pushes and real blockers. |
+| The design drifts | Each change makes local sense and the architecture erodes. | The design engineer plans against your architecture doc. A `change` verdict names the interface that breaks and gets an ADR before anyone builds on it. |
+| Review never ends | Review loops keep finding new nits in the last fix. | The QC engineer fails a crew only for a broken behaviour, a security problem, a data loss risk, a missed goal, or behaviour-changing work outside the goal. Everything else is a note. A crew gets one repair round by default (`reworkAllowance` 1), and the stress test runs only for high-risk work. |
+| Wrong model, wrong bill | Subagents inherit the main model, often the costliest. | Every spawn names its model and effort, or the hooks refuse it. Sonnet writes code; Opus plans and does QC. |
+| New asks mid-run | A new request derails the plan or gets lost. | The design engineer amends the running plan with a new goal, and its crews join without stopping the others. |
+| No memory of what went wrong | Every session starts from zero. | Hooks log spawns, stalls and reports to `events.jsonl`. At every run end the scripted retro counts run, and `/ankur:retro` runs the full retro that turns the counts into config changes. |
+| Diff noise | The builder reformats, renames or reorders lines the task didn't need, and the diff hides the real change. | The `DIFF` rule in member prompts asks for only the lines the task needs (prompt guidance). QC step 10 then checks every hunk, comparing `git diff` with `git diff -w`, and a pure reformat, rename or reorder is a finding. |
+| Unneeded dependencies | A package is added when the standard library or an existing dependency already does the job. | Core rule 15: a new dependency is named in the approved scope or has a `Why:` line in its commit message. The `DIFF` rule asks for it (prompt guidance), and QC step 10 checks each manifest addition against the rule. |
+| Symptom fixes | A bug fix guards the null, the empty value or the exception and leaves the cause. | The `DEBUG` rule in builder and fix prompts: reproduce the bug with a failing test first, then fix the cause (prompt guidance). QC step 10 flags a guard or catch whose report doesn't say why the value occurs. |
+| Context bloat and stale notes | Product calls and area rules sit in files every agent loads, and notes pile up and go stale. | Path-scoped knowledge: area rules in `.claude/rules/<area>.md` with `paths` globs, longer topics in `docs/knowledge/`, product calls in a lazy file. `factory knowledge-lint` runs before QC. In a Workflow crew its new failures reach the QC engineer as notes, never as a reason to fail the crew; in a direct crew they go back to the builder to fix. |
+
+## Built on what works in the field
+
+Ankur's rules come from practice, not theory: Anthropic's Claude Code guidance, posts from the people who build it, and an outside review of those practices. The [workflow-audit](https://github.com/AbhiramDwivedi/claude-ops/tree/main/plugins/workflow-audit) plugin keeps them, with sources, in [catalog/practices.json](https://github.com/AbhiramDwivedi/claude-ops/blob/main/plugins/workflow-audit/catalog/practices.json). Ankur writes them into its prompts and, where a hook can see the rule, enforces them:
+
+| Practice | Where Ankur applies it |
+| --- | --- |
+| Give the agent a runnable check, and demand output as evidence, not a claim | Every crew has an acceptance test the design engineer proves once; every report carries command output; the QC engineer rules on that proof. |
+| Have a fresh agent review long unattended work | The QC engineer is a new agent that never saw the build. |
+| State the scope and forbid unasked-for work | Briefs quote the approved decisions; the QC engineer flags anything outside them. |
+| Long contexts get less reliable; start fresh rather than correct a third time | Every task gets a fresh agent, never a resume. After two failed fixes, an Opus agent finds the root cause and a new builder starts from it. |
+| Set the model on every subagent; Sonnet for most coding, Opus for reasoning | The hooks refuse a spawn with no model or effort. Sonnet builds; Opus plans and does QC. |
+| Match effort to the task; high effort isn't the default | QC engineers, stress tests and writers run at `medium`; `high` needs your explicit call. |
+| Run parallel work in separate worktrees | One worktree per crew, with file ownership declared in the plan. |
+| Multi-agent work costs many times a chat; save it for work that splits | Small jobs run as crews with no project manager and no stress test; [What it costs](#what-it-costs) says when to skip Ankur. |
+| Put must-always rules in hooks; prompts are only advice | The merge gate, plan gates, model checks and rework allowance are hooks. |
+
+Two outside sources were reviewed item by item against Ankur:
+
+- **[Andrej Karpathy's field notes for Claude Code (CLAUDE.md gist)](https://gist.github.com/DiTo97/e734f688f6f63fc45211142c0e43d307).** Ankur already covered most of its rules: scope, proof, tests first, reuse, non-goals. It took the three real gaps: the `DIFF` rule, core rule 15 for dependencies, and the `DEBUG` rule, plus QC step 10 to check them. The simplicity, failure-mode and communication rules were not added, because existing core rules, the stress test and the proof rule already cover them.- **[Capital One Context Specs](https://www.capitalone.com/tech/open-source/open-source-context-specs/).** Ankur took three ideas: eager and lazy context are different things, notes are reconciled instead of piled up, and "nothing to learn" is a normal outcome. It declined the tool itself, as a dependency or a file format: it is a second harness at v0.2, with no schema and no Windows support, and Ankur uses Claude Code's own lazily loaded files instead.
+## How work moves
+
+```mermaid
+flowchart LR
+  client([Client]) --> PM[PM]
+  PM --> arch[Design engineer<br/>plan, stages]
+  arch --> a[Crew A<br/>tests, build] --> ja{QC engineer}
+  arch --> b[Crew B<br/>tests, build] --> jb{QC engineer}
+  arch --> c[Crew C<br/>tests, build] --> jc{QC engineer}
+  ja -->|PASS| main[(main)]
+  jb -->|PASS| main
+  jc -->|PASS| main
+  client -.->|new ask mid-run| PM
+  arch -.->|plan amended| d[Crew D<br/>tests, build]
+  d -.-> jd{QC engineer} -.->|PASS| main
+```
+
+The default path of a crew is a plan, a test-first build, one QC engineer and the merge. Crews run side by side, each in its own worktree, and each must pass its QC engineer before it merges. Merges into the target land one at a time. A new ask partway through becomes a new goal in the same plan: its crew (dashed) joins while the others keep going.
+
+A checking engineer is not in the default flow. The PM starts one only for a worth review of a goal item you did not type, for a plan with a `change` or `design` verdict or `client` approval, and for the gate of an unattended run.
+
+## Who calls whom
+
+Each role is started by the one above it.
+
+- **Client**: you. You set the goal and rule on scope changes, production deploys and pushes.
+  - **PM** (main session): plans the run, logs every decision and merges what passes.
+    - **Design engineer** (Opus): drafts the plan against your architecture doc and ADRs, and amends it when new work arrives.
+    - **Checking engineer** (Opus, read-only): started only for a worth review, a plan with a `change` or `design` verdict or `client` approval, and an unattended run's gate. It recommends and the PM decides.
+    - **Project manager** (one per crew): splits the crew's work into member tasks and merges the members' branches.
+      - **Members** (Sonnet): test-writer first, then builder, writer, commissioning engineer.
+      - **QC engineer** (Opus, read-only): rules PASS or FAIL from proof, never from the builder's reasoning.
+      - **Stress engineer** (Opus): tries once to break high-risk work in its own worktree. It runs when the plan flags the crew or its owned paths hold auth, money, a data migration, deletion of stored data, CI or deploy config, or a lockfile.
+
+A crew of one or two members can run with no project manager and no stress test. [Roles](#roles) has the full table.
+
+## A run at a glance
+
+1. **Client brief.** The PM sizes the goal, asks in one round only what the repo can't answer, and records numbered requirements (`R-1`, `R-2`…) that every crew traces back to.
+2. **Plan.** The design engineer gives each module a verdict, `extend` if the design already fits or `change` if an interface must move, splits the work into crews and stages, and runs each crew's acceptance test once to prove it.
+3. **Approve, only if needed.** A plan that only extends the design starts on its own. It waits for you when it changes the design or another client trigger applies.
+4. **Build.** Each crew owns its files and works in its own worktree. Test-writers go first; their tests must fail before the builder starts.
+5. **QC engineer.** The QC engineer reads the diff, the approved scope quoted word for word, and the acceptance test output, and writes `VERDICT: PASS` or `FAIL`. It fails a crew only for one of five causes. High-risk work gets one stress-test round first.
+6. **Merge.** The PM merges one crew at a time and checks that the merged diff is the one the QC engineer passed.
+7. **Retro.** At every run end the scripted counts run: stalls, rejections, overruled recommendations and spawns by model. The PM decides from stated triggers whether to start the retro judges and triage, and logs the call. `/ankur:retro` runs the full retro on demand and proposes changes to your Ankur config.
+
+[How a run goes](#how-a-run-goes) has every step in detail.
+
+## What it costs
+
+A crew is several agents and a QC engineer, so a small fix costs more and takes longer than doing it yourself. For a one-line fix, use plain Claude Code. Ankur pays off when the goal spans several modules, or when you want proof, not a model's word, that the work is done.
+
+The tests prove the rules are written into the prompts and enforced by hooks where hooks can see them, not that every agent always follows them. That is why the QC engineer reads proof and the retro counts what actually happened. [Limitations](#limitations) lists what hasn't been seen in a live run.
+
+## Learn more
+
+- [CHANGELOG.md](CHANGELOG.md): what changed in each version.
+
+## The client brief
+
+The PM runs the `ankur:brief` skill on the goal as you gave it. It is the only part of Ankur that asks you questions, and it asks them in one round, only what the repo can't answer: the recommended answer comes first, so "yes" accepts it. A small goal gets one requirement from the goal text and no questions. The answers become numbered, checkable requirements in `docs/requirements.md` (next to the architecture doc), which is committed on the target branch before any crew starts. Ankur is seeded and adapts to the needs the client brief finds in your task, not to a fixed list.
+
+- **It is committed in the repo, scrubbed.** `docs/requirements.md` holds no names, emails, user paths or private infrastructure; the client brief says so when it asks about hosting or integrations, and records those by type.
+- **The design engineer and crews trace to it.** The plan table has a `Requirements` column, and `plan.md` lists any R-id no crew serves under `Unserved:`. Each goal file has a `## Requirements` section, checked with `brief/cli.ts trace`. At the end of the run the PM marks the requirements it met.
+- **Stopping early fills defaults.** The last option of the round is `Stop the client brief`. Each question you didn't answer becomes a requirement with `Source: default`, and the start message lists them as `Defaults filled: R-<n> (<branch id>), ...`. The plan shows them to you. In an unattended run the brief asks nothing: every branch takes its recommended default and raises a non-blocking `client-question` in the inbox.
+- **Greenfield repos.** With no code, the PM runs the client brief first, then runs `ankur:init` with a `Greenfield: <repo>/docs/requirements.md` line. The design engineer lists planned modules, each citing the R-ids it serves.
+
+## Workflow engine
+
+When the session has the Workflow tool, the PM plans and builds with scripts instead of long agent conversations. Crews with a `commissioning-engineer` member, or a member you raised to `high` or `xhigh` effort, stay on the project manager path, and so does every crew in a `single`-mode run. Workflow is the default; you don't need to opt in. Without Workflow, or when you opt out, the PM passes `--no-workflow` and every crew uses the project manager path described below.
+
+- **Plan.** The PM writes the brief to `plan-brief.md`, runs `plan-args`, then `Workflow(plan.js)`: the design engineer, then a checking engineer review of the verdicts only when a crew's verdict is not `extend` or the plan needs your approval. `plan-write` saves the plan and `plan-check` validates it; a failed check resumes once.
+- **Build.** `start` picks the next stage, makes each crew's worktree and returns the crews; the PM runs `Workflow(stage.js)`, which takes each crew through the acceptance test red, a split into member tasks, the members, the green check, an optional single stress-test round, the scope check and the QC engineer. Then `finish --transcript <T> --result <file>` records the run and merges: it is the merge gate for these crews.
+- **Restart.** A stopped crew restarts with `start --resume answers`, a crew sent back for a conflict or a changed patch with `--resume merge-ready`, and a crew whose run died with `--resume stale`.
+
+The CLI is `bin/factory.ts`; the scripts are `workflows/plan.js` and `workflows/stage.js`, and `workflows/roles.json` holds every script agent's type, model and effort.
+## Roles
+
+| Role | Who | What it does |
+| --- | --- | --- |
+| Client | You | Sets the goal. Answers the client brief about the goal. Approves a plan that changes the design. Rules on changes to frozen scope, on production deploys, and on every push or PR. |
+| PM | The main session, after `/ankur:run` | Has the design engineer draft the plan, decides on it as product owner, and logs every decision. Starts the project managers, answers them, and merges what the crews deliver. Never does a crew's work or the design. |
+| Design engineer | `ankur:design-engineer`, Opus, effort `medium` | Loads the principle packs the work touches. Edits only the architecture doc, the ADRs and `.claude/ankur.json` (in `init` mode); never source or tests, and never check code. In `plan` mode it hands `plan.json` and `plan.md` back and Ankur's hook writes them. In `init` mode it writes the architecture doc. In `plan` mode, outside every crew, it drafts the run's verdicts and work breakdown. In `design` mode, as a member of a design crew, it writes the ADR and the doc change for each `change` verdict and names the seams to pin with contract tests. In `init` and `design` mode it draws mermaid diagrams: a context or container `flowchart`, and a `sequenceDiagram` for a flow across modules, each with at most about 12 nodes, a caption and the source files it traces to. |
+| Checking engineer | `ankur:checking-engineer`, Opus, effort `medium`, outside every crew | Read-only, and outside the default flow. The PM starts one for a worth review of each goal item you did not type (`worth`, `trim` or `drop`), to review the verdicts of a plan with a `change` or `design` verdict or `client` approval, at the gate of an unattended run, for retro triage, and for any item the PM chooses to send. It recommends; the PM decides. |
+| Project manager | `ankur:project-manager`, Opus, one per crew | Splits the crew's goal into member tasks, delegates them, merges the members' branches into the crew branch, runs the checks and reports. |
+| Members | Your project's agents, plugin agents, or `general-purpose` | Do the building. Each starts with an explicit model and effort and a name that starts with its crew's. |
+| QC engineer | `ankur:qc-engineer`, Opus | Never the builder. Checks the proof in the crew's reports and reports `VERDICT: PASS` or `VERDICT: FAIL`. It fails a crew only for a broken behaviour, a security problem, a data loss risk, a missed goal, or behaviour-changing work outside the goal; style, docs drift, stale citations and opinions go under `## Notes`. Runs at effort `medium`, whatever its builder runs at; `high` and `xhigh` only on your explicit call. |
+| Stress engineer | `ankur:stress-engineer`, Opus, effort `medium` | Tries to break a high-risk crew's finished work in its own worktree and reports `STRESSTEST: <n> findings`, never a merge verdict. Runs once, before the QC engineer. |
+| UX engineer | `ankur:ux-engineer`, Opus, effort `medium`, for a crew with `ux: true` in plan.json or a `## UX` section in its goal file | Read-only. Has two modes, picked by the first line of its brief. `UX direction:` writes the crew's design direction before the split: screens and states, layout, tokens and components, motion, accessibility, responsive rules and a checklist. `UX review:` checks the built screens against that checklist after green, and reports `UX: PASS` or `UX: REWORK` with numbered findings for a fix builder. The ankur.json `roles.ux` key maps the `ux` role to another agent type. |
+| Writer | `ankur:writer`, Opus | A member for the prose a crew ships. Loads the skill `writingSkill` names when the session lists it, else the best writing skill the session has (`technical-writer` when it's installed). Docs and ADRs always use `ankur:clarity`. It writes only what the code, a command it ran, or a page it fetched shows. |
+| Commissioning engineer | `ankur:commissioning-engineer`, Sonnet | A member that validates a deploy with proof: rollout status, health endpoint, smoke tests, logs. May deploy a preview or staging build. Never deploys to production or changes it. Takes the target and command from the `deploy` key when it's set, and asks its project manager otherwise. |
+
+Ankur runs *persona agents*: project agents in `.claude/agents/`, each specialised by stack and area (a frontend UI developer, a Postgres architect) and carrying a short, checkable `Standards` section. The planner gives every task a persona, the QC engineer holds the diff to a persona's standards (a violated standard fails the crew only when it is a security or data rule), and a read-only `product-owner` judge in every project holds what the users need and what done means. A run hires no persona: `/ankur:init` proposes day-0 personas for a project that has none, and you approve them there. A task for a stack no persona covers runs as `general-purpose` with the stack's conventions in its brief, as does work with no stack, such as git chores. Ankur keeps what crews learn in your repo: a feature map (`docs/features.md`) routes agents to each capability's entry points, persona and docs, each builder updates it and the other knowledge files in the same change when it adds or learns something (markdown only, and any doc it writes is linked from the feature map or your `AGENTS.md` index; see Knowledge below), project managers make product calls through the `product-owner` persona, and the product owner reviews the plan's acceptance criteria before work starts. The [kit](https://github.com/AbhiramDwivedi/claude-ops/tree/main/plugins/kit) plugin's `builder`, `test-writer`, `reviewer` and `scout` make good members, and the `roles` key can map jobs to them. The [worktrees](https://github.com/AbhiramDwivedi/claude-ops/tree/main/plugins/worktrees) plugin starts each worktree from your current commit instead of `origin/HEAD`, and gives no worktree to the agent types kit's manifest declares read-only. Ankur init declares `ankur:qc-engineer`, `ankur:checking-engineer` and `ankur:judge` read-only. Since 0.16.0 the install brings kit, worktrees and subagent-limits as dependencies. Without kit's manifest declarations, QC engineers and checking engineers still get worktrees unless you set worktrees' `noIsolateAgents`.
+
+**Knowledge.** Knowledge lives in files Claude Code loads lazily, scoped to the paths they describe: area rules in `.claude/rules/<area>.md` (a `paths` glob list, `sources` and `verified` in the frontmatter), longer topics in `docs/knowledge/<topic>.md`, crew product calls in `docs/knowledge/product-decisions.md`, and an `AGENTS.md` index of 60 lines or fewer that your `CLAUDE.md` imports with `@AGENTS.md`. Persona files keep Standards only. A task whose files match a rule gets a line naming it, a builder cites a source for every fact and edits instead of appending, and `factory knowledge-lint` checks the files once per head before QC (dead globs, missing sources, stale docs, unreachable files, budgets, product calls left in a persona). In a Workflow crew the lint's new failures reach the QC engineer as notes and never fail a crew; a direct crew runs it before QC whether QC is on or off and sends its new failures to the builder to fix. The `productDecisions`, `knowledgeDir`, `rulesDir`, `agentsIndex` and `knowledgeBudgets` keys in `.claude/ankur.json` move the paths and budgets; a 0.23.0 project runs `factory knowledge-migrate` to move product calls out of the persona file.
+
+The principle packs ship as the `ankur:principles` skill, one pack per domain: `core` (applied to every project), `service`, `frontend`, `data`, `ai`, `infra` and `library`. Each rule can be checked against a diff and comes with a one-line test, such as "a module imports another only through its index". The design engineer picks the packs and adapts them into the architecture doc's principles, giving a reason for each rule it drops.
+
+## Set up the project
+
+Run `/ankur:init` once per project. A run does it for you when the architecture doc is missing.
+
+1. It reads `.claude/ankur.json` at the repo root. If the `architecture` key names a file that exists, it tells you where the doc is.
+2. Otherwise it starts the design engineer in `init` mode. The design engineer writes the doc's principles, its module map (each module, the paths it owns, what it does and its seams) and an ADR for each decision already visible in the code. It extends an architecture doc the repo already has; with none, the doc goes to `docs/architecture.md` and the ADRs to `docs/adr/`. It writes `.claude/ankur.json` with the `architecture` and `adr` keys.
+3. After the doc check, it reads kit's manifest, `.claude/kit/manifest.json`:
+
+   | What init finds | What it does |
+   | --- | --- |
+   | A valid manifest at `version` 1 that marks `ankur:qc-engineer`, `ankur:checking-engineer` and `ankur:judge` read-only | Uses it, and says nothing about kit. |
+   | A valid manifest without those declarations, and `kit:init` in the session's skills | Runs `kit:init` with the args `declare read-only: ankur:qc-engineer, ankur:checking-engineer, ankur:judge`. kit shows you the declaration and writes it when you approve. |
+   | No manifest, and `kit:init` in the session's skills | Runs `kit:init`. kit proposes its setup and writes it only when you approve. Init then reads the manifest again, and uses it if it is now readable. Before 0.16.0 init didn't run `kit:init` here; it said `no kit manifest; truss init carries on without one (run /kit:init on its own to set kit up)` and carried on. <!-- ankur-allow-truss --> |
+   | No manifest, or one without the declarations, and no `kit:init` | Says `kit is not installed; ankur init carries on without a kit manifest (0.3.0 behaviour)` and carries on. |
+   | A manifest that isn't JSON, fails kit's schema or has another `version` | Says `kit manifest unreadable, carrying on without it: <reason>` and carries on as if there were none. It doesn't rerun `kit:init` over it. |
+
+4. It proposes the 0.4.0 keys (`roles`, `deploy`, `writingSkill`, `promptOverrides`) from the manifest and the repo: `roles` from the manifest's agents, such as `build: kit:builder` and `test: kit:test-writer`, and `deploy` from what the repo shows, only when the file has none. When kit is loaded it proposes `build: kit:builder` and `test: kit:test-writer` even without a manifest. When subagent-limits is installed it also proposes that plugin's own `nudgeAtK` about 150 and `stopAtK` about 200, which live in `/config` or under `pluginConfigs` in `~/.claude/settings.json`, not in `ankur.json`. It also detects the project's test layout from the code and proposes `testGlobs` for the test files ankur's built-in names miss (C# `*Tests.cs`, Kotlin and Java `*Test.kt` and `*Test.java`, Ruby `*_spec.rb` outside `spec/`). It writes only the keys you approve, and keeps every key and value already in the file. Before it writes, it validates the result against [docs/ankur-config.schema.json](docs/ankur-config.schema.json). An error in a key it would add stops the write and leaves the file as it was. An error in a value you wrote is reported by its path (for example `/merge: must be equal to one of the allowed values`) and left alone, because init never rewrites or "fixes" what you wrote.
+5. It shows you what it wrote and stops. It doesn't commit. Commit the files before a run: crews work in worktrees, which see only committed files.
+
+**Projects that used the plugin's old name.** Ankur reads `.claude/truss.json` and `.git/truss/` when `.claude/ankur.json` and `.git/ankur/` are absent, and reads `TRUSS_*` environment variables for one release, with a one-line deprecation note on stderr. `/ankur:init` offers to move the config and the run dir to the new names with `node <plugin>/bin/factory.ts migrate-names [--repo R] [--yes]` (a dry run unless you pass `--yes`), asks first, never moves onto a name that already exists, and never commits. <!-- ankur-allow-truss -->
+
+Every key but `architecture` and `adr` is optional, and leaving a 0.4.0 key out keeps 0.3.0 behaviour. You can set any of them by hand:
+
+| Key | Default | What it sets |
+| --- | --- | --- |
+| `architecture` | `docs/architecture.md` | Path of the architecture doc. |
+| `adr` | `docs/adr` | Directory of the ADRs. |
+| `maxParallelCrews` | `4` | The most crews running at once within a stage. |
+| `heavySlots` | `max(1, min(4, floor(cpus/4), floor(totalGB/8)))` | How many red and green checks (`factory heavy`) run at once across the session (1-16). Two or more slots can run two suites at once; a suite with tight timing assertions may then flake, so set `1` if it does. |
+| `testGlobs` | none: ankur's built-in test names only | Globs (repo-relative) for the project's test files beyond `*.test.*`, `*.spec.*`, `*.check.*`, `test_*.py`, `*_test.py`, `*_test.go` and `tests/`, `test/`, `__tests__/`, `spec/`, `checks/`, `e2e/`, `fixtures/` dirs, such as `["**/*Tests.cs"]`. The green check after a stress-fix round needs a changed test file. `ankur init` proposes this key from the project's test layout. With no tracked file matching either rule, the crew logs a warning and goes on. |
+| `merge` | `sequential` | Merge mode of every run; the PM never asks. `single` also puts every crew on the project manager path. |
+| `target` | the current branch | Target branch of every run; the PM never asks. |
+| `roles` | picked from the session's agent types, as in 0.3.0 | Which agent type does each job: `build`, `test`, `review`, `search`, `docs` or `deploy`, mapped to a full type such as `kit:builder`. The PM uses a listed type when the session can start it. The QC engineer, checking engineer, project manager and design engineer are always Ankur's own and can't be mapped. |
+| `deploy` | none: commissioning engineer asks its project manager | `{"target", "command", "production"}`, all three required. A deploy to a target with `production: true` goes to you first, whatever else is set. |
+| `writingSkill` | none | A skill the writer loads before it writes, such as `technical-writer`. Used only when the session lists it; otherwise the writer says so and carries on. Docs and ADRs use `ankur:clarity` instead. |
+| `runEndRetro` | `pm` | `pm` or `off`. At every run end the scripted retro counts run. With `pm` the PM decides from stated triggers whether to start the retro judges and triage, and logs the call with its evidence. With `off` only the scripted counts run. The fix goal waits for `/ankur:retro` or your yes either way, and `/ankur:retro` always runs the full retro. `ankur init` offers this key. |
+| `promptOverrides` | none | Per role (`project-manager`, `qc-engineer`, `checking-engineer`, `writer`, `commissioning-engineer`, `design-engineer`), a file directly under `.claude/ankur/prompts/`, such as `.claude/ankur/prompts/qc-engineer.md`. |
+
+The skills read the file the same way, report each problem to you once, and never treat one as fatal. They ignore a key the schema doesn't declare and treat a rejected value as unset, so its default applies. A bad entry in `roles` or `promptOverrides` unsets only that entry. `deploy` fails closed: any error at or inside it, an undeclared key included, unsets the whole key, and a missing or non-boolean `production` is never read as `false`.
+
+A prompt override names a file you write and commit, and `.claude/ankur.json` never holds prompt text. The file adds to the role's prompt and never replaces it. The PM writes a `Prompt overrides:` line in each goal file, each project manager passes the right file into its QC engineer, writer and commissioning engineer briefs, and the PM does the same for the checking engineer and the design engineer. Each brief says the role's report format and the hooks' rules still hold. A missing file is reported and skipped.
+
+## How a run goes
+
+`/ankur:run` loads the PM's protocol. The PM:
+
+0. checks for the architecture doc. When it's missing, the PM runs the `ankur:init` skill, then asks whether to go on. It reads `.claude/ankur.json`, and asks you to commit the doc, its ADRs or that file if they have uncommitted changes;
+1. takes the goal as you gave it, fills each gap the repo or a sensible default settles and logs the default, then runs the `ankur:brief` skill (see "The client brief" below);
+2. lists the agent types the session can start (your project's `.claude/agents/*.md`, yours in `~/.claude/agents/`, plugin agents) and the project's skills, and takes the agent type for each job from `roles` where it's set;
+3. starts the design engineer in `plan` mode. The design engineer gives each module the goal touches one verdict. `extend`, the default, means new instances of existing patterns behind existing interfaces, such as a new route, provider or command. `change` means a new module or seam, a changed interface or stored data shape, a new external service or dependency, or a principle added or broken; it must name the existing interface that can't take the work, and why. The design engineer then splits the work along the module map into crews and stages, runs each crew's acceptance test once to prove it, estimates agents per crew, and writes a draft `plan.json` with a readable `plan.md`. Ankur doesn't invent port ranges: when the repo has a `.claude/worktree-setup.*` script, a crew's ports are its worktree slot (`PORT_BASE` to `PORT_BASE+9`), and without one the crew gets no ports and raises a `QUESTION:` if it needs one. Two crews may own the same file and merge in turn. The PM sends the draft back if an acceptance test can be gamed or wasn't proved;
+4. has a checking engineer review each verdict on its own, only when a crew's verdict is `change` or `design` or the plan has `client` approval; a plan where every crew extends the design skips the review. If they disagree, the design engineer gets one round to reconcile. You are asked only when they still disagree, a change breaks a declared principle, adds an external service or a recurring cost, or changes a stored data shape in a way that's hard to undo;
+5. gets the plan approved. The design engineer's draft sets `approval`: `"client"` when a client trigger applies, a long-term cost is open or the brief asks for it, `"auto"` otherwise, whatever the plan's stages. In an auto run the PM takes the merge mode and target from `.claude/ankur.json` (else `sequential` and the current branch), logs them and starts without asking; you see the plan in the end-of-run report. A run with `approval: "client"` waits: the PM shows you the plan table and shows the merge mode and target branch as information, without asking. Either way it shows each crew's estimated agents, their total and the queue order. Scope grows here, once, and freezes when the PM sets `approvedAt`;
+6. writes a goal file for each crew and starts the crews stage by stage (a crew runs as a Workflow script or under a project manager; see "Workflow engine" below), in the background, each in its own worktree. The work splits by complexity, not into fixed stages: a later stage exists only when a crew needs another crew's merged work, and `plan.md` says why. Within a stage the crews start in plan order, up to `maxParallelCrews` at once; the rest queue and start as running crews merge. The next stage starts, without a pause, once every crew in the earlier stages is `merged` or `dropped`;
+7. handles the project managers' messages, each tagged `QUESTION:`, `BLOCKED:` or `PROPOSAL:`. It decides what it can, logs it, and sends you only what the dangerous-call rules below leave to you. A `PROPOSAL:` defaults to no because the scope is frozen;
+8. merges each crew once its newest QC file modified at or after `approvedAt` passes the merge gate: `VERDICT: PASS` (an `UNSCOPED` line does not change a PASS), and a `Head: ` line equal to the crew branch's head or a `Patch: ` line equal to its patch id with the project manager's checks re-run green. It then sets the crew's `status` to `merged` in `plan.json`, and starts the next queued crew or stage;
+9. reports to you, and asks before every push and every PR.
+
+`plan.json` is the contract between the design engineer, the PM and the hooks. The design engineer drafts it and hands it back, and Ankur's hook writes it with `approvedAt: null`; after that the PM owns it and sets `approvedAt` and each crew's `status` (`planned`, `running`, `merged` or `dropped`). Each crew's `verdict` is `design` (writes ADRs and contract tests), `change` (builds in a module whose design changed, after the design crew) or `extend` (builds inside the existing design). [docs/plan.schema.json](docs/plan.schema.json) is its schema.
+
+A design change can also come up mid-run, as a project manager's `PROPOSAL:`. When the PM takes one up, it adds a design crew to the earliest stage that hasn't started and moves one stage later only the unstarted crews that depend on it. The run's approval doesn't change. The slice waits for you only when one of the triggers in step 4 applies; the PM then sets the crew's `clientApproval` to `pending`, and to `approved` when you answer.
+
+You can also add a goal after the run has started. Ask the PM for work no crew covers and it takes the request as a new goal in the same run, without a new session: a plan design engineer in `amend` mode drafts the goal's crews, a checking engineer reviews them, and the PM adds them to `plan.json` under `goals`. Running crews continue. The goal waits for your approval only when one of the step 4 triggers applies; otherwise its crews start as soon as the cap allows. Each goal has its own stages, all goals share `maxParallelCrews`, and the PM tags its decision lines for the goal with `[<id>]`.
+
+The PM logs its decisions in `decisions.md`, in the session's Ankur folder. From 0.4.0 the log has a grammar, so `/ankur:retro` can count it. Each run opens with a `## Run <start> | <goal>` heading, where the start is an RFC 3339 time from `date -u +%Y-%m-%dT%H:%M:%SZ`. A decision is `- HH:MM | <decision> | <reason> | <checker> | <outcome>`, and a checking engineer's advice is `- HH:MM | checker-<n> RECOMMEND <answer|defer|pass>: <text> | <outcome>`. The outcome is `followed`, `followed (deferred)` or `overruled: <reason>`.
+
+When the PM sends an item to a checking engineer, it follows the recommendation by default. To overrule it, the PM logs a one-line reason, and every overrule appears in the end-of-run report. The PM clears a `BLOCKED:` itself when it can inside frozen scope, for example from the plan, the decision log or something it knows: a missing input, a collision with another crew. Every other `BLOCKED:` reaches you, and none is ever deferred. A production promotion, a change to frozen scope, and every push or PR reach you whatever the checking engineer recommends, unless the project grants the PM merge ownership for pushes and PRs.
+
+## Inside a crew
+
+A project manager first proves it can run its crew's checks in its own worktree. If it can't, it sends `BLOCKED:` before splitting any work. It then splits the goal into member tasks. Anything that would add scope goes to the PM as a `PROPOSAL:`.
+
+The project manager splits its crew's goal by the leaf test the design engineer used for crews. A task stops splitting when it owns files no sibling task touches, has an acceptance test its member can run with its own access, needs no design decision outside the architecture doc, an accepted ADR, the client's brief or an ADR an earlier stage merges, and fits one agent's context. A task with no check that could fail for it alone is too small and merges into a sibling. The project manager never re-splits the design and never starts a second project manager. Crews never edit the architecture doc or the ADRs: work that doesn't fit, and any design decision the doc doesn't hold, go to the PM as a `PROPOSAL:`. There are two exceptions. A design crew's project manager starts the design engineer in `design` mode and then a test-writer to pin the seams it names. A `change` crew whose `owns` names an ADR writes that ADR and the doc change with its build, for a design the client or an accepted ADR already decided.
+
+Every member report carries proof: a command and its output, before-and-after numbers, or a walk through the real flow. These don't count as proof: tests the builder wrote after building, "I verified it" with no output, a typecheck alone, a mocked end-to-end test, and output from another commit. Builders may not edit the acceptance test tests: they are the proof of the build, written before it, so a builder that could edit them could pass by weakening them. Builders do add and edit their own regression tests, and they update the docs their change makes stale in the same change (the feature map, `docs/knowledge/**` with `verified`, architecture and ADR citations, skill and agent prose); a free doc outside the crew's ownership (feature map, architecture doc, ADRs, knowledge docs; a README, CHANGELOG or other `.md` needs the crew's ownership) is exempt for any crew commit, while skill, agent and rule files are exempt only in the crew's knowledge commit and a judge's agent file never. Every commit carries an `Ankur-Crew: <slug>` trailer and a `Ankur-Role: <role>` trailer (`test-writer`, `builder`, `writer`, `commissioning`, `stress`, `designer`). The QC engineer uses the role to check that no `builder` commit touched the acceptance test tests; one that did fails the crew. A file changed outside the crew's ownership goes to the PM as a `QUESTION:` (extend the ownership, or revert), not a FAIL by itself.
+
+After the last merge and a green run of the checks, the project manager starts a fresh QC engineer. The QC engineer fails the crew only for one of five causes: a broken behaviour, a security problem, a data loss risk, a missed goal (the acceptance test fails, a requirement isn't met, or a builder commit touched the acceptance test), or work outside the goal that changes behaviour. Style, naming, docs drift, stale citations, a departure from the architecture doc that breaks nothing, and a failed knowledge lint go under `## Notes` and never fail the crew; a `QUESTION:` for the PM is how it flags a file outside the crew's ownership. A project with no architecture doc doesn't fail on it. A FAIL starts one repair round by default: the fix members get the report's `## Findings` only, and a second FAIL stops the crew with `BLOCKED: rework allowance spent`. A PASS stands even when its report holds `UNSCOPED:` lines.
+
+A crew gets a stress test first when its plan entry flags it or its owned paths include auth or permission code, money code, a stored data migration, code that deletes stored data, CI or deploy config, or a lockfile. `ankur:stress-engineer` works in its own worktree, first resets it to the crew head SHA with `git reset --hard <sha>`, proves each break with a command and its output, and leaves the worktree clean before it reports. A reproduced break is fixed, and one fresh stress test runs before the QC engineer does.
+
+Builders and test-writers run on Sonnet; no Opus member writes code. When a Sonnet builder's two fix attempts end with the same check failing, the project manager has an Opus agent at effort `medium` find the root cause with evidence, writing no code, then starts a fresh Sonnet builder with that analysis. If that builder fails twice on the same check, the project manager sends `BLOCKED:`. Each step is a fresh agent, never a resume.
+
+The project manager's final report has fixed sections: Summary, Branch, Changes, Proof, Checks run, Open questions. A report that starts with `CHECKPOINT:` means the project manager stopped with work left, and the PM starts a successor project manager, `<slug>-2`, from it.
+
+## Merge modes
+
+| Mode | What happens | Use it when |
+| --- | --- | --- |
+| `sequential` | Crews land on the target one at a time. The PM asks each project manager in turn to merge the target into its crew branch with `git merge <target>` (never a rebase or a cherry-pick), resolve the conflicts and run the checks. If the merge moved the head and changed the patch id, or the checks fail, a fresh QC engineer rules on it. On a PASS for that head, the PM fast-forwards the target to it. | You want one reviewable merge per crew. |
+| `single` | One integrator agent (Opus, in a worktree) merges every crew branch into one integration branch, `ankur-<short goal>`, resolves the conflicts and runs the checks. An integration QC engineer rules on the result. You get one PR. | Each merge to the target triggers something expensive, such as a deploy. |
+
+Conflicts are always resolved by an agent, never in the main thread. With more than one stage, `single` mode integrates stage by stage: each stage's crews merge into the integration branch and pass an integration QC engineer before the next stage's project managers start from that branch.
+
+## The end-of-run report
+
+Before anything leaves the machine, the PM stops what the run left running and reports these, and nothing else:
+
+- the plan: each crew's stage, status and agents, and whether the run started on `approval: "auto"` or your approval;
+- the merge mode and target, and where each came from;
+- the requirements marked met, and any left open or filled by default;
+- what merged where;
+- the checks and their results, and each QC engineer's verdict;
+- the real defects and risks still open: FAIL causes left unfixed, `LONG-TERM-COST` items, and the high-impact files that changed, which it asks you to read, and only those;
+- the retro counts, each `RECURRED:` line, and the PM's call on the retro judges with its reason.
+
+The PM adds a suggestion only when it bears on one of those risks, with its evidence and an honest size. It logs every other suggestion as dropped in `decisions.md` and starts no goal from a suggestion without your yes.
+
+## What the hooks do
+
+A crew is a `ankur:project-manager` started by the main thread, plus every agent below it, however deep. An agent goes by the name it was spawned with, else its id, and the crew by its project manager's. Agents outside every crew are left alone, which includes the checking engineer, the integrator and the integration QC engineer.
+
+- **Reports are saved.** When a crew agent stops, its last message is written to `<git common dir>/ankur/<session id>/reports/<crew>/<agent name>.md`. A report sent through the hand-back tool is saved instead. Outside git the folder is `~/.claude/ankur/<session id>/`. The git common dir is the main checkout's `.git`, so every worktree writes to the same place. Hand-backs from nested agents have been lost on some machines; the project manager and the PM read the file when one doesn't arrive. Each Agent call that starts a project manager or a crew member gets a `[ankur]` note naming the path, and the main session gets a `[ankur] dir: <path>` note at session start. A project manager's interim stop (members still at work, or a tagged message to `main` unanswered) is saved as `<agent name>.interim.md` and leaves the report, the crew's status and its idle clock alone. A QC engineer's follow-up after its verdict goes to the interim file too, so the verdict stays. A stop the gate sends back is saved nowhere.
+- **Empty hand-backs are refused.** A crew agent's hand-back under 40 characters, or one that is only `placeholder`, `todo` or `tbd`, is refused with a reason asking for the real report. One that starts `QUESTION:`, `BLOCKED:`, `PROPOSAL:` or `CHECKPOINT:` may be short, but not empty after its tag.
+- **Crew messages follow the chain.** A member's `SendMessage` may go to its own project manager and the other members of its crew. A project manager's may go to `main`, its own members and the other project managers. Anything else from inside a crew is refused, with a reason telling a member to go through its project manager and a project manager to message the other crew's project manager. So is an address no agent of the session has had, and a name two live agents in different crews share.
+- **Project-manager-to-project-manager messages are logged** to `<ankur folder>/messages.jsonl` as `{ ts, from, to, summary }`. Once the log passes 3 MiB it moves to `messages.<n>.jsonl`, the first free number, and a new log starts.
+- **Project managers start by the plan.** When `plan.json` lists a project manager's slug, an Agent call starting that `ankur:project-manager` is refused while a crew in an earlier stage isn't `merged` or `dropped` (`stage <n> isn't merged yet: <slugs>`), while `maxParallelCrews` crews are already `running`, while a run with `approval: "client"` has no `approvedAt` (`this run changes the design; get the client's approval first`), and while the crew's own `clientApproval` is `pending` (`<slug> waits for the client's approval`). With no `plan.json`, or a slug not in it, there is no gate, so 0.2.1 runs work as before. The hooks only read `plan.json`.
+- **Crew agents set a model and an effort.** An Agent call from inside a crew without `model`, without `effort`, or with `effort: "max"` is refused, with a reason saying what to set.
+- **A project manager can't stop without a report.** When a project manager with no live members and no members' background tasks running stops on a message that has no `## Proof` section and doesn't start with `CHECKPOINT:`, `BLOCKED:`, `QUESTION:` or `PROPOSAL:`, the stop is sent back with a reason. The hook sends a stop back at most twice in a row, then lets it through. That bound relies on Claude Code sending `stop_hook_active` on the stop after a block, which hasn't been seen live; Claude Code itself lets a stop through after 8 consecutive blocks. A stop while a member, or a member's background task, still runs goes through; the project manager's own background tasks don't count. A stop while the project manager's `QUESTION:`, `BLOCKED:` or `PROPOSAL:` message to `main` is unanswered goes through too: it asked once, and needs no tagged hand-back as well.
+- **Stalls wake the PM.** Every minute the plugin checks for running crew agents with no tool call or model request for 15 minutes. It reports each one once, with a toast and a `[ankur] stalled:` prompt to the main session. An agent that starts running again, or comes back into the list, counts as active from that moment, so a resumed agent isn't reported on its old activity.
+- **An idle project manager wakes the PM.** A project manager the plugin saw go from running to `idle`, with no final report (a `## Proof` section, `CHECKPOINT:` or `BLOCKED:`) since it last resumed, no waiting tag and no member at work, gets one `[ankur] idle project manager:` prompt after 15 minutes, naming the successor to start. The report and tag on disk count too, so after a reload nothing is prompted for until the plugin sees a project manager stop again.
+- **A usage-limit reset wakes the PM.** When the five-hour window hits its limit while a project manager is still at work, the plugin sets a timer for two minutes after the reset and then sends a `[ankur] limit reset:` prompt, once per reset. If the main session was already active after the reset, the prompt is skipped.
+- **Decision times are real.** A Write or Edit of this session's `decisions.md` is refused, not rewritten (a rewritten tool input gets no verdict in auto mode). The refusal names the one way to log: `node <plugin>/bin/factory.ts decide --dir <ankur dir> --line "<decision> | <reason> | <recommendation> | <outcome>"`, which appends the line with the clock's local time as `HH:MM`.
+- **Events are logged** to `<ankur folder>/events.jsonl`, one JSON line per event, each with `v`, `ts`, `event`, `crew` and `agent`. A `spawn` line records each Agent call the hooks let through from inside a crew or that starts a project manager, with its `type`, `model`, `effort` and the agent that started it. A `stall` line records each stall and idle-project-manager wake, a `tag` line each `QUESTION:`, `BLOCKED:` or `PROPOSAL:` a project manager sends `main`, and a `report` line each final report saved, with its opening marker, such as `VERDICT: PASS`. No line holds message, prompt or report text. At 3 MiB the log moves to `events.<n>.jsonl`, as the message log does. A failed append is logged and changes nothing else. From 0.8.0 a `fetch` line records each web call (see the next section). [docs/events.schema.json](docs/events.schema.json) is its schema.
+- **`/ankur`** shows each crew's stage, verdict and status from `plan.json` when there is one, then lists the crews: each project manager's name and status, its live members by model, when it last reported and was last active, any stalled agents, the verdict in its highest-numbered QC file, and its report folder. A project manager whose last message to `main`, or last captured report, starts with `QUESTION:`, `BLOCKED:` or `PROPOSAL:` shows as `waiting on you:`, `blocked:` or `proposal:` with the first line, until the PM messages it. A project manager that ended its turn while its members still work shows as `waiting on members`. Under each crew, one line per member gives its status, how long it has run, its model family and its last activity.
+
+Every hook fails open. If Ankur's own code throws, the call goes on as if the plugin were not installed, and the error goes to the debug log.
+
+## What the fetch log records
+
+From 0.8.0 every `WebFetch` and `WebSearch` call in the session passes one function, `fetchVerdict` in `hooks/register.ts`, whoever makes it: a crew member, a project manager, an Ankur agent outside every crew, or the main session. Unlike the crew hooks above, this one covers callers outside every crew too. Today it allows every call. A guardrail added later (an allowlist, a deny list, a prompt to you, a size or count cap) changes that function and its tests alone; no prompt names a source, a domain or a limit.
+
+Each call appends one `fetch` line to `<ankur folder>/events.jsonl`, but only when the Ankur folder resolves and holds `plan.json`. A failed append is logged and never blocks the call. The line has these fields:
+
+| Field | Value |
+| --- | --- |
+| `v`, `ts` | As on every event line. |
+| `event` | `fetch`. |
+| `crew` | The caller's crew slug, or `main` for a caller outside every crew (a `ankur:*` agent the PM started, or the main session). |
+| `agent` | The agent's name, or `main` for the main session. |
+| `tool` | `WebFetch` or `WebSearch`. |
+| `url` | `WebFetch` only. The URL with its scheme, host, port and path kept, userinfo removed, each query value emptied (keys kept) and the fragment dropped. A `url` that isn't a string, or doesn't parse, is logged as `""`. |
+| `query` | `WebSearch` only. The first 200 characters of the query. A query that isn't a string is logged as `""`. |
+
+So a fetch of `example.com` on port `8443` at path `/docs/api`, with a user name and password before the host, the query values `version=2` and `lang=en`, and the fragment `#auth`, is logged as `https://example.com:8443/docs/api?version=&lang=`. No line holds a fetched page. The `fetch` branch of [docs/events.schema.json](docs/events.schema.json) is the schema.
+
+## Review a run
+
+Run `/ankur:retro` after a run, optionally naming an Ankur folder. The default is the session's, `<repo>/.git/ankur/<session id>/`.
+
+**At run end.** The PM always runs the scripted steps, which start no agent: `retro/cli.ts problems` counts where the run's time and tokens went from the structured run files, and `retro/cli.ts recur` prints a `RECURRED:` line for each problem a merged fix was meant to end. The PM then decides whether to start the retro judges and the triage. It starts them when a `RECURRED:` line shows, a crew was blocked or spent its rework allowance, cost or wall-clock is clearly above the previous run, or a problem type is new to `retro/catalog.json`. It logs the call and its evidence in `decisions.md` whether it runs or skips them. The fix goal never starts at run end. It waits for `/ankur:retro` or your yes, and the report lists the fix-now findings. A finding about product code is shown to you as a risk, never as a goal and never as a fix. Set `runEndRetro` to `off` in `.claude/ankur.json` to keep only the scripted steps at run end; `/ankur:retro` runs the full retro either way.
+
+**On demand.** The `ankur:retro` skill runs `node retro/cli.ts counts <ankur dir>` (Node standard library only). The script reads `decisions.md`, `events*.jsonl`, `messages*.jsonl`, the report files and `plan.json`, writes nothing, and prints one JSON object of counts for each `## Run` heading:
+
+- decisions, by time (`clock`, `dateOnly`, `notRecorded`) and by outcome (`followed`, `overruled`, `other`), and free-form lines;
+- checking engineer `RECOMMEND` lines, by `answer`, `defer` and `pass`;
+- project-manager-to-project-manager messages;
+- from `events.jsonl`, spawns by model and effort, stalls, escalations (`QUESTION`, `BLOCKED`, `PROPOSAL`) and QC engineer verdicts.
+
+For the whole folder it also counts the QC files by verdict, and the plan's crews, stages and estimated agents. From 0.6.0 its `leftovers` key lists, with a `count` of agents, the `worktree-agent-<id>` branches and `.claude/worktrees/agent-<id>` folders still present for agents the event log shows were spawned; it is `"not recorded"` when there is no event log, the folder isn't `<git common dir>/ankur/<session>`, or git can't be read. From 0.9.0 its `leftoverDetails` key gives, per leftover, the facts worktrees' cleanup sweep checks (`head`, `dirty`, `inMain`) and, in `skip`, the reason the sweep would keep it; it is `"not recorded"` whenever `leftovers` is, and when `git worktree list --porcelain` fails. With no such folder it exits 2 with `retro: NO_ANKUR_DIR: <path>`.
+
+From 0.8.0 each run's counts also cover how the project grew. Each reads `"not recorded"` when its source is absent, never a 0 that stands in for missing data; a 0 means the source was read and nothing matched:
+
+- `fetches`: the run's `fetch` lines, as `{total, perAgent: {<agent>: n}}`. `"not recorded"` when the folder has no event log, when the run has no parsed start time (so it can't be placed in the log's time windows), or when the log holds no `fetch` lines at all.
+- `refusals`: the run's `refusal` lines, as `{total, bySource, byTool, byCategory, byProgram, byShape}`: who refused (ankur, Claude Code's worktree guard, the auto-mode classifier, a permission rule, another plugin), on which tool, for what reason, and for Bash, the command's first word and the kinds of part it held, never its text. `"not recorded"` on the same terms as `fetches`, with `refusal` lines in place of `fetch` lines.
+- `extendPasses`: commits from the run's start up to the next run's start whose subject starts `docs(arch): extend ` or is `docs(arch): adopt learned items` or `docs(arch): reconcile learned items`. It is 0 when git history can be read and no subject matches. `"not recorded"` when the run has no parsed start time, or git can't be read: the folder isn't `<repo>/.git/ankur/<session>`, or `git log` fails.
+- `defaultDecisions`: `.md` files in the ADR directory that hold the line `Decided by: default`, the forks no client has reviewed yet. `"not recorded"` when the folder isn't `<repo>/.git/ankur/<session>` or git can't confirm it, `.claude/ankur.json` can't be read, its `adr` key is missing, empty or not a string, or the directory it names doesn't exist or can't be listed.
+- `openClientActions`: `- [ ] ` lines under a `Client actions` heading in the architecture doc; `- [x] ` lines are done and don't count. `"not recorded"` when the folder isn't `<repo>/.git/ankur/<session>` or git can't confirm it, `.claude/ankur.json` can't be read, its `architecture` key is missing, empty or not a string, or it doesn't name an existing file.
+
+Retro's JSON is internal to the skill and may change between versions; read the skill's summary, not the field layout.
+
+The skill shows you the counts and proposes changes to `.claude/ankur.json` keys and prompt-override files, and writes only what you approve. Before it proposes anything, it writes one `CAUSE: <anomaly> | <evidence> | <fix location>` line for each leftover, QC engineer fail, stall, overrule or spent allowance, from git, the disk, `decisions.md`, the QC files' verdict and finding lines, and the plugin's own files; a cause in the Ankur plugin itself is reported to you, never written. It hands repeated work it finds to `kit:revise` when that skill is listed, and says so when it isn't.
+
+A log from before 0.4.0 has no `## Run` headings and no `events.jsonl`, so retro treats the folder as one run and reports the spawns, stalls, escalations and QC rulings as `"not recorded"`, not zero.
+
+## Limitations
+
+- The slash command is `/ankur`, not `/ankur:status`. A plugin registers its command under a bare name, and `/status` is built in.
+- A member is matched to its crew through the agents' parent ids. An agent that ended before the plugin loaded (a reload mid-session) resolves to no crew, and a message to it from a crew agent is refused.
+- A project manager restarted with the same name shares the old project manager's report folder. Start it as `<slug>-2` instead; the skill does.
+- No prompt in 0.2.0 (the skill or any of the five agents it had) has yet run as a live agent in a real run. 0.3.0 adds the design engineer, the sixth agent. The hooks are covered by tests against a mock engine.
+- What status a project manager shows after it ends its turn while its members still run hasn't been observed in a live session. `waiting on members` depends on it.
+- Capturing a report from the hand-back tool, through a `tool.call` hook on `SubagentHandback`, is covered by tests but not yet verified in a live session.
+- The limit-reset wake rests on three things a probe confirmed: `$.clock` timers run from `session.start`, a hot reload cancels them (so the wake is re-armed from plugin state), and `$.prompt.submit` wakes an idle session. Nobody has yet seen the wake fire after a real usage-limit stop.
+- Where an organization manages Claude Code, `SubagentStop` hooks run only in plugins it lists. There, reports are captured only from the hand-back tool. The project manager stop gate is a `SubagentStop` hook too, so it shouldn't run there either; that is inferred from the code, not seen.
+- Since 0.16.0, `agents/project-manager.md` tells a project manager to load `subagent-limits:split-work`, a skill from the [subagent-limits](https://github.com/AbhiramDwivedi/claude-ops/tree/main/plugins/subagent-limits) plugin, before it splits work, with no "when it is available". An ankur loaded by `--plugin-dir` without subagent-limits hasn't been tested.
+- The plan gates trust the PM's `status` field. A PM that marks a crew `merged` too early lets the next stage start on code that isn't there. The gates guard against forgetting, not against lying; the QC-gated merge is still the real control.
+- The 0.3.0 prompts have run live: `/ankur:init` 0.3.0 wrote this repo's architecture doc, and the run building 0.4.0 used the design engineer in plan mode, the plan flow and the plan gates.
+- The 0.4.0 `/ankur:init` has run headless in two scratch repos, one with a valid kit manifest and one without kit. It took both paths as designed and reported a client's bad value by path without changing it. In those runs, `claude -p` refused the Write of its validation candidate under `<ankur dir>/scratch/` because `.git/` is a protected path, even with Write allowed through `--allowedTools`. Init stopped before its final write and left `.claude/ankur.json` unchanged. An earlier run with the client's own settings loaded wrote the approved keys, but it had an older Ankur loaded too, so it shows only that the write path works when permissions allow it. Nobody has yet checked an interactive run. The retro skill and the event log haven't run in a live run yet.
+- Report files are named by crew. A later run in the same session folder that reuses a crew name leaves the earlier run's QC files beside the new ones. From 0.5.0 the merge gate and the spent-allowance count read only files modified at or after `approvedAt`, so stale files don't count. Per-run report folders aren't decided.
+- The gate's two-block bound relies on Claude Code sending `stop_hook_active` on the stop after a block, which hasn't been seen live; Claude Code lets a stop through itself after 8 consecutive blocks.
+
+## Testing
+
+```bash
+claude plugin validate .
+claude plugin test .
+```
+
+*Drafted with AI assistance and reviewed by the author.*

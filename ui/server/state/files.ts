@@ -1,0 +1,338 @@
+// The file readers of ui-state: plan.json, plan.md, decisions.md, reports/,
+// <repo>/.claude/ankur.json, the architecture doc and the ADR dir. Read-only. Each reader caches by the file's
+// size, mtime, ctime and inode, so a poll that finds nothing changed reads nothing.
+// Node built-ins only; erasable TypeScript. Nothing here imports from the plugin: the three rules below are
+// re-implemented and name their source.
+import fs from 'node:fs'
+import path from 'node:path'
+import { resolveConfigPath } from './names.ts'
+import type { Goal, Plan, PlanCrew, Qc } from './reduce.ts'
+
+// a name safe as one path segment. Source: hooks/register.ts:117 (safeName).
+export function safeName(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9._-]+|\.{2,}/g, '-').replace(/-{2,}/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 100)
+  return cleaned === '' ? 'agent' : cleaned
+}
+
+// a crew's QC report files: <crew>-qc.md and <crew>-qc-<n>.md. Source: hooks/register.ts:772 (isQcFile).
+export function isQcFile(crew: string, file: string): boolean {
+  const prefix = `${safeName(crew)}-qc`
+  if (!file.startsWith(prefix) || !file.endsWith('.md')) return false
+  const middle = file.slice(prefix.length, -'.md'.length)
+  return middle === '' || /^-\d+$/.test(middle)
+}
+
+// the k of <crew>-qc-<k>.md; the bare <crew>-qc.md is 1. Source: hooks/register.ts:510 (qcK).
+const qcK = (name: string): number => Number(/-qc-(\d+)\.md$/.exec(name)?.[1] ?? 1)
+
+// The verdict of a report: its first non-empty line is `VERDICT: PASS` or `VERDICT: FAIL`, else null. The template
+// line `VERDICT: PASS | ...` is not a verdict. Source: hooks/register.ts:211 (markerOf), cut to PASS and FAIL.
+export function verdictOf(text: string): 'PASS' | 'FAIL' | null {
+  const first = text.split('\n').find((l) => l.trim() !== '')?.trimStart() ?? ''
+  if (/^VERDICT: (PASS|FAIL) \| /.test(first)) return null
+  if (first.startsWith('VERDICT: PASS')) return 'PASS'
+  if (first.startsWith('VERDICT: FAIL')) return 'FAIL'
+  return null
+}
+
+export interface Decision {
+  n: number
+  run: string | null
+  text: string
+}
+export interface AdrLink {
+  kind: 'amends' | 'supersedes' | 'superseded-by'
+  n: number
+}
+export interface Adr {
+  file: string
+  title: string
+  status: string | null
+  number: number | null
+  date: string | null
+  decidedBy: string | null
+  links: AdrLink[]
+  summary: string | null
+}
+export interface Config {
+  architecture: string | null // the .claude/ankur.json key, as written
+  adr: string | null
+  complete: boolean // the file is there and has both keys
+}
+
+function sigOf(p: string): string | null {
+  try {
+    const s = fs.statSync(p)
+    return s.isFile() ? `${s.size}:${s.mtimeMs}:${s.ctimeMs}:${s.ino}` : null
+  } catch {
+    return null
+  }
+}
+
+const isObject = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v)
+
+export function parseDecisions(text: string): Decision[] {
+  const out: Decision[] = []
+  let run: string | null = null
+  let open = false
+  text.split('\n').forEach((raw, i) => {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+    if (line.startsWith('## Run ')) {
+      run = line.slice('## Run '.length)
+      open = false
+    } else if (line.startsWith('- ')) {
+      out.push({ n: i + 1, run, text: line.slice(2) })
+      open = true
+    } else if (open && line.startsWith('  ')) {
+      out[out.length - 1].text += `\n${line.slice(2)}`
+    } else {
+      open = false
+    }
+  })
+  return out
+}
+
+function parsePlan(text: string): Plan | undefined {
+  let v: unknown
+  try {
+    v = JSON.parse(text)
+  } catch {
+    return undefined
+  }
+  if (!isObject(v)) return undefined
+  const crews: PlanCrew[] = []
+  if (Array.isArray(v.crews)) {
+    for (const c of v.crews) {
+      if (!isObject(c) || typeof c.slug !== 'string' || c.slug === '') continue
+      const status = c.status
+      crews.push({
+        slug: c.slug,
+        stage: Number.isInteger(c.stage) ? (c.stage as number) : null,
+        verdict: typeof c.verdict === 'string' ? c.verdict : null,
+        status: status === 'planned' || status === 'running' || status === 'merged' || status === 'dropped' ? status : null,
+        goal: typeof c.goal === 'string' ? c.goal : null,
+        owns: Array.isArray(c.owns) ? c.owns.filter((o): o is string => typeof o === 'string') : [],
+        estAgents: Number.isInteger(c.estAgents) && (c.estAgents as number) >= 1 ? (c.estAgents as number) : null,
+      })
+    }
+  }
+  // plan.json's goals entries in file order, each cut to {id, goal, approval, approvedAt}; an entry with no id is left out
+  const goals: Goal[] = []
+  if (Array.isArray(v.goals)) {
+    for (const g of v.goals) {
+      if (!isObject(g) || typeof g.id !== 'string' || g.id === '') continue
+      goals.push({
+        id: g.id,
+        goal: typeof g.goal === 'string' ? g.goal : null,
+        approval: g.approval === 'auto' || g.approval === 'client' ? g.approval : null,
+        approvedAt: typeof g.approvedAt === 'string' ? g.approvedAt : null,
+      })
+    }
+  }
+  return {
+    goal: typeof v.goal === 'string' ? v.goal : null,
+    version: Number.isInteger(v.version) ? (v.version as number) : null,
+    approval: v.approval === 'auto' || v.approval === 'client' ? v.approval : null,
+    approvedAt: typeof v.approvedAt === 'string' ? v.approvedAt : null,
+    crews,
+    goals,
+  }
+}
+
+/** Markdown to plain text: links to their text, emphasis, code ticks and list or quote marks dropped. */
+function plain(md: string): string {
+  return md
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/`([^`]*)`/g, '$1')
+    .replace(/(\*\*|__|\*)/g, '')
+    .replace(/^\s*(?:[-*+]|\d+[.)]|>)\s+/gm, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/** About 220 characters, ending at a sentence end when one falls in the last stretch of that, else at a word. */
+function clip(text: string, max = 220): string {
+  if (text.length <= max) return text
+  const head = text.slice(0, max)
+  const stop = Math.max(head.lastIndexOf('. '), head.lastIndexOf('! '), head.lastIndexOf('? '))
+  if (stop >= 60) return head.slice(0, stop + 1)
+  const sp = head.lastIndexOf(' ')
+  return `${(sp > 60 ? head.slice(0, sp) : head).replace(/[,;:\s]+$/, '')}…`
+}
+
+/** The body of the first `## <name>` section, to the next heading. */
+function section(lines: string[], name: string): string[] | null {
+  const i = lines.findIndex((l) => new RegExp(`^##\\s+${name}\\s*$`, 'i').test(l))
+  if (i < 0) return null
+  const rest = lines.slice(i + 1)
+  const end = rest.findIndex((l) => /^#{1,6}\s/.test(l))
+  return end < 0 ? rest : rest.slice(0, end)
+}
+
+function firstParagraph(lines: string[]): string {
+  const out: string[] = []
+  for (const l of lines) {
+    if (l.trim() === '') {
+      if (out.length > 0) break
+      continue
+    }
+    if (/^#{1,6}\s/.test(l) || /^(Status|Decided by|Amends|Supersedes|Date):/i.test(l)) {
+      if (out.length > 0) break
+      continue
+    }
+    out.push(l)
+  }
+  return plain(out.join(' '))
+}
+
+function nums(text: string): number[] {
+  return [...text.matchAll(/ADR-(\d+)|\b(\d{4})\b/g)].map((m) => Number(m[1] ?? m[2]))
+}
+
+function parseAdr(file: string, text: string): Adr {
+  const lines = text.replace(/\r/g, '').split('\n')
+  const h = lines.find((l) => l.startsWith('# '))
+  const s = lines.find((l) => l.startsWith('Status: '))
+  const status = s === undefined ? null : s.slice('Status: '.length).trimEnd()
+  const title = h === undefined ? file : h.slice(2).trimEnd()
+  const num = /ADR-(\d+)/.exec(title)?.[1] ?? /^(\d+)/.exec(file)?.[1]
+  const dm = status === null ? null : /\b\d{4}-\d\d-\d\d\b/.exec(status)
+  const by = lines.find((l) => /^Decided by:/i.test(l))
+  const decidedRaw = by === undefined ? '' : plain(by.replace(/^Decided by:/i, ''))
+  const decidedBy = decidedRaw === '' ? null : clip(decidedRaw, 120)
+  const links: AdrLink[] = []
+  const add = (kind: AdrLink['kind'], from: string): void => {
+    for (const n of nums(from)) if (!links.some((x) => x.kind === kind && x.n === n)) links.push({ kind, n })
+  }
+  for (const l of lines) {
+    const m = /^(Amends|Supersedes):\s*(.*)$/i.exec(l)
+    if (m) add(m[1]!.toLowerCase() as 'amends' | 'supersedes', m[2]!)
+  }
+  const sb = status === null ? null : /superseded by\s+(.*)/i.exec(status)
+  if (sb) add('superseded-by', sb[1]!.replace(/\b\d{4}-\d\d-\d\d\b/g, ''))
+  const body = section(lines, 'Decision') ?? section(lines, 'Context')
+  const raw = body !== null ? plain(body.join('\n')) : firstParagraph(lines.slice(lines.findIndex((l) => l.startsWith('# ')) + 1))
+  return {
+    file,
+    title,
+    status,
+    number: num === undefined ? null : Number(num),
+    date: dm === null ? null : dm[0],
+    decidedBy,
+    links,
+    summary: raw === '' ? null : clip(raw),
+  }
+}
+
+export interface FileReaders {
+  plan(ankurDir: string): Plan | null
+  planMd(ankurDir: string): string | null
+  decisions(ankurDir: string): Decision[]
+  config(): Config
+  architecture(rel: string): { path: string; markdown: string } | null
+  adrs(rel: string): Adr[]
+  qc(ankurDir: string, slug: string): Qc | null
+}
+
+export function createFileReaders(repo: string): FileReaders {
+  const cache = new Map<string, { sig: string; value: unknown }>()
+
+  // The parsed file, from the cache while its signature holds. A parse that fails (a half-written file) keeps the
+  // last good value until the file changes again.
+  function cached<T>(file: string, parse: (text: string) => T | undefined): T | null {
+    const sig = sigOf(file)
+    if (sig === null) {
+      cache.delete(file)
+      return null
+    }
+    const hit = cache.get(file)
+    if (hit !== undefined && hit.sig === sig) return hit.value as T | null
+    let text: string
+    try {
+      text = fs.readFileSync(file, 'utf8')
+    } catch {
+      return (hit?.value as T | undefined) ?? null
+    }
+    const value = parse(text)
+    const kept = value === undefined ? ((hit?.value as T | undefined) ?? null) : value
+    cache.set(file, { sig, value: kept })
+    return kept
+  }
+
+  function inRepo(rel: string): string | null {
+    const abs = path.resolve(repo, rel)
+    const r = path.relative(repo, abs)
+    return r === '' || r.startsWith('..') || path.isAbsolute(r) ? null : abs
+  }
+
+  return {
+    plan: (ankurDir) => cached(path.join(ankurDir, 'plan.json'), parsePlan),
+    planMd: (ankurDir) => cached(path.join(ankurDir, 'plan.md'), (t) => t),
+    decisions: (ankurDir) => cached(path.join(ankurDir, 'decisions.md'), parseDecisions) ?? [],
+    config() {
+      const cfg = cached(resolveConfigPath(repo), (t): Config | undefined => {
+        try {
+          const v: unknown = JSON.parse(t)
+          if (!isObject(v)) return undefined
+          const architecture = typeof v.architecture === 'string' && v.architecture !== '' ? v.architecture : null
+          const adr = typeof v.adr === 'string' && v.adr !== '' ? v.adr : null
+          return { architecture, adr, complete: architecture !== null && adr !== null }
+        } catch {
+          return undefined
+        }
+      })
+      return cfg ?? { architecture: null, adr: null, complete: false }
+    },
+    architecture(rel) {
+      const abs = inRepo(rel)
+      if (abs === null) return null
+      const markdown = cached(abs, (t) => t)
+      return markdown === null ? null : { path: rel, markdown }
+    },
+    adrs(rel) {
+      const dir = inRepo(rel)
+      if (dir === null) return []
+      let names: string[]
+      try {
+        names = fs.readdirSync(dir).filter((n) => n.endsWith('.md'))
+      } catch {
+        return []
+      }
+      names.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+      const out: Adr[] = []
+      for (const n of names) {
+        const adr = cached(path.join(dir, n), (t) => parseAdr(n, t))
+        if (adr !== null) out.push(adr)
+      }
+      return out
+    },
+    qc(ankurDir, slug) {
+      const rel = `reports/${safeName(slug)}`
+      const dir = path.join(ankurDir, rel)
+      let names: string[]
+      try {
+        names = fs.readdirSync(dir)
+      } catch {
+        return null
+      }
+      // the newest QC file by mtime; on a tie the higher k (hooks/register.ts:513, latestQc, without the run filter)
+      let best: { name: string; mtimeMs: number } | null = null
+      for (const name of names) {
+        if (!isQcFile(slug, name)) continue
+        let mtimeMs: number
+        try {
+          const st = fs.statSync(path.join(dir, name))
+          if (!st.isFile()) continue
+          mtimeMs = st.mtimeMs
+        } catch {
+          continue
+        }
+        if (best === null || mtimeMs > best.mtimeMs || (mtimeMs === best.mtimeMs && qcK(name) > qcK(best.name))) best = { name, mtimeMs }
+      }
+      if (best === null) return null
+      const verdict = cached(path.join(dir, best.name), (t) => ({ v: verdictOf(t) }))
+      return { verdict: verdict?.v ?? null, file: `${rel}/${best.name}` }
+    },
+  }
+}

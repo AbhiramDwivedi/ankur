@@ -1,0 +1,362 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ankur plan.json, versions 1 to 4",
+  "description": "<ankur dir>/plan.json: the seam between the design engineer, the PM and the hooks. The design engineer drafts it in plan mode; the PM owns it after that; the hooks treat it as read-only. See adr/0001-design-phase.md, section 8.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "goal",
+    "architecture",
+    "approval",
+    "approvedAt",
+    "maxParallelCrews",
+    "crews"
+  ],
+  "properties": {
+    "version": {
+      "description": "Plan file format version. It goes up when a field is renamed, retyped or removed, or when an added field is required or changes what a reader must refuse. An optional field that a reader may treat as absent keeps the version: a crew's needs came in at version 3 this way (adr/0012-self-improving-retro.md). Readers gate on version >= 2, never === 2, so a later version inherits every v2 rule. Version 2 adds reworkAllowance. Version 3 adds the top-level goals array and a crew's goal. Version 4 adds a crew's process, qc and red, and keeps every version 2 and 3 rule (adr/0031-right-size-process.md).",
+      "enum": [1, 2, 3, 4]
+    },
+    "goal": {
+      "description": "The run's goal, as the client gave it.",
+      "type": "string",
+      "minLength": 1
+    },
+    "architecture": {
+      "description": "Repo-relative path of the architecture doc, as recorded in <repo>/.claude/ankur.json.",
+      "type": "string",
+      "minLength": 1
+    },
+    "approval": {
+      "description": "Set once, at plan time, by the design engineer's draft, and checked by the PM: \"client\" when a client trigger applies, when the plan carries a long-term cost, or when the brief says so; otherwise \"auto\". A stage-0 crew or a design crew alone does not make it \"client\". Mid-run design slices never change it.",
+      "enum": ["auto", "client"]
+    },
+    "goalCheck": {
+      "description": "Optional, any version. A command that checks the run's first goal as a whole (a whole-tree test, a zero-match search). The program manager runs it after the goal's last merge: in single mode on the integration branch before the integration QC, in sequential mode on the target before any push. A failure starts a fix crew. Absent means the goal has no goal-wide check. See adr/0044-split-by-need.md.",
+      "type": "string",
+      "minLength": 1
+    },
+    "approvedAt": {
+      "description": "An RFC 3339 date-time with a time-zone offset (JSON Schema format date-time), for example 2026-10-26T14:03:00+01:00 or 2026-10-26T13:03:00Z. A date-time with no offset is invalid. The design engineer's draft sets it: an \"auto\" draft carries the time the design engineer wrote the plan, which the PM overwrites with the time it logged the plan; an \"client\" draft carries null, which the PM replaces with the time the client approved. The allOf rule requires a string when approval is \"auto\". Null only while a run waits for the client; while approval is \"client\" and this is null, the run-level approval gate refuses every project manager in the plan.",
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "agentCap": {
+      "description": "Deprecated and ignored since ankur 0.7.0: nothing requires or enforces it. Still accepted so older plans validate. The total of the crews' estAgents isn't stored.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "target": {
+      "description": "Optional. The branch this run's crews land on. When set it wins over the target in <repo>/.claude/ankur.json for every factory command that knows the run's ankur dir (settings --dir, start, finish, land and the merge commands). It must be a valid git branch name; plan-check refuses one that is not. Absent, the ankur.json target stands. See adr/0053-run-target.md.",
+      "type": "string",
+      "minLength": 1
+    },
+    "reworkAllowance": {
+      "description": "How many fresh QCs a crew may start after QC FAILs in this run. Required in version 2, forbidden in version 1. The design engineer copies it from reworkAllowance in <repo>/.claude/ankur.json, or writes 1 when the key is absent. The same for every crew. See adr/0004-scope-repair-and-head-gates.md, section 5.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "goals": {
+      "description": "Version 3 only. The goals added after the run's approval, in the order they were added. The run's first goal stays in the top-level goal, approval and approvedAt; its id is the reserved word \"run\". See adr/0010-mid-run-intake.md, section 1.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "goal", "addedAt", "approval", "approvedAt"],
+        "properties": {
+          "id": {
+            "description": "The goal's handle in /ankur, in crews' goal field and in decisions.md tags. The crew-slug pattern, and never \"run\", which names the run's first goal.",
+            "type": "string",
+            "maxLength": 100,
+            "pattern": "^(?!.*-[0-9]+$)[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "not": { "const": "run" }
+          },
+          "goal": {
+            "description": "The goal as the client gave it.",
+            "type": "string",
+            "minLength": 1
+          },
+          "addedAt": {
+            "description": "When the hook appended the goal: an RFC 3339 UTC date-time from its clock, ending in Z.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "approval": {
+            "description": "\"client\" only when a client trigger in run/SKILL.md section 4 applies to the goal, otherwise \"auto\". A design crew alone does not make it \"client\".",
+            "enum": ["auto", "client"]
+          },
+          "approvedAt": {
+            "description": "Null until the PM logs the goal (auto) or the client approves it (client). While approval is \"client\" and this is null, the hooks hold the goal's crews.",
+            "type": ["string", "null"],
+            "format": "date-time"
+          },
+          "goalCheck": {
+            "description": "Optional. The goal's goal-wide check, as the top-level goalCheck is for the run's first goal (adr/0044-split-by-need.md).",
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "allOf": [
+          {
+            "$comment": "Mirrors the top-level rule: an auto goal never waits, so an auto goal on disk fails the schema until the PM logs it.",
+            "if": {
+              "properties": { "approval": { "const": "auto" } },
+              "required": ["approval"]
+            },
+            "then": {
+              "properties": { "approvedAt": { "type": "string" } }
+            }
+          }
+        ]
+      }
+    },
+    "maxParallelCrews": {
+      "description": "The most crews that may be running at once; extra crews in a stage queue. Default 4, from maxParallelCrews in <repo>/.claude/ankur.json.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "crews": {
+      "description": "One entry per crew. Within a stage, the order of this array is the queue order: crews beyond maxParallelCrews start in this order as running ones merge. The agent total is the sum of estAgents; it isn't stored.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/crew" }
+    }
+  },
+  "allOf": [
+    {
+      "$comment": "versions 1 to 3 forbid a crew's process, qc and red and its workType.",
+      "if": {
+        "properties": { "version": { "enum": [1, 2, 3] } },
+        "required": ["version"]
+      },
+      "then": {
+        "properties": {
+          "crews": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "not": {
+                "anyOf": [{ "required": ["process"] }, { "required": ["qc"] }, { "required": ["red"] }, { "required": ["workType"] }]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "versions 2, 3 and 4 require reworkAllowance.",
+      "if": {
+        "properties": { "version": { "enum": [2, 3, 4] } },
+        "required": ["version"]
+      },
+      "then": { "required": ["reworkAllowance"] }
+    },
+    {
+      "$comment": "versions 1 and 2 forbid top-level goals and a crew's goal. The schema can't check that a crew's goal names a goals entry; the hooks refuse a crew whose goal matches none.",
+      "if": {
+        "properties": { "version": { "enum": [1, 2] } },
+        "required": ["version"]
+      },
+      "then": {
+        "not": { "required": ["goals"] },
+        "properties": {
+          "crews": {
+            "type": "array",
+            "items": { "type": "object", "not": { "type": "object", "required": ["goal"] } }
+          }
+        }
+      }
+    },
+    {
+      "$comment": "version 1 forbids reworkAllowance.",
+      "if": {
+        "properties": { "version": { "const": 1 } },
+        "required": ["version"]
+      },
+      "then": { "not": { "required": ["reworkAllowance"] } }
+    },
+    {
+      "$comment": "approvedAt is null only while a run waits for the client, and an auto run never waits.",
+      "if": {
+        "properties": { "approval": { "const": "auto" } },
+        "required": ["approval"]
+      },
+      "then": {
+        "properties": { "approvedAt": { "type": "string" } }
+      }
+    }
+  ],
+  "$defs": {
+    "crew": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slug",
+        "stage",
+        "verdict",
+        "modules",
+        "owns",
+        "acceptanceTest",
+        "acceptanceTestProved",
+        "estAgents",
+        "status"
+      ],
+      "properties": {
+        "slug": {
+          "description": "The crew's name, and the name of its ankur:project-manager: lowercase letters and digits in words joined by single hyphens, never ending in -<digits>. The -<digits> ending is reserved because a successor project manager is named <slug>-<n> and the hooks gate a successor as its base slug. safeName in hooks/register.ts leaves such a name of up to 100 characters unchanged, so report folders match the slug.",
+          "type": "string",
+          "maxLength": 100,
+          "pattern": "^(?!.*-[0-9]+$)[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "goal": {
+          "description": "Version 3 only, optional. The id of the plan goal the crew serves. Absent or \"run\" means the run's first goal; \"run\" needs no goals entry. The schema can't check that another value names a goals entry; the hooks refuse the crew when it doesn't.",
+          "type": "string",
+          "pattern": "^(?!.*-[0-9]+$)[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "stage": {
+          "description": "The stage the crew runs in. Stages are numbered per goal: an added goal's first stage is its stage 0. A goal's first stage may hold any crew, and each stage merges before the next starts. A later stage exists only when one of its crews needs an earlier crew's merged work, which plan.md states in a `Why stage <n>:` line; plan-check warns on a later stage without one (adr/0044-split-by-need.md). A mid-run design slice goes to the earliest stage that hasn't started yet, and the crews that depend on it move one stage later.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "verdict": {
+          "description": "What kind of crew this is. \"design\": settles an open design question, writing its ADRs and contract tests, before the crews that build on it (adr/0044-split-by-need.md). \"change\": a build crew whose module's design changes; when the client or an accepted ADR already decided that design, the change crew writes the ADR itself and needs no design crew. \"extend\": a build crew working inside the existing design.",
+          "enum": ["extend", "change", "design"]
+        },
+        "modules": {
+          "description": "Module names from the architecture doc's module map.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "owns": {
+          "description": "Path globs the crew may edit: its own edit scope. Two crews may own the same file; they merge one at a time.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "acceptanceTest": {
+          "description": "The command that proves the crew is done, runnable with the crew's own access.",
+          "type": "string",
+          "minLength": 1
+        },
+        "acceptanceTestProved": {
+          "description": "Whether the design engineer ran acceptanceTest once while planning.",
+          "type": "boolean"
+        },
+        "estAgents": {
+          "description": "Estimated agent count for the crew. The plan's agent total is the sum of these and isn't stored.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "clientApproval": {
+          "description": "Optional; mid-run design slices only. The PM sets \"pending\" when the slice must wait for the client (one of the client triggers applies), and \"approved\" when the client answers. While it is \"pending\", the crew-level approval gate refuses this crew's project manager. Absent on every other crew.",
+          "enum": ["pending", "approved"]
+        },
+        "status": {
+          "description": "Set by the PM as crews start and merge. The hooks only read it.",
+          "enum": ["planned", "running", "merged", "dropped"]
+        },
+        "ux": { "type": "boolean", "default": false },
+        "process": {
+          "description": "Optional, version 4 and above. How much process the crew gets: solo (one agent, no QC engineer, no red-then-green test), lean (one or two members; qc and red record the PM's proof choice) or full (today's crew). Absent means full. See adr/0031-right-size-process.md.",
+          "enum": ["solo", "lean", "full"],
+          "default": "full"
+        },
+        "qc": {
+          "description": "Version 4 and above, lean crews only, and required on them: true when the merge gate asks for a QC PASS. See adr/0031-right-size-process.md, section 1.",
+          "type": "boolean"
+        },
+        "red": {
+          "description": "Version 4 and above, lean crews only, and required on them: true when the merge gate asks for a red record. See adr/0031-right-size-process.md, section 1.",
+          "type": "boolean"
+        },
+        "workType": {
+          "description": "Optional, version 4 only. The kind of change the crew makes; it sets the minimum process and the proof the crew needs, and an unattended run requires it on every crew (contract-025 sections 2 and 5).",
+          "enum": ["feature", "bugfix", "migration", "dependency", "docs", "refactor"]
+        },
+        "needs": {
+          "description": "Optional, any version. What the crew needs from the host before it starts: a browser that launches, npm ci, gh auth, a system library. The plan design engineer lists them; a crew with none leaves the key out, and every reader treats a missing needs as an empty list. factory.ts doctor runs each probe after plan-check and before any crew starts. See adr/0012-self-improving-retro.md, Decision 9.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/need" }
+        }
+      },
+      "allOf": [
+        {
+          "$comment": "A lean crew records its proof choice: qc and red are both required on it and allowed on no other crew.",
+          "if": {
+            "properties": { "process": { "const": "lean" } },
+            "required": ["process"]
+          },
+          "then": { "required": ["qc", "red"] },
+          "else": { "not": { "anyOf": [{ "required": ["qc"] }, { "required": ["red"] }] } }
+        },
+        {
+          "$comment": "clientApproval is for mid-run design slices only.",
+          "if": { "required": ["clientApproval"] },
+          "then": {
+            "properties": { "verdict": { "const": "design" } }
+          }
+        }
+      ]
+    },
+    "need": {
+      "description": "One host need of a crew, with the probe factory.ts doctor runs for it and what the client's approval bundle gets from it (adr/0012-self-improving-retro.md, Decision 9).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "why", "probe"],
+      "properties": {
+        "id": {
+          "description": "The need's name, unique within the crew. doctor reports it as <crew slug>/<id>.",
+          "type": "string",
+          "maxLength": 100,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "why": {
+          "description": "One line: what in the crew's work needs it.",
+          "type": "string",
+          "minLength": 1
+        },
+        "probe": { "$ref": "#/$defs/probe" },
+        "allow": {
+          "description": "Permission allow rules the crew's commands need, in .claude/settings.json's permissions.allow form, such as Bash(npm --prefix ui ci:*). doctor puts every need's rules in the bundle, whether the probe passed or not.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "download": {
+          "description": "What the client allows to be downloaded when the probe fails, as the command that fetches it, such as npx playwright install chromium. doctor puts it in the bundle only when the probe fails.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "probe": {
+      "description": "How doctor tests a need on the host. command: bash -c <run> in the repo, which passes on exit 0 within 120 seconds. file: <path>, relative to the repo or absolute, which passes when it exists.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "run"],
+          "properties": {
+            "kind": { "const": "command" },
+            "run": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "path"],
+          "properties": {
+            "kind": { "const": "file" },
+            "path": { "type": "string", "minLength": 1 }
+          }
+        }
+      ]
+    }
+  }
+}

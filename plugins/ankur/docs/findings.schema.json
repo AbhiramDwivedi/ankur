@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ankur retro findings, version 1",
+  "description": "<ankur dir>/retro/findings.json: the findings the ankur:retro-judge agents returned and retro/cli.ts kept, plus the recurrences retro/cli.ts recur added. A judge returns each finding as one fenced block whose info string is finding, holding one JSON object under $defs.judged; retro/cli.ts findings checks each against the measures of retro/problems.json (every evidence measure must be counted with the counted value, and every cost number must equal a cited measure), gives the kept ones an id and appends them here. Lives inside .git with the ankur dir and is never committed. See adr/0051-generic-retro.md, Decisions 2, 4 and 5.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "findings"],
+  "properties": {
+    "v": {
+      "description": "File format version. A reader treats a file with any other v as absent.",
+      "const": 1
+    },
+    "findings": {
+      "description": "In the order retro/cli.ts kept them.",
+      "type": "array",
+      "items": {
+        "oneOf": [{ "$ref": "#/$defs/finding" }, { "$ref": "#/$defs/recurred" }]
+      }
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "description": "One counted measure the finding rests on: a key of retro/problems.json measures and its counted value.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measure", "value"],
+      "properties": {
+        "measure": { "type": "string", "minLength": 1 },
+        "value": { "type": "number" }
+      }
+    },
+    "cost": {
+      "description": "What the problem cost the run, counted and never guessed. Each number is at least 0 and equals the value of a measure the evidence cites; at least one is a number.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wallMs", "tokens", "usd"],
+      "properties": {
+        "wallMs": { "type": ["number", "null"], "minimum": 0 },
+        "tokens": { "type": ["number", "null"], "minimum": 0 },
+        "usd": { "type": ["number", "null"], "minimum": 0 }
+      }
+    },
+    "target": {
+      "description": "Where the fix belongs: the ankur plugin, a project's config (CLAUDE.md, .claude/), or a proposed goal for product code. retro/cli.ts sets kind to proposed-goal when the path is product code.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["plugin", "project-config", "proposed-goal"] },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "signature": {
+      "description": "JavaScript regular expressions (no flags) that would match the problem when it comes back. They become a catalog entry's patterns when the fix merges.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "judged": {
+      "description": "What a judge returns in one fenced finding block: the counting step's finding without its id, plus an optional signature.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["category", "title", "evidence", "cost", "fix", "target"],
+      "properties": {
+        "category": { "description": "Any non-empty string; a category outside the checklist is kept.", "type": "string", "minLength": 1 },
+        "title": { "description": "One line: what went wrong. A longer one is cut to 200 characters.", "type": "string", "minLength": 1, "maxLength": 200 },
+        "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/evidence" } },
+        "cost": { "$ref": "#/$defs/cost" },
+        "fix": { "description": "The change that stops it, in one or two sentences.", "type": "string", "minLength": 1 },
+        "target": { "$ref": "#/$defs/target" },
+        "signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "finding": {
+      "description": "A kept finding: the judged fields plus the id and judge retro/cli.ts adds.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "judge", "category", "title", "evidence", "cost", "fix", "target"],
+      "properties": {
+        "id": {
+          "description": "F-<n>, numbered from 1 in the order retro/cli.ts kept them in this ankur dir.",
+          "type": "string",
+          "pattern": "^F-[1-9][0-9]*$"
+        },
+        "judge": {
+          "description": "The label of the judge that returned it, as the PM passed it to retro/cli.ts findings.",
+          "type": "string",
+          "minLength": 1
+        },
+        "category": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "evidence": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/evidence" } },
+        "cost": { "$ref": "#/$defs/cost" },
+        "fix": { "type": "string", "minLength": 1 },
+        "target": { "$ref": "#/$defs/target" },
+        "signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "recurred": {
+      "description": "A recurrence retro/cli.ts recur added (R-31): a problem a merged fix was meant to end has come back. It keeps the catalog entry's shape, and its evidence is a file and line of the structured files the counting step reads, or of the extract's catalog hits.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "judge", "kind", "title", "evidence", "cost", "fix", "target", "signature", "recurs"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^F-[1-9][0-9]*$" },
+        "judge": { "const": "recur" },
+        "kind": { "description": "The catalog entry's kind.", "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "line"],
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "line": { "type": "integer", "minimum": 1 },
+              "quote": { "type": "string", "maxLength": 200 }
+            }
+          }
+        },
+        "cost": { "type": "string", "minLength": 1 },
+        "fix": { "type": "string", "minLength": 1 },
+        "target": { "type": "string", "minLength": 1 },
+        "signature": { "$ref": "#/$defs/signature" },
+        "recurs": { "$ref": "#/$defs/recurs" }
+      }
+    },
+    "recurs": {
+      "description": "The catalog entry whose fixedBy is not null and whose patterns hit this session.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog", "fixedBy"],
+      "properties": {
+        "catalog": { "description": "The catalog entry id.", "type": "string", "minLength": 1 },
+        "fixedBy": {
+          "description": "The entry's fixedBy, copied.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["finding", "date"],
+          "properties": {
+            "finding": { "type": "string", "minLength": 1 },
+            "date": { "type": "string", "format": "date" }
+          }
+        }
+      }
+    }
+  }
+}

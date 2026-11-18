@@ -1,0 +1,3251 @@
+import type { AgentInfo, ClassicResult, EngineInterface, Register, Timer, ToolCallResult } from 'claude-code'
+
+import { withAcceptanceTest } from '../bin/factory/goal-file.ts'
+import { NEW, OLD, roleOf, runDirName } from '../bin/names-pure.ts'
+import { amendPlan, goalLine, goalOf, RUN_GOAL } from './intake.ts'
+
+// the agent type every crew project manager runs as; only a project manager the main thread started heads a crew.
+export const PROJECT_MANAGER_TYPE = 'ankur:project-manager'
+// marks text this mod wrote
+export const MARK = '[ankur]'
+// the main session, as SendMessage addresses it
+export const MAIN = 'main'
+// how a project manager's question to the person begins
+export const QUESTION = 'QUESTION:'
+// past this size the message log is rolled to messages.<n>.jsonl, well under what one $.fs.read takes
+export const ROLL_BYTES = 3 * 1024 * 1024
+// longest a call or stop waits on one event-log append; the append itself still lands later
+export const EVENT_WAIT_MS = 2000
+// most event-log appends queued at once; past it new events are dropped, so a hung fs cannot grow memory without end.
+// Events come seconds apart, so 200 queued means the fs has been stuck for a long while.
+export const EVENT_BACKLOG_MAX = 200
+// idle this long while running = stalled
+export const STALL_MS = 15 * 60_000
+// the stall check timer period
+export const HEARTBEAT_MS = 60_000
+// wake this long after a usage window's resetsAt
+export const RESET_GRACE_MS = 2 * 60_000
+// most blocks per project manager per stop streak
+export const PROJECT_MANAGER_STOP_BLOCKS = 2
+export const STALLED = '[ankur] stalled:'
+export const IDLE_PROJECT_MANAGER = '[ankur] idle project manager:'
+export const LIMIT_RESET = '[ankur] limit reset:'
+// how a project manager says it cannot go on without help, proposes a change, or stops part-way
+export const BLOCKED = 'BLOCKED:'
+export const PROPOSAL = 'PROPOSAL:'
+export const CHECKPOINT = 'CHECKPOINT:'
+// a hand-back shorter than this, once trimmed, is not a report
+export const HANDBACK_MIN = 40
+// the note the main session gets at its start, naming this session's ankur folder
+export const DIR_NOTE = '[ankur] dir:'
+// statuses of an agent that is still working or can still be woken
+const LIVE = new Set(['pending', 'running', 'waiting', 'idle'])
+
+// What the mod needs of an agent. `name` is what SendMessage addresses it by (the engine's, which may carry a
+// suffix); `label` is the name it was spawned with, else its id, and names its crew and its report file.
+// `live`: in the latest agent list and still working; `seq`: when the mod first saw it, newest highest.
+export type Agent = Pick<AgentInfo, 'id' | 'type' | 'status' | 'description'> & {
+  name?: string
+  parentId?: string
+  label?: string
+  live?: boolean
+  seq?: number
+}
+
+// the crew an agent works in: the project manager at its top, the crew's name, and whether the agent is that project manager
+export type Crew = { crew: string; projectManagerId: string; projectManagerName: string; isProjectManager: boolean }
+
+export function isProjectManager(agent: Agent): boolean {
+  return isLeadType(agent.type) && agent.parentId === undefined
+}
+
+// the one name an agent's crew, report file and notes go by: its spawn name, else its id
+export function labelOf(agent: Agent): string {
+  if (agent.label !== undefined && agent.label !== '') return agent.label
+  return agent.name !== undefined && agent.name !== '' ? agent.name : agent.id
+}
+
+// the crew's name is its project manager's label
+export function crewName(projectManager: Agent): string {
+  return labelOf(projectManager)
+}
+
+function isLive(agent: Agent): boolean {
+  return agent.live ?? LIVE.has(agent.status)
+}
+
+// The crew `id` works in: it is a project manager the main thread started, or one of its ancestors is. Undefined for every
+// other agent, including the main thread and agents of a project manager some other agent started.
+export function crewOf(id: string | undefined, agents: readonly Agent[]): Crew | undefined {
+  if (id === undefined) return undefined
+  const byId = new Map(agents.map(a => [a.id, a]))
+  const seen = new Set<string>()
+  let at = byId.get(id)
+  while (at !== undefined && !seen.has(at.id)) {
+    seen.add(at.id)
+    if (at.parentId === undefined) {
+      if (!isProjectManager(at)) return undefined
+      return { crew: crewName(at), projectManagerId: at.id, projectManagerName: crewName(at), isProjectManager: at.id === id }
+    }
+    at = byId.get(at.parentId)
+  }
+  return undefined
+}
+
+// every agent whose parent chain reaches `id`, live or not
+export function descendantsOf(id: string, agents: readonly Agent[]): Agent[] {
+  const byId = new Map(agents.map(a => [a.id, a]))
+  return agents.filter(a => {
+    const seen = new Set<string>()
+    let at = a.parentId
+    while (at !== undefined && !seen.has(at)) {
+      if (at === id) return true
+      seen.add(at)
+      at = byId.get(at)?.parentId
+    }
+    return false
+  })
+}
+
+// A project manager's stop is interim while it still has work out: a live descendant, or a running or pending background task
+// whose id is one of its descendants'. The session-wide task list also holds other crews' tasks; those are ignored.
+export function isInterimStop(descendants: readonly Agent[], tasks: readonly { id: string; status: string }[] | undefined): boolean {
+  if (descendants.some(isLive)) return true
+  const ids = new Set(descendants.map(d => d.id))
+  return (tasks ?? []).some(t => (t.status === 'running' || t.status === 'pending') && ids.has(t.id))
+}
+
+// a name safe as one path segment
+export function safeName(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9._-]+|\.{2,}/g, '-').replace(/-{2,}/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 100)
+  return cleaned === '' ? 'agent' : cleaned
+}
+
+function slashed(path: string): string {
+  return path.replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+// Where this session's ankur files live: in the repo's git common dir, so every worktree of it shares one place,
+// or under the home folder outside git. Undefined when neither is known.
+// `runName` is the run dir's name under the common dir: the old one only when it alone exists (see runDirIn).
+export function ankurDir(gitCommonDir: string | undefined, home: string | undefined, sessionId: string, runName: string = NEW): string | undefined {
+  if (gitCommonDir !== undefined && gitCommonDir !== '') return `${slashed(gitCommonDir)}/${runName}/${safeName(sessionId)}`
+  return home !== undefined && home !== '' ? `${slashed(home)}/.claude/ankur/${safeName(sessionId)}` : undefined
+}
+
+export function reportDir(dir: string, crew: string): string {
+  return `${dir}/reports/${safeName(crew)}`
+}
+
+export function reportPath(dir: string, crew: string, agent: string): string {
+  return `${reportDir(dir, crew)}/${safeName(agent)}.md`
+}
+
+// where an interim stop's text goes, beside the report, so the report the PM is told to read stays the last real one
+export function interimPath(dir: string, crew: string, agent: string): string {
+  return `${reportDir(dir, crew)}/${safeName(agent)}.interim.md`
+}
+
+export function isInterimFile(file: string): boolean {
+  return file.endsWith('.interim.md')
+}
+
+export function messagesPath(dir: string): string {
+  return `${dir}/messages.jsonl`
+}
+
+export function rolledPath(dir: string, n: number): string {
+  return `${dir}/messages.${n}.jsonl`
+}
+
+// the event log (docs/events.schema.json) and where it rolls to
+export function eventsPath(dir: string): string {
+  return `${dir}/events.jsonl`
+}
+
+export function rolledEventsPath(dir: string, n: number): string {
+  return `${dir}/events.${n}.jsonl`
+}
+
+// One event-log line past the fields every line carries (v, ts, crew, agent). No field holds message, prompt or
+// report text (P8).
+export type AnkurEvent =
+  | { event: 'spawn'; crew: string; agent: string; agentId: string | null; type: string; model: string | null; effort: string | null; by: string }
+  | { event: 'stall'; crew: string; agent: string; kind: 'agent' | 'idle-project-manager'; minutes: number }
+  | { event: 'tag'; crew: string; agent: string; tag: 'QUESTION' | 'BLOCKED' | 'PROPOSAL' }
+  | { event: 'report'; crew: string; agent: string; marker: ReportMarker | null }
+  | { event: typeof ALLOWANCE_SPENT_EVENT; crew: string; agent: string }
+  | FetchEvent
+  | RefusalEvent
+
+// The fetch gate: every WebFetch and WebSearch call passes this one pure function. It allows every call
+// today; a guardrail added later is a change here and its tests alone.
+export type FetchEvent =
+  | { event: 'fetch'; crew: string; agent: string; tool: 'WebFetch'; url: string }
+  | { event: 'fetch'; crew: string; agent: string; tool: 'WebSearch'; query: string }
+export type FetchVerdict = { kind: 'allow'; line: FetchEvent | null } | { kind: 'deny'; line: FetchEvent | null; reason: string }
+
+// the url as logged: userinfo and fragment dropped, each query value emptied (keys kept, in order); "" when it isn't a url
+function loggedUrl(raw: unknown): string {
+  if (typeof raw !== 'string') return ''
+  try {
+    const url = new URL(raw)
+    url.username = ''
+    url.password = ''
+    url.hash = ''
+    const emptied = new URLSearchParams()
+    for (const key of new URLSearchParams(url.search).keys()) emptied.append(key, '')
+    url.search = emptied.toString()
+    return url.toString()
+  } catch {
+    return ''
+  }
+}
+
+export function fetchVerdict(tool: 'WebFetch' | 'WebSearch', input: { readonly url?: unknown; readonly query?: unknown }, crew: string, agent: string, hasPlan: boolean): FetchVerdict {
+  if (!hasPlan) return { kind: 'allow', line: null }
+  if (tool === 'WebFetch') return { kind: 'allow', line: { event: 'fetch', crew, agent, tool, url: loggedUrl(input.url) } }
+  return { kind: 'allow', line: { event: 'fetch', crew, agent, tool, query: typeof input.query === 'string' ? input.query.slice(0, 200) : '' } }
+}
+
+// A tool call refused before or as it ran, by ankur's own hooks or by what sits beneath them (P24: retro counts these;
+// it never reads a body). category is the rule's own words with names and paths taken out, never the call's input;
+// program is a Bash command's first word and shape names what its first line is made of, never its text.
+export type RefusalSource = 'ankur' | 'worktree-guard' | 'classifier' | 'permission' | 'other'
+export type RefusalShape = 'heredoc' | 'compound' | 'cd' | 'subst' | 'var' | 'pipe' | 'loop'
+export type RefusalEvent = { event: 'refusal'; crew: string; agent: string; tool: string; source: RefusalSource; category: string; program: string | null; shape: RefusalShape[] }
+export const REFUSAL_CATEGORY_MAX = 100
+
+const WORKTREE_GUARD = /is isolated in the worktree \S+? but (?:this command|its working directory) ([^]*?)\. Refusing to run it/
+const CLASSIFIER_REASON = /auto mode classifier\. Reason: \[([^\]\n]{1,60})\]/
+const CLASSIFIER_NO_VERDICT = /auto mode classifier gave no verdict/
+const PERMISSION = /Permission to use \S+ (?:[^]*? )?has been denied|requires approval|The user doesn't want to proceed/
+
+// a rule's words as logged: quoted names and paths out, whitespace folded, cut to REFUSAL_CATEGORY_MAX
+function categoryOf(text: string): string {
+  const folded = text
+    .replace(/"[^"\n]*"/g, '<name>')
+    .replace(/\(the variable [^)]*\)/g, '(a variable)')
+    .replace(/(?:~|\.{0,2})?\/[^\s,;:)]*/g, '<path>')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return folded.length <= REFUSAL_CATEGORY_MAX ? folded : folded.slice(0, REFUSAL_CATEGORY_MAX - 1) + '…'
+}
+
+// what a Bash command is made of, read from its first word and first line by their parts' kinds alone
+export function commandShape(command: unknown): { program: string | null; shape: RefusalShape[] } {
+  if (typeof command !== 'string') return { program: null, shape: [] }
+  const c = command.trim()
+  const base = (c.split(/\s/, 1)[0] ?? '').replace(/^.*\//, '')
+  const program = /^[A-Za-z0-9_.+-]{1,40}$/.test(base) ? base : null
+  const firstLine = c.split('\n', 1)[0]
+  const outsideHeredoc = firstLine.replace(/<<-?\s*['"]?\w+['"]?/, '')
+  const shape: RefusalShape[] = []
+  if (/<<-?\s*['"]?\w/.test(firstLine)) shape.push('heredoc')
+  if (/&&|\|\||;/.test(outsideHeredoc)) shape.push('compound')
+  if (/(?:^|[;&|]\s*)cd\s/.test(firstLine)) shape.push('cd')
+  if (/\$\(|`/.test(firstLine)) shape.push('subst')
+  if (/\$\{?[A-Za-z_]/.test(firstLine)) shape.push('var')
+  if (/(?:^|[^|])\|(?!\|)/.test(outsideHeredoc)) shape.push('pipe')
+  if (/(?:^|[;&|]\s*)(?:for|while|until)\s/.test(firstLine)) shape.push('loop')
+  return { program, shape }
+}
+
+// Which party refused a call, from what the call answered: a deny, or an errored result whose text is one of the
+// engine's refusals (an ordinary failed tool is no refusal). undefined when it isn't one.
+export function refusalOf(result: unknown): { source: RefusalSource; category: string } | undefined {
+  if (typeof result !== 'object' || result === null) return undefined
+  const r = result as { deny?: unknown; isError?: unknown; text?: unknown; result?: unknown }
+  const denied = typeof r.deny === 'string'
+  const errored = r.isError === true ? (typeof r.text === 'string' ? r.text : typeof r.result === 'string' ? r.result : '') : ''
+  const head = (denied ? (r.deny as string) : errored).slice(0, 2000)
+  if (!denied && head === '') return undefined
+  // a transcript recorded before the rename carries the old mark
+  const mark = [MARK, '[truss]'].find((m) => head.startsWith(`${m} Refused: `)) // ankur-allow-truss: a recorded run or bundle keeps the old name
+  if (mark !== undefined) {
+    const rule = head.slice(`${mark} Refused: `.length).split(/[.:](?:\s|$)/, 1)[0]
+    return { source: 'ankur', category: categoryOf(rule) }
+  }
+  const guard = WORKTREE_GUARD.exec(head)
+  if (guard !== null) return { source: 'worktree-guard', category: categoryOf(guard[1]) }
+  const reason = CLASSIFIER_REASON.exec(head)
+  if (reason !== null) return { source: 'classifier', category: categoryOf(reason[1]) }
+  if (CLASSIFIER_NO_VERDICT.test(head)) return { source: 'classifier', category: 'no verdict' }
+  if (head.includes('judged this action dangerous')) return { source: 'classifier', category: 'no explanation' }
+  if (head.includes('built-in Claude Code safety check')) return { source: 'permission', category: 'built-in safety check' }
+  if (PERMISSION.test(head.slice(0, 400))) return { source: 'permission', category: /The user doesn't want to proceed/.test(head) ? 'the person said no' : 'denied' }
+  return denied ? { source: 'other', category: categoryOf(head.split('\n', 1)[0]) } : undefined
+}
+
+// the event line for one refused call, or null when it is no refusal or the session has no plan
+export function refusalLine(tool: string, input: { readonly command?: unknown }, result: unknown, crew: string, agent: string, hasPlan: boolean): RefusalEvent | null {
+  if (!hasPlan) return null
+  const refused = refusalOf(result)
+  if (refused === undefined) return null
+  const { program, shape } = tool === 'Bash' ? commandShape(input.command) : { program: null, shape: [] as RefusalShape[] }
+  return { event: 'refusal', crew, agent, tool, source: refused.source, category: refused.category === '' ? 'unnamed' : refused.category, program, shape }
+}
+
+const MARKERS = ['VERDICT: PASS', 'VERDICT: FAIL', 'STRESSTEST', 'CHECKPOINT', 'BLOCKED', 'QUESTION', 'PROPOSAL'] as const
+export type ReportMarker = (typeof MARKERS)[number]
+
+// drops one leading "[harness:" paragraph (up to the next blank line) before the first non-empty line; stage.js mirrors it
+export function unbannered(text: string): string {
+  const lines = text.split('\n')
+  const i = lines.findIndex(l => l.trim() !== '')
+  if (i < 0 || !lines[i].trimStart().startsWith('[harness:')) return text
+  let j = i
+  while (j < lines.length && lines[j].trim() !== '') j++
+  return lines.slice(j).join('\n')
+}
+
+// the marker a report's first non-empty line starts with, or null
+export function markerOf(text: string): ReportMarker | null {
+  const first = unbannered(text).split('\n').find(l => l.trim() !== '')?.trimStart() ?? ''
+  if (/^VERDICT: (PASS|FAIL) \| /.test(first)) return null // the template line, not a verdict
+  return MARKERS.find(m => first.startsWith(m)) ?? null
+}
+
+// The agents `to` addresses: the one with that id; else those with that name (a listing's " [ref]" dropped) that
+// are live; else, when none is, the newest one seen with it. Empty when nothing matches.
+export function recipientsOf(to: string, agents: readonly Agent[]): Agent[] {
+  const bare = to.replace(/\s*\[[^\]]*\]\s*$/, '')
+  const byId = agents.find(a => a.id === bare)
+  if (byId !== undefined) return [byId]
+  const named = agents.filter(a => a.name === bare || labelOf(a) === bare)
+  const live = named.filter(isLive)
+  if (live.length > 0) return live
+  const newest = named.reduce<Agent | undefined>((best, a) => (best === undefined || (a.seq ?? 0) > (best.seq ?? 0) ? a : best), undefined)
+  return newest === undefined ? [] : [newest]
+}
+
+// A resumed plan or amend design engineer hands back a plan no hook routes: refuse the message, name the mode.
+export function designerResumeVerdict(
+  to: unknown,
+  agents: readonly Agent[],
+  designers: ReadonlyMap<string, 'plan' | 'amend'>,
+): { deny: string } | undefined {
+  if (typeof to !== 'string') return undefined
+  for (const a of recipientsOf(to, agents)) {
+    const mode = designers.get(a.id)
+    if (mode === undefined) continue
+    return { deny: `${MARK} Refused: ${to} is a ${mode} design engineer, and a resumed one's hand-back is never routed. Start a fresh ${mode} design engineer under the next unused name.` }
+  }
+  return undefined
+}
+
+export type MessageVerdict =
+  | { kind: 'pass' }
+  | { kind: 'allow'; crossCrew: false }
+  | { kind: 'allow'; crossCrew: true; fromCrew: string; toCrew: string }
+  | { kind: 'deny'; reason: string }
+
+const MEMBER_RULE = 'crew members message only their own project manager and the other members of their crew'
+
+// Who a crew agent may message. A member: its own project manager and its crew's other members. A project manager: "main", its own
+// members, and the other project managers. Anything else from inside a crew is refused, including an address no agent of this
+// session has had; agents outside every crew are not this mod's business.
+export function messageVerdict(senderId: string | undefined, to: unknown, agents: readonly Agent[]): MessageVerdict {
+  const sender = crewOf(senderId, agents)
+  if (sender === undefined) return { kind: 'pass' }
+  const address = typeof to === 'string' ? to.trim() : ''
+  if (address === MAIN || address.startsWith(`${MAIN} [`)) {
+    if (sender.isProjectManager) return { kind: 'allow', crossCrew: false }
+    return { kind: 'deny', reason: `${MARK} Refused: ${MEMBER_RULE}. Put your question in a message to your project manager, ${sender.projectManagerName}, which asks "main" for you.` }
+  }
+  const targets = address === '' ? [] : recipientsOf(address, agents)
+  const crews = targets.map(t => crewOf(t.id, agents))
+  if (new Set(crews.map(c => c?.projectManagerId)).size > 1) {
+    return { kind: 'deny', reason: `${MARK} Refused: more than one live agent is named "${address}", in different crews. Address it by its agent id.` }
+  }
+  const target = crews[0]
+  if (target !== undefined && target.projectManagerId === sender.projectManagerId) return { kind: 'allow', crossCrew: false }
+  if (sender.isProjectManager && target?.isProjectManager) return { kind: 'allow', crossCrew: true, fromCrew: sender.crew, toCrew: target.crew }
+  if (sender.isProjectManager) {
+    const via = target === undefined ? 'Message "main", your own members, or another crew\'s project manager.' : `Send it to that crew's project manager, ${target.projectManagerName}, instead.`
+    return { kind: 'deny', reason: `${MARK} Refused: a project manager reaches another crew only through its project manager. ${via}` }
+  }
+  return { kind: 'deny', reason: `${MARK} Refused: ${MEMBER_RULE}. To reach anyone else, tell your project manager, ${sender.projectManagerName}.` }
+}
+
+export const MODEL_REFUSAL = `${MARK} Refused: inside a crew, every Agent call sets \`model\`: "opus" for judgment-heavy work (design, debugging, review, tricky code), "sonnet" for mechanical or well-specified work. Call Agent again with model set.`
+
+// an Agent call from inside a crew must name its model
+export function agentVerdict(callerId: string | undefined, model: unknown, agents: readonly Agent[]): { deny: string } | undefined {
+  if (crewOf(callerId, agents) === undefined) return undefined
+  return typeof model === 'string' && model !== '' ? undefined : { deny: MODEL_REFUSAL }
+}
+
+const EFFORTS = ['low', 'medium', 'high', 'xhigh']
+
+export const EFFORT_REFUSAL = `${MARK} Refused: inside a crew, every Agent call sets \`effort\` to one of "low", "medium", "high" or "xhigh": "low" for lookups and mechanical edits, "medium" for well-specified work, "high" or "xhigh" for hard design, debugging or review. Call Agent again with effort set.`
+export const MAX_EFFORT_REFUSAL = `${MARK} Refused: effort "max" is not allowed inside a crew; "xhigh" is the top. Call Agent again with effort set to "low", "medium", "high" or "xhigh".`
+
+// an Agent call from inside a crew must name its effort, and never "max"
+export function effortVerdict(callerId: string | undefined, effort: unknown, agents: readonly Agent[]): { deny: string } | undefined {
+  if (crewOf(callerId, agents) === undefined) return undefined
+  if (effort === 'max') return { deny: MAX_EFFORT_REFUSAL }
+  return typeof effort === 'string' && EFFORTS.includes(effort) ? undefined : { deny: EFFORT_REFUSAL }
+}
+
+// plan.json as the hooks read it: only the fields the gates and /ankur use, each left unchecked
+export type Plan = { approval: unknown; approvedAt: unknown; maxParallelCrews: unknown; crews: unknown[]; version: unknown; reworkAllowance: unknown; goal: unknown; goals: unknown }
+type PlanCrew = Record<string, unknown>
+
+const DEFAULT_CAP = 4
+
+export function planPath(dir: string): string {
+  return `${dir}/plan.json`
+}
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+const isStage = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
+// The plan, or undefined when the text is not one the gates can read: empty, not JSON, not an object, or with no
+// crews array. Undefined means no gate and no plan lines, as in 0.2.1. A leading UTF-8 BOM is stripped first.
+export function parsePlan(text: string): Plan | undefined {
+  let value: unknown
+  try {
+    value = JSON.parse(text.startsWith('\uFEFF') ? text.slice(1) : text)
+  } catch {
+    return undefined
+  }
+  if (!isRecord(value) || !Array.isArray(value.crews)) return undefined
+  return { approval: value.approval, approvedAt: value.approvedAt, maxParallelCrews: value.maxParallelCrews, crews: value.crews, version: value.version, reworkAllowance: value.reworkAllowance, goal: value.goal, goals: value.goals }
+}
+
+// The plan entry a project manager's name is gated as. A name that is a plan slug is that crew. Otherwise the successor rule: a
+// name `<base>-<n>`, n an integer >= 2, whose base is a plan slug, is gated as that base crew, so restarting a crew
+// under a fresh name can't slip past its gates. That holds for the name successorCrew suggests; plain nextCrew can
+// slip (phase-1 -> phase-2 is another crew's slug), so the idle prompt uses successorCrew. One suffix only is
+// stripped, and a name that is itself a slug never is. Undefined: no gate.
+export function planCrewFor(plan: Plan, name: string): { slug: string; crew: PlanCrew } | undefined {
+  const find = (slug: string) => plan.crews.find((c): c is PlanCrew => isRecord(c) && c.slug === slug)
+  const own = find(name)
+  if (own !== undefined) return { slug: name, crew: own }
+  const m = /^(.+)-([0-9]+)$/.exec(name)
+  if (m?.[1] === undefined || m[2] === undefined || Number(m[2]) < 2) return undefined
+  const base = find(m[1])
+  return base === undefined ? undefined : { slug: m[1], crew: base }
+}
+
+// Why the plan refuses starting the project manager `name`, and what /ankur says that crew waits for, or undefined when it may
+// start. The gates, first match wins: run approval, a reserved goal id, a crew goal the plan doesn't
+// have, goal approval, crew approval, the stage gate within the crew's goal, the parallel cap across goals. The crew
+// being started is every entry with the target's slug (the schema allows duplicate slugs; stage and clientApproval come
+// from the first). None of them counts as running, since its own entry may already say running (a restart, or a
+// successor gated as its base), and none of them is in the earlier-stage check, so a crew can't hold itself back.
+export function gateOf(plan: Plan, name: string): { deny: string; waits: string } | undefined {
+  const target = planCrewFor(plan, name)
+  if (target === undefined) return undefined
+  const stop = (deny: string, waits: string) => ({ deny, waits })
+  if (plan.approval === 'client' && plan.approvedAt === null) return stop(`this run changes the design; get the client's approval first`, `waits for the client's approval of the plan`)
+  const goals = Array.isArray(plan.goals) ? plan.goals.filter(isRecord) : []
+  if (goals.some(g => g.id === RUN_GOAL)) return stop(`goal id run is reserved for the run's first goal; rename it in plan.json`, `waits for a fix: goal id run is reserved`)
+  const goal = goalOf(target.crew)
+  const entry = goals.find(g => g.id === goal)
+  if (goal !== RUN_GOAL && entry === undefined) return stop(`${target.slug} names goal ${goal}, which isn't in the plan`, `waits for a fix: goal ${goal} isn't in the plan`)
+  if (entry !== undefined && entry.approval === 'client' && entry.approvedAt === null) return stop(`goal ${goal} changes the design; get the client's approval first`, `waits for the client's approval of goal ${goal}`)
+  if (target.crew.clientApproval === 'pending') return stop(`${target.slug} waits for the client's approval`, `waits for the client's approval`)
+  const others = plan.crews.filter(isRecord).filter(c => c.slug !== target.slug)
+  const stage = target.crew.stage
+  if (isStage(stage)) {
+    const open = others.filter(c => goalOf(c) === goal && isStage(c.stage) && c.stage < stage && c.status !== 'merged' && c.status !== 'dropped')
+    if (open.length > 0) {
+      const lowest = Math.min(...open.map(c => c.stage as number))
+      const list = open.filter(c => c.stage === lowest).map(c => planField(c.slug)).join(', ')
+      return stop(`stage ${lowest} ${goal === RUN_GOAL ? '' : `of goal ${goal} `}isn't merged yet: ${list}`, `waits for stage ${lowest} to merge: ${list}`)
+    }
+  }
+  const max = plan.maxParallelCrews
+  const cap = typeof max === 'number' && Number.isInteger(max) && max >= 1 ? max : DEFAULT_CAP
+  const running = others.filter(c => c.status === 'running').length
+  if (running >= cap) return stop(`${running} crews running, the cap is ${cap}; start ${target.slug} when one merges`, `waits for a free slot: ${running} of ${cap} running`)
+  return undefined
+}
+
+export function planVerdict(plan: Plan, name: string): { deny: string } | undefined {
+  const gate = gateOf(plan, name)
+  return gate === undefined ? undefined : { deny: `${MARK} Refused: ${gate.deny}` }
+}
+
+// a plan field as /ankur prints it: a string or a number as is, anything else (missing included) as ?
+function planField(v: unknown): string {
+  return typeof v === 'string' || isStage(v) ? String(v) : '?'
+}
+
+// the lines /ankur shows above the 0.2.1 output: one per crew, by stage, ties in the plan's queue order; with goals,
+// grouped under a line per goal
+export function planLines(plan: Plan): string[] {
+  const waiting = plan.approval === 'client' && plan.approvedAt === null ? ', waiting for the client' : ''
+  const goals = Array.isArray(plan.goals) ? plan.goals : []
+  const grouped = goals.length > 0
+  const counts = grouped ? `${plan.crews.length} crews, ${1 + goals.length} goals` : `${plan.crews.length} crews`
+  const lines = [`Plan (${counts}, approval ${planField(plan.approval)}${waiting}):`]
+  const order = (c: unknown) => (isRecord(c) && isStage(c.stage) ? c.stage : Number.POSITIVE_INFINITY)
+  const sorted = plan.crews.map((c, i) => ({ c, i })).sort((a, b) => order(a.c) - order(b.c) || a.i - b.i)
+  const crewLine = (c: unknown) => {
+    const crew = isRecord(c) ? c : {}
+    const planned = crew.status === 'planned'
+    const gate = planned ? gateOf(plan, planField(crew.slug)) : undefined
+    const suffix = planned ? `, ${gate === undefined ? 'ready to start' : gate.waits}` : ''
+    return `- stage ${planField(crew.stage)}: ${planField(crew.slug)}, ${planField(crew.verdict)}, ${planField(crew.status)}${suffix}`
+  }
+  if (!grouped) {
+    for (const { c } of sorted) lines.push(crewLine(c))
+    return lines
+  }
+  const known: unknown[] = [RUN_GOAL, ...goals.map(g => (isRecord(g) ? g.id : undefined))]
+  const ids = [...known]
+  for (const c of plan.crews) if (!ids.includes(goalOf(c))) ids.push(goalOf(c))
+  for (const id of ids) {
+    const mine = sorted.filter(({ c }) => goalOf(c) === id)
+    if (known.includes(id)) {
+      const entry = id === RUN_GOAL ? plan : goals.find(g => isRecord(g) && g.id === id)
+      const e = isRecord(entry) ? entry : {}
+      const client = e.approval === 'client' && e.approvedAt === null ? ', waiting for the client' : ''
+      const done = mine.every(({ c }) => isRecord(c) && (c.status === 'merged' || c.status === 'dropped')) ? ', done' : ''
+      lines.push(`Goal ${planField(id)} (approval ${planField(e.approval)}${client}${done}): ${typeof e.goal === 'string' ? goalLine(e.goal) : ''}`)
+    } else {
+      lines.push(`Goal ${planField(id)} (not in the plan):`)
+    }
+    for (const { c } of mine) lines.push(crewLine(c))
+  }
+  return lines
+}
+
+export function reportNote(who: string, path: string): string {
+  return `${MARK} If ${who}'s report does not reach you, read ${path} once it stops.`
+}
+
+// The tags a project manager's message to main, or its report, can start with, and what /ankur shows for each.
+export type Tag = { kind: 'waiting on you' | 'blocked' | 'proposal'; text: string }
+
+const TAGS: readonly [string, Tag['kind']][] = [
+  [QUESTION, 'waiting on you'],
+  [BLOCKED, 'blocked'],
+  [PROPOSAL, 'proposal'],
+]
+
+// the tag's name as the event log writes it
+export function tagName(tag: Tag): 'QUESTION' | 'BLOCKED' | 'PROPOSAL' {
+  return tag.kind === 'waiting on you' ? 'QUESTION' : tag.kind === 'blocked' ? 'BLOCKED' : 'PROPOSAL'
+}
+
+// the tag a text starts with and the first line after it, or undefined when it starts with none
+export function tagOf(text: string): Tag | undefined {
+  const trimmed = text.trimStart()
+  for (const [prefix, kind] of TAGS) {
+    if (trimmed.startsWith(prefix)) return { kind, text: trimmed.slice(prefix.length).split('\n')[0]?.trim() ?? '' }
+  }
+  return undefined
+}
+
+// A project manager's final text that may end its run: a checkpoint, a blocker, a question or a proposal, or a report with a
+// Proof section.
+export function projectManagerStopPasses(text: string): boolean {
+  const trimmed = text.trimStart()
+  return [CHECKPOINT, BLOCKED, QUESTION, PROPOSAL].some(p => trimmed.startsWith(p)) || /^##\s+Proof\b/m.test(text)
+}
+
+export const PROJECT_MANAGER_STOP_REASON = `${MARK} Not done yet: finish with your report, in the sections Summary, Branch, Changes, Proof, Checks run and Open questions (each a "## " heading), or, if you cannot finish, start your final message with CHECKPOINT:, BLOCKED:, QUESTION: or PROPOSAL:.`
+
+// Scope-bounded claims, the bounded repair loop, the patch-bound head guard and the main-session effort
+// rule. Every rule asks planAtLeastV2 first; anything else is 0.4.3 behaviour. The literals are written once, here;
+// the prompts carry the same strings.
+export const HEAD_LINE = 'Head: '
+export const PATCH_LINE = 'Patch: '
+export const EXAMINED = '## Examined'
+export const NOT_EXAMINED = '## Not examined'
+export const UNSCOPED = '- UNSCOPED: '
+export const ALLOWANCE_BLOCKED = 'BLOCKED: rework allowance spent'
+export const ALLOWANCE_SPENT_EVENT = 'allowance-spent'
+export const PATCH_COMMAND = 'git diff --no-color --no-ext-diff --no-renames --src-prefix=a/ --dst-prefix=b/ <base>...<head> | git patch-id --stable'
+
+export const ALLOWANCE_REFUSAL = `${MARK} Refused: rework allowance spent:`
+export const NO_PASS_REASON = `${MARK} Not done yet: the crew's latest QC file this run is not a clean VERDICT: PASS. Send your final report only after a QC's PASS, or start your final message with BLOCKED: or CHECKPOINT:.`
+export const NO_HEAD_REASON = `${MARK} Not done yet: the crew's latest QC PASS has no "${HEAD_LINE.trim()}" and "${PATCH_LINE.trim()}" lines under ## Proof checked, so no hook can tell which head it ruled on. Start a fresh QC under the next unused name.`
+export const HEAD_MOVED = `${MARK} Not done yet: the head moved:`
+export const EXAMINED_REASON = `${MARK} Not done yet: on this plan your final report also needs the sections "${EXAMINED}" (what the crew checked, each with its scope) and "${NOT_EXAMINED}" (what nobody checked, or None.), each a heading of its own.`
+export const MAIN_MODEL_REFUSAL = `${MARK} Refused: on a version 2 or later plan, every ankur:* Agent call from the main session sets \`model\`. Call Agent again with model set.`
+export const MAIN_EFFORT_REFUSAL = `${MARK} Refused: on a version 2 or later plan, every ankur:* Agent call from the main session sets \`effort\` to "low", "medium", "high" or "xhigh": "medium" by default, "high" or "xhigh" only on the client's call. Call Agent again with effort set.`
+
+export type QcFile = { name: string; text: string; mtimeMs: number }
+export type QcRuling = { verdict: 'PASS' | 'FAIL' | undefined; head: string | undefined; patch: string | undefined; unscoped: number }
+
+const SHA40 = /^[0-9a-f]{40}$/
+
+// true when plan.version is an integer >= 2; false for no plan, v1, a missing or a non-integer version
+export function planAtLeastV2(plan: Plan | undefined): boolean {
+  return plan !== undefined && Number.isInteger(plan.version) && (plan.version as number) >= 2
+}
+
+// the plan's integer rework allowance >= 0 on a v>=2 plan; else undefined, which means no allowance rule
+export function reworkAllowanceOf(plan: Plan | undefined): number | undefined {
+  if (plan === undefined || !planAtLeastV2(plan)) return undefined
+  const b = plan.reworkAllowance
+  return Number.isInteger(b) && (b as number) >= 0 ? (b as number) : undefined
+}
+
+// when this run started: Date.parse(approvedAt) when it is a string that parses; else undefined
+export function runStart(plan: Plan | undefined): number | undefined {
+  if (plan === undefined || typeof plan.approvedAt !== 'string') return undefined
+  const ms = Date.parse(plan.approvedAt)
+  return Number.isFinite(ms) ? ms : undefined
+}
+
+// a spawn name whose report file is one of the crew's QC files
+export function isQcName(crew: string, name: unknown): boolean {
+  return typeof name === 'string' && name !== '' && isQcFile(crew, `${safeName(name)}.md`)
+}
+
+// a QC file of the crew this run: QC-named, not interim, modified at or after `since`
+function thisRun(crew: string, f: QcFile, since: number): boolean {
+  return isQcFile(crew, f.name) && !isInterimFile(f.name) && f.mtimeMs >= since
+}
+
+// how many of the crew's QC files this run rule FAIL; a PASS with an UNSCOPED finding is a PASS (0.35.0)
+export function qcFails(crew: string, files: readonly QcFile[], since: number): number {
+  return files.filter(f => thisRun(crew, f, since) && qcRuling(f.text).verdict === 'FAIL').length
+}
+
+// the k of <crew>-qc-<k>.md; the bare <crew>-qc.md is 1
+export const qcK = (name: string): number => Number(/-qc-(\d+)\.md$/.exec(name)?.[1] ?? 1)
+
+// the crew's newest QC file this run; ties go to the higher -qc-<k>
+export function latestQc(crew: string, files: readonly QcFile[], since: number): QcFile | undefined {
+  let latest: QcFile | undefined
+  for (const f of files) {
+    if (!thisRun(crew, f, since)) continue
+    if (latest === undefined || f.mtimeMs > latest.mtimeMs || (f.mtimeMs === latest.mtimeMs && qcK(f.name) > qcK(latest.name))) latest = f
+  }
+  return latest
+}
+
+// the allowance is spent when the FAILs are more than it; no allowance rule, never spent
+export function allowanceSpent(plan: Plan | undefined, fails: number): boolean {
+  const allowance = reworkAllowanceOf(plan)
+  return allowance !== undefined && fails > allowance
+}
+
+export function allowanceRefusal(crew: string, fails: number, allowance: number): string {
+  return `${ALLOWANCE_REFUSAL} ${crew} has ${fails} QC FAILs this run and reworkAllowance is ${allowance}. Start no more QCs: send main a message that starts with "${ALLOWANCE_BLOCKED}", with the last QC's findings.`
+}
+
+// a QC-named spawn of a crew whose allowance is spent is refused
+export function qcAllowanceVerdict(plan: Plan | undefined, crew: string, name: unknown, fails: number): { deny: string } | undefined {
+  const allowance = reworkAllowanceOf(plan)
+  if (allowance === undefined || !isQcName(crew, name) || !allowanceSpent(plan, fails)) return undefined
+  return { deny: allowanceRefusal(crew, fails, allowance) }
+}
+
+const trimEnd = (line: string) => line.replace(/[ \t]+$/, '')
+const linesOf = (text: string) => text.replace(/^﻿/, '').replace(/\r/g, '').split('\n')
+
+// What a QC report rules: the verdict from its marker; the first full-line head and patch under ## Proof checked;
+// the UNSCOPED lines under ## Findings. A section runs to the next line starting "## ".
+export function qcRuling(text: string): QcRuling {
+  const lines = linesOf(text)
+  const marker = markerOf(lines.join('\n'))
+  const ruling: QcRuling = { verdict: marker === 'VERDICT: PASS' ? 'PASS' : marker === 'VERDICT: FAIL' ? 'FAIL' : undefined, head: undefined, patch: undefined, unscoped: 0 }
+  let section: string | undefined
+  const sha = (line: string, literal: string) => {
+    if (!line.startsWith(literal)) return undefined
+    const rest = trimEnd(line.slice(literal.length))
+    return SHA40.test(rest) ? rest : undefined
+  }
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      section = trimEnd(line)
+      continue
+    }
+    if (section === '## Proof checked') {
+      ruling.head ??= sha(line, HEAD_LINE)
+      ruling.patch ??= sha(line, PATCH_LINE)
+    } else if (section === '## Findings' && line.startsWith(UNSCOPED)) {
+      ruling.unscoped++
+    }
+  }
+  return ruling
+}
+
+// the patch id `git patch-id --stable` printed: the first field of its first line, when it is 40 lowercase hex
+export function patchIdOf(stdout: string): string | undefined {
+  const first = (stdout.replace(/\r/g, '').split('\n')[0] ?? '').trim().split(/\s+/)[0] ?? ''
+  return SHA40.test(first) ? first : undefined
+}
+
+// `<branch> at <commit>, based on <base>.`, each optionally in single backticks; neither name may start with "-"
+const BRANCH_LINE = /^`?([^\s`-][^\s`]*)`? at `?[0-9a-f]{7,40}`?, based on `?([^\s`-][^\s`]*?)`?\.?$/
+
+// the branch and base on the first non-empty line under ## Branch, or undefined when it doesn't read
+export function branchOf(report: string): { branch: string; base: string } | undefined {
+  const lines = linesOf(report)
+  const at = lines.findIndex(l => trimEnd(l) === '## Branch')
+  if (at < 0) return undefined
+  const line = lines.slice(at + 1).find(l => l.trim() !== '')
+  const m = line === undefined ? null : BRANCH_LINE.exec(line.trim())
+  if (m?.[1] === undefined || m[2] === undefined) return undefined
+  return { branch: m[1], base: m[2] }
+}
+
+const isTagged = (text: string) => [CHECKPOINT, BLOCKED, QUESTION, PROPOSAL].some(p => text.trimStart().startsWith(p))
+const hasHeading = (text: string, heading: string) => linesOf(text).some(l => trimEnd(l) === heading)
+
+// on a v>=2 plan, an untagged final report needs both the Examined and the Not examined heading
+export function examinedVerdict(plan: Plan | undefined, text: string): { block: string } | undefined {
+  if (!planAtLeastV2(plan) || isTagged(text)) return undefined
+  return hasHeading(text, EXAMINED) && hasHeading(text, NOT_EXAMINED) ? undefined : { block: EXAMINED_REASON }
+}
+
+export function headMovedReason(judged: string, head: string): string {
+  return `${HEAD_MOVED} the QC ruled on ${judged}, the branch is at ${head}, and its patch id differs. Start a fresh QC under the next unused name on ${head}, and send your final report on its PASS.`
+}
+
+// The send-back table: a clean PASS with head and patch lines whose head is the branch's, or whose patch is
+export function headVerdict(plan: Plan | undefined, qc: QcRuling | undefined, head: string | undefined, patch: string | undefined): { block: string } | undefined {
+  if (!planAtLeastV2(plan)) return undefined
+  if (qc === undefined || qc.verdict !== 'PASS') return { block: NO_PASS_REASON }
+  if (qc.head === undefined || qc.patch === undefined) return { block: NO_HEAD_REASON }
+  if (head === undefined || head === qc.head || patch === undefined || patch === qc.patch) return undefined
+  return { block: headMovedReason(qc.head, head) }
+}
+
+// on a v>=2 plan, a main-session ankur:* Agent call sets a model, then an effort other than max
+export function mainCallVerdict(plan: Plan | undefined, callerId: string | undefined, type: unknown, model: unknown, effort: unknown): { deny: string } | undefined {
+  if (!planAtLeastV2(plan) || callerId !== undefined || roleOf(type) === undefined) return undefined
+  if (typeof model !== 'string' || model === '') return { deny: MAIN_MODEL_REFUSAL }
+  return typeof effort === 'string' && EFFORTS.includes(effort) ? undefined : { deny: MAIN_EFFORT_REFUSAL }
+}
+
+// The role table a ankur Workflow script is given: opus or sonnet, low or medium
+// effort, no project manager, commissioning or integrator, keys that match ^[a-z]+$. Undefined means the table is allowed.
+export function workflowRoleVerdict(roles: unknown): { deny: string } | undefined {
+  const refuse = (reason: string) => ({ deny: `${MARK} Refused: ${reason}` })
+  if (!isRecord(roles)) return refuse('the Workflow needs a roles table in args.ankur.roles')
+  for (const [key, role] of Object.entries(roles)) {
+    if (key === 'project-manager' || key === 'commissioning' || key === 'integrator') return refuse(`a Workflow never runs a ${key} role`)
+    if (!/^[a-z]+$/.test(key)) return refuse(`Workflow role "${key}" is not a lowercase name`)
+    if (!isRecord(role)) return refuse(`Workflow role ${key} is not an object`)
+    if (isLeadType(role.agentType) || roleOf(role.agentType) === 'commissioning-engineer' || roleOf(role.agentType) === 'integrator') return refuse(`Workflow role ${key} never runs as ${role.agentType}`)
+    if (role.model !== 'opus' && role.model !== 'sonnet') return refuse(`Workflow role ${key} needs model opus or sonnet`)
+    if (role.effort !== 'low' && role.effort !== 'medium') return refuse(`Workflow role ${key} needs effort low or medium`)
+  }
+  return undefined
+}
+
+// Whether a Workflow call may start while a plan is on. Pure: the handler reads the files.
+export function workflowCallVerdict(
+  plan: Plan | undefined,
+  input: { script?: unknown; scriptPath?: unknown; scriptText?: unknown; args?: unknown; pluginDir: string; pluginScriptTexts: readonly (string | undefined)[] },
+): { deny: string } | undefined {
+  if (!planAtLeastV2(plan)) return undefined
+  const refuse = (reason: string) => ({ deny: `${MARK} Refused: ${reason}` })
+  if (input.script !== undefined && input.scriptPath !== undefined) return refuse('a Workflow call gives either script or scriptPath, not both')
+  const { text, isPlanJs, isStageJs, byPath, byText } = pluginScriptMatch(input)
+  if (!byPath && !byText) {
+    if (input.scriptPath !== undefined && text === undefined) return refuse(ONLY_FROM_PLUGIN)
+    if (text === undefined || /\b(?:ankur|truss):/.test(text)) return refuse(ONLY_FROM_PLUGIN) // ankur-allow-truss
+    return undefined
+  }
+  let args = input.args
+  if (typeof args === 'string') {
+    try {
+      args = JSON.parse(args)
+    } catch {
+      return refuse('the Workflow args are a string that is not valid JSON')
+    }
+  }
+  const ankur = isRecord(args) ? args.ankur : undefined
+  if (!isRecord(ankur)) return refuse('a ankur Workflow needs args.ankur')
+  const roles = workflowRoleVerdict(ankur.roles)
+  if (roles !== undefined) return roles
+  if (isPlanJs && isStageJs) return refuse('the script matches both plan.js and stage.js')
+  const shown = typeof ankur.kind === 'string' ? `"${ankur.kind}"` : JSON.stringify(ankur.kind)
+  if (isPlanJs && ankur.kind !== 'plan') return refuse(`plan.js runs only with kind "plan", not ${shown}`)
+  if (isStageJs && ankur.kind !== 'stage') return refuse(`stage.js runs only with kind "stage", not ${shown}`)
+  if (ankur.kind === 'plan') return plan.approvedAt ? refuse('the plan is already approved; a plan Workflow would replace it') : undefined
+  if (ankur.kind !== 'stage') return refuse('a ankur Workflow runs only with kind "plan" or "stage"')
+  const crews = ankur.crews
+  if (!Array.isArray(crews)) return refuse('a stage Workflow needs args.ankur.crews as a list')
+  for (const entry of crews) {
+    const slug = isRecord(entry) ? entry.slug : undefined
+    if (typeof slug !== 'string') return refuse('a stage Workflow crew has no slug')
+    const target = planCrewFor(plan, slug)
+    if (target === undefined || target.crew.status !== 'running') return refuse(`${slug} is not a running crew in the plan`)
+    const verdict = planVerdict(plan, slug)
+    if (verdict !== undefined) return verdict
+  }
+  return undefined
+}
+const ONLY_FROM_PLUGIN = `ankur agents run in a Workflow only from the plugin's plan.js and stage.js`
+
+// Whether a Workflow call's script is the plugin's plan.js or stage.js, by path or by text: the one match both the
+// gate and the ankurFile expansion use.
+function pluginScriptMatch(input: { scriptPath?: unknown; scriptText?: unknown; pluginDir: string; pluginScriptTexts: readonly (string | undefined)[] }) {
+  const flat = (v: string) => v.replace(/\\/g, '/')
+  const dir = flat(input.pluginDir)
+  const path = typeof input.scriptPath === 'string' ? flat(input.scriptPath) : undefined
+  const text = typeof input.scriptText === 'string' ? input.scriptText : undefined
+  // pluginScriptTexts is positional: index 0 is plan.js's text, index 1 is stage.js's. An undefined entry matches nothing.
+  const isPlanJs = (path !== undefined && path === `${dir}/workflows/plan.js`) || (text !== undefined && input.pluginScriptTexts[0] !== undefined && text === input.pluginScriptTexts[0])
+  const isStageJs = (path !== undefined && path === `${dir}/workflows/stage.js`) || (text !== undefined && input.pluginScriptTexts[1] !== undefined && text === input.pluginScriptTexts[1])
+  const byPath = path !== undefined && (path === `${dir}/workflows/plan.js` || path === `${dir}/workflows/stage.js`)
+  const byText = text !== undefined && input.pluginScriptTexts.some((t) => t !== undefined && t === text)
+  return { text, isPlanJs, isStageJs, byPath, byText }
+}
+
+// Whether a Workflow call's args (an object or a JSON string) carry a ankurFile key.
+export function hasAnkurFile(args: unknown): boolean {
+  let obj = args
+  if (typeof obj === 'string') {
+    try {
+      obj = JSON.parse(obj)
+    } catch {
+      return false
+    }
+  }
+  return isRecord(obj) && 'ankurFile' in obj
+}
+
+// args.ankurFile names a file in the session's ankur dir holding the `start` output; its `.ankur`
+// becomes args.ankur, so a stage launch need not paste the object inline. Pure but for `read`, which may be sync or
+// async. Without ankurFile the args come back as given and nothing is read. `ankurRoot`, when given (the repo's
+// `<git common dir>/ankur`), widens the gate from the session's ankur dir to every `<ankurRoot>/<session>/`
+// dir of the repo, so a PM session can pass another session's start output; the path and its real path must both stay
+// inside one such dir. `realPathOf`, when given, resolves a path's
+// symlinks: a path not inside the ankur dir as written is still taken when its real path is inside the ankur dir's real
+// path, as factory.ts argsFileOut decides `inside` on real paths and prints workflowArgs for such a spelling.
+export async function expandAnkurFile(
+  args: unknown,
+  ankurDir: string | undefined,
+  read: (path: string) => string | Promise<string>,
+  realPathOf?: (path: string) => string | undefined | Promise<string | undefined>,
+  ankurRoot?: string,
+): Promise<{ args: unknown; deny?: undefined } | { deny: string; args?: undefined }> {
+  if (!hasAnkurFile(args)) return { args }
+  const refuse = (reason: string) => ({ deny: `${MARK} Refused: ${reason}` })
+  const asString = typeof args === 'string'
+  const obj = (asString ? JSON.parse(args) : args) as Record<string, unknown>
+  if ('ankur' in obj) return refuse('a Workflow call gives either args.ankur or args.ankurFile, not both')
+  const file = obj.ankurFile
+  if (typeof file !== 'string' || file === '') return refuse('args.ankurFile must be a path')
+  const flat = file.replace(/\\/g, '/')
+  if (!/^(\/|[A-Za-z]:\/)/.test(flat)) return refuse(`args.ankurFile must be an absolute path, not ${JSON.stringify(file)}`)
+  if (ankurDir === undefined || ankurDir === '') return refuse(`this session has no ankur dir, so args.ankurFile cannot be read`)
+  const normal = normalPath(flat)
+  const sessionDir = normalPath(slashed(ankurDir))
+  // with a ankur root, any `<root>/<session>/` dir of the repo is allowed, else only the session's own dir
+  const dir = ankurRoot === undefined || ankurRoot === '' ? sessionDir : normalPath(slashed(ankurRoot))
+  const within = (path: string): boolean => {
+    if (!path.startsWith(`${dir}/`)) return false
+    return dir === sessionDir || path.slice(dir.length + 1).split('/').length >= 2
+  }
+  const realInside = async (): Promise<boolean> => {
+    if (realPathOf === undefined) return false
+    try {
+      const [realFile, realDir] = await Promise.all([realPathOf(normal), realPathOf(dir)])
+      if (typeof realFile !== 'string' || typeof realDir !== 'string') return false
+      const real = normalPath(slashed(realFile))
+      const base = normalPath(slashed(realDir))
+      if (!real.startsWith(`${base}/`)) return false
+      return dir === sessionDir || real.slice(base.length + 1).split('/').length >= 2
+    } catch {
+      return false
+    }
+  }
+  if (!within(normal) && !(await realInside())) {
+    return refuse(
+      dir === sessionDir
+        ? `args.ankurFile must be inside the session's ankur dir ${dir}, not ${JSON.stringify(file)}`
+        : `args.ankurFile must be inside one of the repo's ankur dirs ${dir}/<session>, not ${JSON.stringify(file)}`,
+    )
+  }
+  let text: string
+  try {
+    text = String(await read(normal))
+  } catch (err) {
+    return refuse(`args.ankurFile ${normal} could not be read: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return refuse(`args.ankurFile ${normal} is not valid JSON`)
+  }
+  const ankur = isRecord(parsed) ? parsed.ankur : undefined
+  if (!isRecord(ankur)) return refuse(`args.ankurFile ${normal} holds no object .ankur`)
+  const { ankurFile: _dropped, ...rest } = obj
+  const out = { ...rest, ankur }
+  return { args: asString ? JSON.stringify(out) : out }
+}
+
+// A slashed absolute path with its `.` and `..` segments resolved; a `..` never climbs above the root.
+function normalPath(path: string): string {
+  const m = /^([A-Za-z]:)?\//.exec(path)
+  const head = m === null ? '' : m[0]
+  const parts: string[] = []
+  for (const seg of path.slice(head.length).split('/')) {
+    if (seg === '' || seg === '.') continue
+    if (seg === '..') parts.pop()
+    else parts.push(seg)
+  }
+  return `${head}${parts.join('/')}`.replace(/\/$/, '') || '/'
+}
+
+export function stallText(label: string, crew: string, minutes: number): string {
+  return `${STALLED} ${label} in crew ${crew}, no activity for ${minutes}m. Check /ankur and message the ${crew} project manager. Read its transcript tail before you stop it; a resumed agent may be compacting.`
+}
+
+// the name a successor crew takes: auth -> auth-2, gateway-3 -> gateway-4
+export function nextCrew(crew: string): string {
+  const m = /^(.*)-(\d+)$/.exec(crew)
+  return m?.[1] !== undefined && m[2] !== undefined ? `${m[1]}-${Number(m[2]) + 1}` : `${crew}-2`
+}
+
+// The successor name the idle prompt suggests, one the plan gate maps back to the same plan crew: a plan slug C starts
+// at C-2 (never an incremented C, which may be another crew), a successor B-<n> of plan slug B starts at B-<n+1>. A
+// candidate that is itself a plan slug is another crew, so k counts on past it: plan [auth, auth-2] gives auth-3. n+1
+// is BigInt arithmetic on the digit string, so the name is always plain digits, however large n is. No plan, or a crew
+// not in it: nextCrew, as in 0.2.1.
+export function successorCrew(plan: Plan | undefined, crew: string): string {
+  const target = plan === undefined ? undefined : planCrewFor(plan, crew)
+  if (plan === undefined || target === undefined) return nextCrew(crew)
+  const isSlug = (name: string) => planCrewFor(plan, name)?.slug === name
+  let k = target.slug === crew ? 2n : BigInt(crew.slice(target.slug.length + 1)) + 1n
+  while (isSlug(`${target.slug}-${k}`)) k += 1n
+  return `${target.slug}-${k}`
+}
+
+export function idleProjectManagerText(label: string, crew: string, minutes: number, next: string = nextCrew(crew)): string {
+  return `${IDLE_PROJECT_MANAGER} ${label} in crew ${crew}, no report for ${minutes}m and no member at work. Read its last message and resume it with SendMessage, or start ${next} from its report.`
+}
+
+// A project manager's captured report that ends its work: one with a Proof section, a checkpoint or a blocker. A question or a
+// proposal waits on the PM instead, and shows as a waiting tag.
+export function isFinalReport(text: string): boolean {
+  const trimmed = text.trimStart()
+  return trimmed.startsWith(CHECKPOINT) || trimmed.startsWith(BLOCKED) || /^##\s+Proof\b/m.test(text)
+}
+
+export const HANDBACK_REFUSAL = `${MARK} Refused: that hand-back is too short to be a report. Hand back your real report: what you did, the branch, and proof.`
+
+// the stand-ins agents hand back instead of a report; named as well as caught by length, so a lower HANDBACK_MIN keeps them out
+const STAND_INS = new Set(['placeholder', 'todo', 'tbd'])
+
+const HAND_OFFS = [QUESTION, BLOCKED, PROPOSAL, CHECKPOINT]
+
+// A hand-back with nothing in it: a stand-in word, or under HANDBACK_MIN characters once trimmed. A tagged hand-off
+// may be short ("QUESTION: keep v1?"), but not empty or a stand-in after its tag.
+export function isEmptyHandBack(message: string): boolean {
+  const trimmed = message.trim()
+  const tag = HAND_OFFS.find(t => trimmed.startsWith(t))
+  if (tag !== undefined) {
+    const rest = trimmed.slice(tag.length).trim()
+    return rest === '' || STAND_INS.has(rest.toLowerCase())
+  }
+  return trimmed.length < HANDBACK_MIN || STAND_INS.has(trimmed.toLowerCase())
+}
+
+// 10:04 for a clock reading, in the machine's local time (bin/factory.ts `decide` stamps decision lines with it)
+export function localTime(ms: number): string {
+  const d = new Date(ms)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+// What the decision-log deny says. Rewriting the input of an Edit/Write made auto mode give "classifier gave no verdict"
+// (retro F-9), so the log is written only by `factory.ts decide`, which stamps the clock's time itself.
+export const DECISION_LOG_REFUSAL = `${MARK} Refused: decisions.md is written only by the decide command, which stamps the time. Run: node <plugin>/bin/factory.ts decide --dir <ankur dir> --line "<decision> | <reason> | <recommendation> | <outcome>"`
+
+// The shell rules every brief for an Agent in a worktree carries, word for word. skills/run/SKILL.md quotes the same text
+// (a test pins the two together).
+export const SHELL_RULES =
+  "Your worktree is guarded by Claude Code: it refuses a Bash command it can't show stays inside the worktree, and each refusal costs a turn. Write and change files with the Write and Edit tools, never a shell heredoc (`cat > f <<'EOF'`). Run one plain command per Bash call: no `&&`, `;`, `cd`, for-loop or `$VAR` argument; give paths in full. Put a script in a file and run that, rather than feeding python or node inline text that names git. Quote a git format that holds parentheses. Never cd into the main checkout. Run tests and builds in the foreground with an explicit Bash timeout up to 600000; never sleep-poll a background task or misuse Monitor (pass its documented arguments only). Start a long-running process (a server, a watcher) only with Bash `run_in_background`, never `&`, `nohup`, `setsid` or `disown`: those escape the session and nothing can stop them. Stop it with TaskStop when you are done. Stop only a process you started, by its pid; never pkill or kill by pattern."
+
+// Retro F-10. An Agent call with isolation "worktree" whose prompt lacks the shell rules is refused, with the block quoted.
+// Refused, not rewritten: a rewritten input gets no auto-mode verdict (F-9), and neither do the Agent calls beside it.
+// A prompt that opens the rules with their first sentence (the Workflow scripts' own copy) passes.
+export function worktreeBriefVerdict(input: { isolation?: unknown; prompt?: unknown }): { deny: string } | undefined {
+  if (input.isolation !== 'worktree' || typeof input.prompt !== 'string') return undefined
+  if (input.prompt.includes(SHELL_RULES.slice(0, SHELL_RULES.indexOf(':') + 1))) return undefined
+  return { deny: `${MARK} Refused: an Agent in a worktree needs the shell rules in its brief. Call Agent again with this block added to the prompt, word for word: "${SHELL_RULES}"` }
+}
+
+// the decision log of session `sessionId`, wherever its ankur folder is
+export function isDecisionLog(path: string, sessionId: string): boolean {
+  const p = slashed(path)
+  return p.endsWith(`/ankur/${safeName(sessionId)}/decisions.md`) || p.endsWith(`/truss/${safeName(sessionId)}/decisions.md`) // ankur-allow-truss: a run started under the old name
+}
+
+export function limitResetText(resetsAt: string): string {
+  return `${LIMIT_RESET} the five-hour usage window reset at ${resetsAt}. Check /ankur and message each project manager whose crew isn't done to resume.`
+}
+
+// a crew's QC report files: <crew>-qc.md and <crew>-qc-<n>.md
+export function isQcFile(crew: string, file: string): boolean {
+  const prefix = `${safeName(crew)}-qc`
+  if (!file.startsWith(prefix) || !file.endsWith('.md')) return false
+  const middle = file.slice(prefix.length, -'.md'.length)
+  return middle === '' || /^-\d+$/.test(middle)
+}
+
+// 95_000 -> 2m ago, 7_200_000 -> 2h ago
+export function ago(ms: number): string {
+  const m = Math.max(0, Math.round(ms / 60_000))
+  return m < 60 ? `${m}m ago` : m < 48 * 60 ? `${Math.round(m / 60)}h ago` : `${Math.round(m / 1440)}d ago`
+}
+
+export type CrewStatus = {
+  crew: string
+  status: string
+  live: Record<string, number>
+  lastReportMs?: number
+  // a project manager's open question to the person; `tag` wins when both are set
+  question?: string
+  tag?: Tag
+  // the project manager ended its turn (or its run) while its members still work
+  waitingOnMembers?: boolean
+  // when the project manager last did anything, as far as this mod saw
+  lastActiveMs?: number
+  // the crew's agents flagged as stalled, and for how many whole minutes
+  stalled?: { label: string; minutes: number }[]
+  qc?: string
+  dir?: string
+  // the crew's live members, project manager left out: what a waiting project manager waits on
+  members?: { label: string; status: string; runningMs: number; model: string; lastActiveMs?: number }[]
+}
+
+export function statusText(crews: readonly CrewStatus[], now: number, messages?: string, root?: string): string {
+  const dirLine = root === undefined ? [] : [`Ankur dir: ${root}`]
+  if (crews.length === 0) return ['No ankur crews in this session. Start them with /ankur:run.', ...dirLine].join('\n')
+  const lines = [`Crews (${crews.length}):`]
+  for (const c of crews) {
+    const total = Object.values(c.live).reduce((a, b) => a + b, 0)
+    const byModel = Object.entries(c.live).sort(([a], [b]) => a.localeCompare(b)).map(([m, n]) => `${m} ${n}`).join(', ')
+    const members = total === 0 ? 'no live members' : `${total} live member${total === 1 ? '' : 's'} (${byModel})`
+    const tag = c.tag ?? (c.question !== undefined ? { kind: 'waiting on you', text: c.question } : undefined)
+    const report =
+      tag !== undefined
+        ? `${tag.kind}: ${tag.text}`
+        : c.waitingOnMembers === true
+          ? 'waiting on members'
+          : c.lastReportMs === undefined
+            ? 'no report yet'
+            : `last report ${ago(now - c.lastReportMs)}`
+    const active = c.lastActiveMs === undefined ? '' : `, last active ${ago(now - c.lastActiveMs)}`
+    lines.push(`- ${c.crew}: ${c.status}, ${members}, ${report}${active}`)
+    for (const s of c.stalled ?? []) lines.push(`  ${s.label}: stalled ${s.minutes}m`)
+    if (c.qc !== undefined) lines.push(`  qc: ${c.qc}`)
+    if (c.dir !== undefined) lines.push(`  reports: ${c.dir}`)
+    for (const m of c.members ?? []) {
+      const last = m.lastActiveMs === undefined ? 'no activity seen' : `last activity ${ago(now - m.lastActiveMs)}`
+      lines.push(`  ${m.label} ${m.status} ${Math.floor(m.runningMs / 60_000)}m (${m.model}), ${last}`)
+    }
+  }
+  if (messages !== undefined) lines.push(`Messages between project managers: ${messages}`)
+  lines.push(...dirLine)
+  return lines.join('\n')
+}
+
+// the model names `$.agent.spawn` answers ("claude-sonnet-4-6") counted by family
+export function family(model: string | undefined): string {
+  if (model === undefined || model === '') return 'unknown'
+  const m = /(opus|sonnet|haiku|fable)/i.exec(model)
+  return m?.[1] !== undefined ? m[1].toLowerCase() : model
+}
+
+type $ = EngineInterface
+
+async function gitCommonDir($: $, cwd: string | undefined): Promise<string | undefined> {
+  try {
+    const r = await $.process.run(['git', 'rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd, timeoutMs: 15_000 })
+    const out = r.stdout.replace(/\r/g, '').trim()
+    return r.exitCode === 0 && out !== '' ? out : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// every `worktree <path>` entry of `git worktree list --porcelain`, in order (the main checkout first), forward-slashed
+export function worktreeRootsOf(porcelain: string): string[] {
+  const roots: string[] = []
+  for (const line of porcelain.split('\n')) {
+    const l = line.replace(/\r$/, '')
+    if (l.startsWith('worktree ')) roots.push(slashed(l.slice('worktree '.length)))
+  }
+  return roots
+}
+
+// While a run is active (a plan with a crew not merged or dropped), the main thread may not
+// Edit or Write repo files; it delegates. Allowed: the ankur dir, the requirements path beside the architecture doc,
+// .claude/settings.json, and every path outside the repo and its worktrees. Pure; fails open on anything unreadable.
+export function mainEditVerdict(
+  call: { tool: string; filePath: unknown; agentId: string | undefined },
+  ctx: { repoRoot: string; worktreeRoots: readonly string[]; ankurDir: string | undefined; planText: string | undefined; architecture: string | undefined },
+): { deny: string } | undefined {
+  if (call.agentId !== undefined) return undefined
+  if (!['Edit', 'Write', 'MultiEdit', 'NotebookEdit'].includes(call.tool)) return undefined
+  if (typeof call.filePath !== 'string' || call.filePath === '') return undefined
+  if (ctx.planText === undefined) return undefined
+  const plan = parsePlan(ctx.planText)
+  if (plan === undefined) return undefined
+  const active = plan.crews.some(c => !(isRecord(c) && (c.status === 'merged' || c.status === 'dropped')))
+  if (!active) return undefined
+  const path = slashed(call.filePath)
+  const inside = (root: string): boolean => {
+    const r = slashed(root)
+    return r !== '' && (path === r || path.startsWith(`${r}/`))
+  }
+  const repoRoot = slashed(ctx.repoRoot)
+  if (![repoRoot, ...ctx.worktreeRoots].some(inside)) return undefined
+  if (ctx.ankurDir !== undefined && inside(ctx.ankurDir)) return undefined
+  if (path === `${repoRoot}/.claude/settings.json`) return undefined
+  if (ctx.architecture !== undefined && ctx.architecture !== '') {
+    const arch = slashed(ctx.architecture)
+    const cut = arch.lastIndexOf('/')
+    const dir = cut < 0 ? '' : arch.slice(0, cut)
+    const requirements = dir === '' ? `${repoRoot}/requirements.md` : dir.startsWith('/') ? `${dir}/requirements.md` : `${repoRoot}/${dir.replace(/^\.\//, '')}/requirements.md`
+    if (path === requirements) return undefined
+  }
+  return { deny: `${MARK} Refused: the main thread does not edit repo files while a run is active. Delegate this change to a crew or an agent; the PM's own writes are the ankur dir, the requirements doc and .claude/settings.json.` }
+}
+
+// A command split at the shell operators &&, ||, ;, | (|& counts as |) and newline, outside quotes and backslash
+// escapes, as the shell reads it. A redirection such as 2>&1 or &> holds no operator. ops[i] joins segments i and i+1.
+// With splitAmp a lone & (background) is an operator too, as the decision-log guard reads it.
+export function commandSegments(command: string, splitAmp = false): { segments: string[]; ops: string[] } {
+  const segments: string[] = []
+  const ops: string[] = []
+  let cur = ''
+  let quote: "'" | '"' | undefined
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]
+    if (quote === "'") {
+      cur += c
+      if (c === "'") quote = undefined
+      continue
+    }
+    if (c === '\\' && i + 1 < command.length) {
+      // a backslash-newline outside single quotes is a line continuation, not a newline operator
+      if (command[i + 1] !== '\n') cur += c + command[i + 1]
+      i++
+      continue
+    }
+    if (quote === '"') {
+      cur += c
+      if (c === '"') quote = undefined
+      continue
+    }
+    if (c === "'" || c === '"') {
+      quote = c
+      cur += c
+      continue
+    }
+    let op: string | undefined
+    if (c === '&' && command[i + 1] === '&') op = '&&'
+    else if (c === '|' && command[i + 1] === '|') op = '||'
+    else if (c === '|' && command[i + 1] === '&') op = '|&'
+    else if (c === '|') op = '|'
+    else if (c === ';') op = ';'
+    else if (c === '\n') op = '\n'
+    else if (splitAmp && c === '&' && command[i + 1] !== '>' && !/[<>]/.test(command[i - 1] ?? '')) op = '&'
+    if (op === undefined) {
+      cur += c
+      continue
+    }
+    segments.push(cur)
+    ops.push(op === '|&' ? '|' : op)
+    cur = ''
+    i += op.length - 1
+  }
+  segments.push(cur)
+  return { segments, ops }
+}
+
+// the plugin path may be quoted, as `node "${CLAUDE_PLUGIN_ROOT}/retro/cli.ts" scrub` is, and so may the word scrub
+const SCRUB_RUN = /retro\/cli\.ts["']?\s+(["']?)scrub\1(?:\s|$)/
+// ends at whitespace or the segment's end, never at \b: `git merge-base` is not a merge
+const PUSH_OR_MERGE = /(?:^|[^\w.-])git\s+(?:-C\s+\S+\s+)?(?:push|merge)(?:\s|$)/
+
+export const PUSH_GATE_REFUSAL = `${MARK} Refused: retro scrub gates a git push or git merge only when joined to it by &&.`
+
+export const DETACH_REFUSAL = `${MARK} Refused: a member starts a long-running process only with Bash run_in_background, so the session owns it and TaskStop can stop it. \`&\`, \`nohup\`, \`setsid\` and \`disown\` escape the session and nothing stops them. Run the command again without them, with run_in_background set, and stop it with TaskStop when you are done.`
+const DETACH_WORD = /^\s*(?:\w+=\S*\s+)*(?:nohup|setsid|disown)(?:\s|$)/
+// a lone & (never &&, &>, >&, <&, |&) outside quotes and escapes
+const LONE_AMP = /(^|[^&>|<])&(?![&>])/
+
+// Since 0.20.1, a member's Bash command that backgrounds a process itself, by a lone `&` or by nohup, setsid or
+// disown as a command word, is refused with the run_in_background way. Quoted text and escaped characters are not read.
+export function detachVerdict(command: unknown): { deny: string } | undefined {
+  if (typeof command !== 'string') return undefined
+  for (const seg of commandSegments(command).segments) {
+    const bare = seg.replace(/\\./g, '').replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, "''")
+    if (DETACH_WORD.test(bare) || LONE_AMP.test(bare)) return { deny: DETACH_REFUSAL }
+  }
+  return undefined
+}
+
+// R-32: a command that runs retro/cli.ts scrub and then a git push or git merge that scrub does not
+// gate is refused. Scrub gates a later push or merge only when every operator from the first scrub segment up to it is
+// &&. One command is judged alone: a scrub in an earlier call is not seen, by design.
+export function pushGateVerdict(command: unknown): { deny: string } | undefined {
+  if (typeof command !== 'string') return undefined
+  const { segments, ops } = commandSegments(command)
+  const scrub = segments.findIndex(s => SCRUB_RUN.test(s))
+  if (scrub < 0) return undefined
+  for (let j = scrub + 1; j < segments.length; j++) {
+    if (!PUSH_OR_MERGE.test(segments[j])) continue
+    const path = ops.slice(scrub, j)
+    if (path.every(op => op === '&&')) continue
+    const bad = path.find(op => op !== '&&') ?? ''
+    const shown = bad === '\n' ? 'a newline' : `\`${bad}\``
+    return {
+      deny: `${PUSH_GATE_REFUSAL} Here ${shown} stands between scrub and \`${segments[j].trim()}\`, so the push or merge runs whether or not scrub passed. Join scrub and the push or merge with &&, as in \`node <plugin>/retro/cli.ts scrub <file> && git push\`, and never pipe scrub's output: a pipe's status is the last command's, not scrub's.`,
+    }
+  }
+  return undefined
+}
+
+// R-134 (0.32.0): decisions.md is written only by `factory.ts decide`, whichever tool writes it. The Edit and Write guard
+// cannot see a Bash redirect, so a main-session Bash command that names decisions.md is read as the shell reads it, and
+// refused when it writes the file or when it names it with a target this guard cannot resolve (a variable, a glob, a
+// substitution, eval, a shell it cannot read). Reads (cat, grep, tail, ...) and the decide command stay allowed.
+// The name counts only as a whole file name: not after a name character, so `product-decisions.md` is another file.
+const DECISIONS_NAME = /(?<![\w.-])decisions\.md/i
+// quotes removed, and backslashes removed (`decision\s.md` still names the file) or read as separators (`C:\x\decisions.md`)
+function hasDecisionsName(s: string): boolean {
+  const q = s.replace(/['"]/g, '')
+  return DECISIONS_NAME.test(q.replace(/\\/g, '')) || DECISIONS_NAME.test(q.replace(/\\/g, '/'))
+}
+export function namesDecisionLog(command: unknown): boolean {
+  return typeof command === 'string' && hasDecisionsName(command)
+}
+
+type ShellTok = { kind: 'word' | 'out' | 'in'; text: string; dyn: boolean; quoted?: boolean }
+
+// One command segment as the shell reads it: words with the quotes removed (`dyn` where the shell would expand them: a $,
+// a backtick, an unquoted glob character or ~; `quoted` where a quote or backslash was in the word), the redirection
+// operators, and the bodies of every command or process substitution. Unquoted parentheses and whitespace separate words,
+// and an unquoted # at the start of a word starts a comment. `open` is true when the text ends inside a quote or an
+// unclosed substitution, so a caller reading line by line knows to take the next line too.
+function shellTokens(seg: string): { toks: ShellTok[]; subs: string[]; open: boolean } {
+  const toks: ShellTok[] = []
+  const subs: string[] = []
+  let cur = ''
+  let dyn = false
+  let has = false
+  let quoted = false
+  let unclosed = false
+  let quote: "'" | '"' | undefined
+  const flush = () => {
+    if (has) toks.push({ kind: 'word', text: cur, dyn, quoted })
+    cur = ''
+    dyn = false
+    has = false
+    quoted = false
+  }
+  // the index of the paren closing the group that opens at seg[i], or the segment's end
+  const group = (i: number): number => {
+    let depth = 0
+    let q: string | undefined
+    for (let j = i; j < seg.length; j++) {
+      const c = seg[j]
+      if (q !== undefined) {
+        if (c === '\\' && q === '"') j++
+        else if (c === q) q = undefined
+        continue
+      }
+      if (c === '\\') j++
+      else if (c === "'" || c === '"') q = c
+      else if (c === '(') depth++
+      else if (c === ')' && --depth === 0) return j
+    }
+    unclosed = true
+    return seg.length
+  }
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i]
+    if (quote === "'") {
+      if (c === "'") quote = undefined
+      else cur += c
+      continue
+    }
+    if (c === '\\' && i + 1 < seg.length) {
+      cur += seg[i + 1]
+      has = quoted = true
+      i++
+      continue
+    }
+    if (c === '$' && seg[i + 1] === '(') {
+      const end = group(i + 1)
+      subs.push(seg.slice(i + 2, end))
+      cur += seg.slice(i, end + 1)
+      dyn = has = true
+      i = end
+      continue
+    }
+    if (c === '`') {
+      const close = seg.indexOf('`', i + 1)
+      if (close < 0) unclosed = true
+      const end = close < 0 ? seg.length : close
+      subs.push(seg.slice(i + 1, end))
+      cur += seg.slice(i, end + 1)
+      dyn = has = true
+      i = end
+      continue
+    }
+    if (c === '$') {
+      cur += c
+      dyn = has = true
+      continue
+    }
+    if (quote === '"') {
+      if (c === '"') quote = undefined
+      else cur += c
+      continue
+    }
+    if (c === "'" || c === '"') {
+      quote = c
+      has = quoted = true
+      continue
+    }
+    if (c === '#' && !has) {
+      // a comment runs to the end of the line
+      while (i + 1 < seg.length && seg[i + 1] !== '\n') i++
+      continue
+    }
+    if (/\s/.test(c)) {
+      flush()
+      continue
+    }
+    if (c === '(' || c === ')') {
+      flush()
+      continue
+    }
+    if (c === '>' || c === '<') {
+      if (seg[i + 1] === '(') {
+        flush()
+        const end = group(i + 1)
+        subs.push(seg.slice(i + 2, end))
+        toks.push({ kind: 'word', text: seg.slice(i, end + 1), dyn: true })
+        i = end
+        continue
+      }
+      // a leading fd (2>) or & (&>) belongs to the operator
+      if (has && (cur === '&' || /^\d+$/.test(cur))) {
+        cur = ''
+        dyn = false
+        has = false
+      } else flush()
+      let op = c
+      if (seg[i + 1] === c) {
+        op += c
+        i++
+        if (c === '<' && seg[i + 1] === '<') {
+          op += '<'
+          i++
+        }
+      }
+      if (op === '<<' && seg[i + 1] === '-') {
+        op += '-'
+        i++
+      } else if (c === '>' && (seg[i + 1] === '|' || seg[i + 1] === '&')) {
+        op += seg[++i]
+      } else if (c === '<' && op === '<' && (seg[i + 1] === '&' || seg[i + 1] === '>')) {
+        op += seg[++i]
+      }
+      toks.push({ kind: c === '>' || op === '<>' ? 'out' : 'in', text: op, dyn: false })
+      continue
+    }
+    if (c === '*' || c === '?' || c === '[' || (c === '{' && (cur !== '' || (i + 1 < seg.length && !/\s/.test(seg[i + 1])))) || (c === '~' && !has)) dyn = true
+    cur += c
+    has = true
+  }
+  flush()
+  return { toks, subs, open: quote !== undefined || unclosed }
+}
+
+// read-only commands: a command that only reads the file may name it
+const READ_ONLY = new Set(['cat', 'grep', 'egrep', 'fgrep', 'rg', 'tail', 'head', 'wc', 'less', 'more', 'ls', 'stat', 'file', 'diff', 'cmp', 'test', '[', '[[', 'echo', 'printf', 'nl', 'tac', 'od', 'cut', 'uniq', 'md5sum', 'shasum', 'sha256sum', 'realpath', 'dirname', 'basename', 'true', ':'])
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish', 'csh', 'tcsh'])
+// words in front of the command word that run it
+const WRAPPERS = new Set(['env', 'command', 'sudo', 'nohup', 'nice', 'time', 'exec', 'builtin', 'stdbuf', '!', '{', 'if', 'then', 'else', 'elif', 'do', 'while', 'until'])
+const INTERPRETERS = new Set(['node', 'nodejs', 'tsx', 'deno', 'bun', 'python', 'python3', 'perl', 'ruby', 'awk', 'gawk', 'php', 'lua'])
+// commands that run text this guard cannot read
+const OPAQUE = new Set(['eval', 'source', '.', 'xargs', 'find'])
+
+const baseName = (w: string): string => (w.replace(/\\/g, '/').split('/').pop() ?? '').toLowerCase().replace(/\.exe$/, '')
+
+function normalizePath(p: string): string {
+  const head = /^(?:[A-Za-z]:)?\//.exec(p)?.[0] ?? ''
+  const out: string[] = []
+  for (const part of p.slice(head.length).split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+  return head + out.join('/')
+}
+
+type DecisionWalk = { sid: string }
+
+// Is this write target the session's decision log, or one the guard cannot resolve? A relative path is never resolved: a
+// Bash cd carries over between calls, so the hook cannot know the shell's cwd, and only the file's name is judged.
+function hitsDecisionLog(t: ShellTok, k: DecisionWalk): boolean {
+  if (t.dyn) return true
+  const p = slashed(t.text)
+  const absolute = /^(?:[A-Za-z]:)?\//.test(p)
+  if (!absolute) return baseName(p) === 'decisions.md'
+  return isDecisionLog(normalizePath(p).toLowerCase(), k.sid.toLowerCase())
+}
+
+// sed's long options that only read. GNU sed also takes any unambiguous prefix of a long option, so one that is not exactly
+// on this list (--in, --expr=, --fil=, ...) is refused, as are --in-place and --file.
+const SED_LONG = new Set(['--quiet', '--silent', '--regexp-extended', '--null-data', '--separate', '--posix', '--debug', '--sandbox', '--unbuffered', '--binary', '--follow-symlinks', '--zero-terminated', '--help', '--version'])
+
+// Does this sed command write, run a command, or read a script the guard cannot see? Without -i sed only reads, unless a
+// script writes (w, e) or comes from a file. Every script is judged: each -e, each --expression, an attached -eSCRIPT, and
+// the first operand when no script option is given. -e is case-sensitive (-E is the extended-regex flag).
+function sedRefused(args: ShellTok[]): boolean {
+  const scripts: ShellTok[] = []
+  const positional: ShellTok[] = []
+  let hasScript = false
+  let options = true
+  for (let j = 0; j < args.length; j++) {
+    const a = args[j]
+    const t = a.text
+    if (!options || t === '-' || !t.startsWith('-')) {
+      positional.push(a)
+      continue
+    }
+    if (t === '--') {
+      options = false
+      continue
+    }
+    if (t.startsWith('--')) {
+      if (t === '--expression') {
+        if (args[j + 1] === undefined) return true
+        hasScript = true
+        scripts.push(args[++j])
+      } else if (t.startsWith('--expression=')) {
+        hasScript = true
+        scripts.push({ ...a, text: t.slice('--expression='.length) })
+      } else if (t === '--line-length') j++
+      else if (t.startsWith('--line-length=') || SED_LONG.has(t)) continue
+      else return true
+      continue
+    }
+    for (let c = 1; c < t.length; c++) {
+      const ch = t[c]
+      if (ch === 'i' || ch === 'I' || ch === 'f' || ch === 'F') return true
+      if (ch === 'e') {
+        hasScript = true
+        if (c + 1 < t.length) scripts.push({ ...a, text: t.slice(c + 1) })
+        else if (args[j + 1] !== undefined) scripts.push(args[++j])
+        else return true
+        break
+      }
+      if (ch === 'l') {
+        if (c + 1 >= t.length) j++
+        break
+      }
+    }
+  }
+  if (!hasScript && positional.length > 0) scripts.push(positional[0])
+  return scripts.some((s) => hasDecisionsName(s.text) || (s.dyn && /[wWe]/.test(s.text)))
+}
+
+function segmentWritesDecisionLog(seg: string, k: DecisionWalk, depth: number): boolean {
+  const { toks, subs } = shellTokens(seg)
+  const words: ShellTok[] = []
+  const outs: ShellTok[] = []
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]
+    if (t.kind === 'word') {
+      words.push(t)
+      continue
+    }
+    const target = toks[i + 1]
+    if (target === undefined || target.kind !== 'word') {
+      if (t.kind === 'out') return true // an output operator with no target the guard can read
+      continue
+    }
+    i++
+    // >&2 and 2>&1 copy a descriptor; every other output target is a file
+    if (t.kind === 'out' && !(t.text.endsWith('&') && /^(?:\d+|-)$/.test(target.text))) outs.push(target)
+  }
+  if (outs.some((t) => hitsDecisionLog(t, k))) return true
+  if (subs.some((s) => writesDecisionLog(s, k, depth + 1))) return true
+  let n = 0
+  while (n < words.length) {
+    if (/^\w+=/.test(words[n].text)) n++
+    else if (WRAPPERS.has(baseName(words[n].text))) {
+      n++
+      while (n < words.length && words[n].text.startsWith('-')) n++
+    } else break
+  }
+  if (n >= words.length) return false
+  const cmd = baseName(words[n].text)
+  const args = words.slice(n + 1)
+  if (cmd === 'cd' || cmd === 'pushd' || cmd === 'popd') return false
+  if ((cmd === 'node' || cmd === 'nodejs') && args.some((a, j) => /(?:^|[\\/])factory\.ts$/.test(a.text) && args[j + 1]?.text === 'decide')) return false
+  if (SHELLS.has(cmd)) {
+    const c = args.findIndex((a) => /^-[a-z]*c[a-z]*$/i.test(a.text))
+    if (c >= 0 && args[c + 1] !== undefined) return writesDecisionLog(args[c + 1].text, k, depth + 1)
+  }
+  if (cmd === 'tee') return args.filter((a) => !a.text.startsWith('-')).some((a) => hitsDecisionLog(a, k))
+  if (cmd === 'sed') return sedRefused(args)
+  if (cmd === 'python' || cmd === 'python3') {
+    const c = args.findIndex((a) => a.text === '-c')
+    if (c >= 0 && args[c + 1] !== undefined) {
+      const code = args[c + 1].text
+      if (args.some((a, j) => j !== c + 1 && hasDecisionsName(a.text))) return true
+      return hasDecisionsName(code) && !pythonReadsOnly(code)
+    }
+  }
+  // uniq writes its second operand
+  if (cmd === 'uniq') return args.filter((a) => a.text === '-' || !a.text.startsWith('-')).slice(1).some((a) => hitsDecisionLog(a, k))
+  if (READ_ONLY.has(cmd)) return false
+  if (OPAQUE.has(cmd)) return true
+  if (INTERPRETERS.has(cmd)) return args.some((a) => hasDecisionsName(a.text))
+  // any other command (cp, mv, dd, truncate, ...) is refused when one of its words is the file itself
+  return words.slice(n).some((w) => baseName(w.text) === 'decisions.md')
+}
+
+// Python code that opens the log only for reading, judged as an allowlist: it passes only when every call is a known read
+// (open with a read-only mode literal, .read, .readlines, print, sys.stdout.write, len, string methods, ...), the only
+// imports are sys, io, codecs, re and json, and nothing can call a value the guard cannot name. Anything else is refused.
+const PY_BUILTINS = new Set(['print', 'len', 'str', 'int', 'float', 'repr', 'sorted', 'list', 'tuple', 'set', 'dict', 'enumerate', 'range', 'min', 'max', 'sum', 'reversed', 'any', 'all', 'bool', 'abs', 'zip', 'round', 'ord', 'chr'])
+const PY_KEYWORDS = new Set(['and', 'or', 'not', 'in', 'is', 'if', 'else', 'elif', 'for', 'while', 'with', 'as', 'lambda', 'return', 'pass', 'True', 'False', 'None', 'import', 'assert'])
+// names that run or reach code the allowlist cannot see, refused wherever they appear as a bare name
+const PY_BARE_DENY = new Set(['open', 'exec', 'eval', 'compile', 'getattr', 'setattr', 'delattr', 'vars', 'globals', 'locals', 'breakpoint', 'input', 'map', 'filter', 'type', 'object', 'super', 'dir', 'help', 'exit', 'quit', 'memoryview', 'classmethod', 'staticmethod', 'property', 'from', 'del', 'global', 'nonlocal', 'class', 'def', 'async', 'await', 'yield', 'try', 'except', 'raise', 'finally'])
+const PY_METHODS = new Set(['read', 'readlines', 'readline', 'splitlines', 'split', 'rsplit', 'strip', 'lstrip', 'rstrip', 'decode', 'encode', 'lower', 'upper', 'title', 'startswith', 'endswith', 'join', 'count', 'find', 'rfind', 'index', 'format', 'partition', 'rpartition', 'isdigit', 'close', 'get', 'items', 'keys', 'values', 'flush', 'findall', 'finditer', 'search', 'match', 'sub'])
+const PY_MODULES = new Set(['sys', 'io', 'codecs', 're', 'json'])
+const PY_MODULE_CALLS = new Set(['sys.stdout.write', 'sys.stderr.write', 'sys.stdout.flush', 'sys.stdin.read', 'sys.stdin.readlines', 'sys.stdin.readline', 'io.open', 'codecs.open', 're.findall', 're.finditer', 're.search', 're.match', 're.sub', 're.split', 're.compile', 'json.loads', 'json.load', 'json.dumps'])
+const PY_MODULE_VALUES = new Set(['sys.stdout', 'sys.stderr', 'sys.stdin', 'sys.argv'])
+function balancedArgs(s: string, from: number): string | undefined {
+  let depth = 0
+  let quote: string | undefined
+  for (let i = from; i < s.length; i++) {
+    const c = s[i]
+    if (quote) {
+      if (c === '\\') i++
+      else if (c === quote) quote = undefined
+    } else if (c === "'" || c === '"') quote = c
+    else if (c === '(' || c === '[' || c === '{') depth++
+    else if (c === ')' || c === ']' || c === '}') {
+      if (--depth === 0) return s.slice(from + 1, i)
+    }
+  }
+  return undefined
+}
+function topLevelCommas(s: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let quote: string | undefined
+  let cur = ''
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]
+    if (quote) {
+      cur += c
+      if (c === '\\' && i + 1 < s.length) cur += s[++i]
+      else if (c === quote) quote = undefined
+      continue
+    }
+    if (c === "'" || c === '"') quote = c
+    else if (c === '(' || c === '[' || c === '{') depth++
+    else if (c === ')' || c === ']' || c === '}') depth--
+    else if (c === ',' && depth === 0) {
+      out.push(cur.trim())
+      cur = ''
+      continue
+    }
+    cur += c
+  }
+  out.push(cur.trim())
+  return out
+}
+function pythonReadsOnly(code: string): boolean {
+  const c = code
+  if (c.includes('__')) return false
+  // string literals masked, so a name inside one is not code; a quote left over is an unterminated string
+  let masked = c.replace(/'''[\s\S]*?'''|"""[\s\S]*?"""|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, 'S')
+  if (/['"@\\]|[^\x00-\x7f]|\*\*/.test(masked)) return false
+  // an f-string runs code inside its text
+  if (/(?:^|[^\w])(?:[fF][rRbB]?|[rR][fF])['"]/.test(c)) return false
+  // imports: only the names in PY_MODULES; `from ... import` is refused as a bare name
+  for (const m of masked.matchAll(/\bimport\b([^;\n]*)/g)) {
+    if (!m[1].split(',').every((n) => PY_MODULES.has(n.trim()))) return false
+  }
+  masked = masked.replace(/\bimport\b[^;\n]*/g, '')
+  // a call of a call's result, an index or a group (`x()()`, `d['k']()`) calls a value the guard cannot name
+  for (const m of masked.matchAll(/\(/g)) {
+    const before = masked.slice(0, m.index).trimEnd()
+    if (/[)\]}]$/.test(before)) return false
+  }
+  for (const m of masked.matchAll(/[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*/g)) {
+    const start = m.index ?? 0
+    if (start > 0 && /[\w]/.test(masked[start - 1])) continue // the tail of a number such as 1e5
+    const parts = m[0].split(/\s*\.\s*/)
+    const chain = parts.join('.')
+    const dotBefore = masked.slice(0, start).trimEnd().endsWith('.')
+    const call = masked.slice(start + m[0].length).trimStart().startsWith('(')
+    const first = parts[0]
+    if (!dotBefore && PY_MODULES.has(first)) {
+      if (call ? !PY_MODULE_CALLS.has(chain) : !PY_MODULE_VALUES.has(chain)) return false
+      continue
+    }
+    if (parts.length === 1 && !dotBefore) {
+      if (first === 'open') {
+        if (!call) return false
+      } else if (PY_BARE_DENY.has(first)) return false
+      else if (call && !PY_BUILTINS.has(first) && !PY_KEYWORDS.has(first)) return false
+      continue
+    }
+    if (call && !PY_METHODS.has(parts[parts.length - 1])) return false
+  }
+  for (const m of c.matchAll(/\bopen\s*\(/g)) {
+    const before = c.slice(0, m.index).trimEnd()
+    if (before.endsWith('.') && !/\b(?:io|codecs)\.$/.test(before)) return false
+    const args = balancedArgs(c, m.index + m[0].length - 1)
+    if (args === undefined) return false
+    const parts = topLevelCommas(args)
+    if (parts.some((p) => p.startsWith('*'))) return false
+    let mode: string | undefined
+    if (parts[1] !== undefined && !/^\w+\s*=/.test(parts[1])) mode = parts[1]
+    for (const p of parts) {
+      const kw = /^mode\s*=\s*([\s\S]*)$/.exec(p)
+      if (kw) mode = kw[1]
+    }
+    if (mode === undefined) continue
+    const lit = /^(['"])([rbtU]*)\1$/.exec(mode.trim())
+    if (!lit) return false
+  }
+  return true
+}
+
+// Does every command of this line only read its standard input as data? Only a known pure reader qualifies: cat and the
+// other READ_ONLY commands, and tee to a file that is not the log. A wrapper, a shell, an interpreter, patch, ex, ed, a
+// dynamic command word or any command not listed does not, so the body it reads is judged.
+function heredocReaderIsPure(line: string, k: DecisionWalk): boolean {
+  for (const seg of commandSegments(line, true).segments) {
+    const { toks } = shellTokens(seg)
+    const words: ShellTok[] = []
+    for (let i = 0; i < toks.length; i++) {
+      if (toks[i].kind === 'word') words.push(toks[i])
+      else if (toks[i + 1]?.kind === 'word') i++
+    }
+    let n = 0
+    while (n < words.length && /^\w+=/.test(words[n].text)) n++
+    if (n >= words.length) continue
+    if (words[n].dyn) return false
+    const cmd = baseName(words[n].text)
+    if (cmd === 'tee') {
+      if (words.slice(n + 1).filter((a) => !a.text.startsWith('-')).some((a) => hitsDecisionLog(a, k))) return false
+    } else if (!READ_ONLY.has(cmd)) return false
+  }
+  return true
+}
+
+// Heredoc bodies are data for the command that reads them. The `<<` operators are found with the shell tokenizer, so none
+// is taken from a quote or a comment, `<<<` is a here-string, and a quoted or partly quoted delimiter (E"OF") is the word
+// the shell reads. A line is joined with the next while it ends inside a quote or after a backslash. A body is dropped
+// only when its reader is a known pure reader (heredocReaderIsPure) and, for an unquoted delimiter, holds no
+// substitution; any other body comes back as `opaque` with its command line, to be judged as the code it may be. A
+// heredoc that never ends leaves its lines as commands.
+function splitHeredocs(text: string, k: DecisionWalk): { text: string; opaque: { head: string; body: string }[] } {
+  const lines = text.split('\n')
+  const out: string[] = []
+  const opaque: { head: string; body: string }[] = []
+  let i = 0
+  while (i < lines.length) {
+    let acc = lines[i]
+    let end = i
+    let sc = shellTokens(acc)
+    while ((sc.open || /\\$/.test(acc)) && end + 1 < lines.length) {
+      acc += '\n' + lines[++end]
+      sc = shellTokens(acc)
+    }
+    out.push(acc)
+    i = end + 1
+    const marks: { delim: string; quoted: boolean; strip: boolean }[] = []
+    for (let t = 0; t < sc.toks.length; t++) {
+      const tok = sc.toks[t]
+      if (tok.kind !== 'in' || (tok.text !== '<<' && tok.text !== '<<-')) continue
+      const d = sc.toks[t + 1]
+      if (d?.kind !== 'word') continue
+      marks.push({ delim: d.text, quoted: d.quoted === true, strip: tok.text === '<<-' })
+      t++
+    }
+    if (marks.length === 0) continue
+    const pure = heredocReaderIsPure(acc, k)
+    for (const m of marks) {
+      let e = i
+      while (e < lines.length && (m.strip ? lines[e].replace(/^\t+/, '') : lines[e]) !== m.delim) e++
+      if (e >= lines.length) break // unterminated: the lines stay commands
+      const body = lines.slice(i, e).join('\n')
+      if (!pure) opaque.push({ head: acc, body })
+      else if (!m.quoted && /\$\(|`/.test(body)) body.split('\n').forEach((l) => out.push(l))
+      i = e + 1
+    }
+  }
+  return { text: out.join('\n'), opaque }
+}
+
+function opaqueBodyWrites(o: { head: string; body: string }, k: DecisionWalk, depth: number): boolean {
+  if (!hasDecisionsName(o.body)) return false
+  const cmds = o.head.split(/[\s;&|()]+/).map(baseName)
+  if (cmds.some((b) => SHELLS.has(b))) return writesDecisionLog(o.body, k, depth + 1)
+  if (cmds.some((b) => /^python[\d.]*$/.test(b))) return !pythonReadsOnly(o.body)
+  return true
+}
+
+function writesDecisionLog(text: string, k: DecisionWalk, depth: number): boolean {
+  if (depth > 6) return true
+  const split = splitHeredocs(text, k)
+  if (split.opaque.some((o) => opaqueBodyWrites(o, k, depth))) return true
+  text = split.text
+  for (const seg of commandSegments(text, true).segments) {
+    if (!namesDecisionLog(seg)) continue
+    if (segmentWritesDecisionLog(seg, k, depth)) return true
+  }
+  return false
+}
+
+// Fail closed: the caller refuses when this throws on a command that names decisions.md (see the Bash handler).
+export function decisionLogBashVerdict(command: unknown, sessionId: string): { deny: string } | undefined {
+  if (!namesDecisionLog(command)) return undefined
+  return writesDecisionLog(command as string, { sid: sessionId }, 0) ? { deny: DECISION_LOG_REFUSAL } : undefined
+}
+
+async function homeDir($: $): Promise<string | undefined> {
+  return (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+}
+
+// A hook step that must never break the session: an error is logged and the step skipped.
+async function safely<T>($: $, what: string, step: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await step()
+  } catch (error) {
+    try {
+      $.ui.log(`ankur: ${what} failed, letting the call through: ${String(error)}`, { to: 'debug' })
+    } catch {
+      // nothing left to do
+    }
+    return undefined
+  }
+}
+
+// A hook that throws or overruns its budget anyway: answering undefined leaves the hook absent, so the call goes on
+// as if ankur were not installed.
+const failOpen = ($: $, _e: unknown, next: { error?: unknown }) => {
+  try {
+    $.ui.log(`ankur: a hook failed and was skipped: ${String(next.error)}`, { to: 'debug' })
+  } catch {
+    // nothing left to do
+  }
+  return undefined
+}
+
+function withNote(result: ToolCallResult, note: string): ToolCallResult {
+  if (result.deny !== undefined) return result
+  return { ...result, context: [...(result.context ?? []), note] }
+}
+
+// what the mod keeps for the session; a reload or /clear starts it over (the armed limit reset lives in $.state)
+type State = {
+  // every agent seen this session, so a member whose project manager has ended still resolves to its crew
+  known: Map<string, Agent>
+  // the order agents were first seen in
+  seq: number
+  // the name each agent was spawned with, else its id: the one name its report file and crew go by
+  labels: Map<string, string>
+  // the model each agent was started on, from agent.spawn
+  models: Map<string, string>
+  // agents whose report was captured from their hand-back; their next stop leaves the file alone, once
+  handedBack: Set<string>
+  planDesigners: Map<string, 'plan' | 'amend'>
+  planRoute: Promise<unknown>
+  pendingPlanCalls: Map<string, 'plan' | 'amend'>
+  // each pending hand-back's message, by agent: what a project manager's stop is judged on
+  handBacks: Map<string, string>
+  // project managers whose pending hand-back was held back from the report file by the Examined check; the stop
+  // that goes through writes it
+  withheld: Set<string>
+  // the tag (question, blocker, proposal) each project manager shows in /ankur until answered or replaced, by project manager id
+  waiting: Map<string, Tag>
+  // when each agent last made a tool call or a model request, by id
+  activity: Map<string, number>
+  // agents already reported as stalled; new activity takes them off
+  stalled: Set<string>
+  // how many stops of each project manager's current stop streak were blocked
+  streaks: Map<string, number>
+  // when each agent was spawned, else when the mod first saw it: how long /ankur says it has been running
+  started: Map<string, number>
+  // each listed agent's status at the last heartbeat pass; undefined before the first, so no agent counts as resumed
+  lastPass?: Map<string, string>
+  // when each project manager's current idle period began: the first pass that saw it not running with nothing at work
+  idleSince: Map<string, number>
+  // project managers already prompted for in their current idle period
+  idlePrompted: Set<string>
+  // when each project manager's latest final report was captured
+  finals: Map<string, number>
+  // when each agent's current stint began: the pass that saw it running again after one that didn't. None for an
+  // agent first seen running, whose stint began before the mod could tell
+  stints: Map<string, number>
+  // project managers a pass saw go from running to stopped since they last ran: the only project managers the idle check prompts for
+  stopped: Set<string>
+  // when the main session last made a tool call or a model request
+  mainActive?: number
+  // this session's ankur folder, resolved once per session id from the session's working directory
+  root?: string
+  // the session id `root` was resolved for: a /clear or a fork starts a new id, whose folder is a new one
+  rootSession?: string
+  // appends to the event log, one at a time, each starting once the one before has settled; /clear leaves it be
+  events: Promise<unknown>
+  // how many of those appends are queued or running
+  eventsPending: number
+}
+
+const LIMIT_RESET_REF = { plugin: 'ankur', key: 'limitReset' } as const
+
+// The session's ankur folder: worked out once per session id, from the session's own working directory, so the path a
+// note names and the path a report is written to always agree. The folder is named by the session id, and a /clear or a
+// fork gives the session a new id, so the cache is keyed by it: a handler after the new id never names the old folder.
+// `sessionId` is the event's own id where the event carries one (classic.SessionStart), else the engine's current id.
+// Not cached while it cannot be found.
+// The run dir's name in the git common dir, the rule of bin/names.ts resolveRunDir through $.fs: ankur, else the old name when only it exists.
+export async function runDirIn(exists: (path: string) => Promise<boolean>, common: string | undefined): Promise<string> {
+  if (common === undefined || common === '') return NEW
+  const base = slashed(common)
+  try {
+    return runDirName(await exists(`${base}/${NEW}`), await exists(`${base}/${OLD}`))
+  } catch {
+    return NEW // fail open: an unreadable dir means the new name
+  }
+}
+
+async function rootOf($: $, state: State, sessionId?: string): Promise<string | undefined> {
+  const sid = sessionId ?? (await $.session.id())
+  if (state.root !== undefined && state.rootSession === sid) return state.root
+  const common = await gitCommonDir($, await $.session.cwd())
+  const root = ankurDir(common, await homeDir($), sid, await runDirIn(p => $.fs.exists(p), common))
+  if (root !== undefined) {
+    state.root = root
+    state.rootSession = sid
+  }
+  return root
+}
+
+// The same name as bin/factory/warnings.ts SESSION_START_FILE, which reads it; the hook imports nothing from bin.
+const SESSION_START_FILE = 'session-start.json'
+
+// The sources that start the main session's agents afresh: a new process (startup), a resumed one (resume), and a /clear or
+// a fork, which give the session a new id and reload its agents. A compact keeps the session and its loaded agents.
+const SESSION_START_SOURCES = new Set(['startup', 'resume', 'clear', 'fork'])
+
+// Writes <ankur dir>/session-start.json whole, the start `factory start --dir` measures its newer-than-session warnings from
+// (bin/factory/warnings.ts). The caller fails open on a write error.
+async function writeSessionStart($: $, dir: string, source: string, sessionId: string): Promise<void> {
+  const ts = new Date(await $.clock.now()).toISOString()
+  await $.fs.write(`${dir}/${SESSION_START_FILE}`, JSON.stringify({ v: 1, ts, source, session: sessionId }) + '\n')
+}
+
+// The unattended ask gate (contract-025 s7): on the main thread, while the session's own ankur dir holds unattended.json,
+// AskUserQuestion is denied, as no one is there to answer. Any read error fails open (undefined).
+export async function unattendedAskVerdict(
+  input: { readonly agentId?: string },
+  ctx: { readonly ankurDir: string | undefined; readonly exists: (p: string) => boolean | Promise<boolean> },
+): Promise<{ deny: string } | undefined> {
+  if (input.agentId !== undefined || ctx.ankurDir === undefined) return undefined
+  try {
+    if (!(await ctx.exists(`${ctx.ankurDir}/unattended.json`))) return undefined
+  } catch {
+    return undefined
+  }
+  return { deny: '[ankur] unattended run: no one is here to answer. Run `factory escalate --kind client-question …` and go on with the work that doesn\'t depend on the answer.' }
+}
+
+// The plan-file route: the inner lines of the first block that opens with exactly `open` and ends at the
+// next line that is exactly four backticks, joined with a newline. Undefined when there is no such block.
+export function fencedBlock(message: string, open: string): string | undefined {
+  const lines = message.split('\n').map(l => l.replace(/\r$/, ''))
+  const start = lines.indexOf(open)
+  if (start < 0) return undefined
+  const end = lines.indexOf('````', start + 1)
+  return end < 0 ? undefined : lines.slice(start + 1, end).join('\n')
+}
+
+// A plan-mode design engineer's hand-back, written to the two fixed paths under the ankur dir; never over a plan that is
+// approved or unreadable. Says why in the debug log when it writes nothing.
+// Why the plan on disk must be kept, read fresh: undefined when there is none or it is unapproved.
+async function keepReason($: $, dir: string): Promise<string | undefined> {
+  if (!(await $.fs.exists(planPath(dir)))) return undefined
+  let existing: Plan | undefined
+  try {
+    existing = parsePlan(String(await $.fs.read(planPath(dir))))
+  } catch {
+    return 'it could not be read'
+  }
+  if (existing === undefined) return 'it is not a readable plan'
+  return existing.approvedAt === null ? undefined : 'it is approved'
+}
+
+// Routes run one at a time, so a second hand-back waits until the first has finished both writes; a failed route
+// does not stop the chain.
+function writePlanFiles($: $, state: State, message: string): Promise<void> {
+  const run = state.planRoute.catch(() => undefined).then(() => routePlanFiles($, state, message))
+  state.planRoute = run.catch(() => undefined)
+  return run
+}
+
+async function routePlanFiles($: $, state: State, message: string): Promise<void> {
+  const json = fencedBlock(message, '````json plan.json')
+  const md = fencedBlock(message, '````markdown plan.md')
+  if (json === undefined || md === undefined) return logRule($, `plan-file route wrote nothing: ${json === undefined ? 'no plan.json block' : 'no plan.md block'}`)
+  if (parsePlan(json) === undefined) return logRule($, 'plan-file route wrote nothing: the plan.json block is not a plan')
+  const dir = await rootOf($, state)
+  if (dir === undefined) return logRule($, 'plan-file route wrote nothing: no ankur dir')
+  let carried: unknown
+  try {
+    carried = JSON.parse(json.startsWith('\uFEFF') ? json.slice(1) : json)
+  } catch {
+    return logRule($, 'plan-file route wrote nothing: the plan.json block is not JSON')
+  }
+  if (!isRecord(carried)) return logRule($, 'plan-file route wrote nothing: the plan.json block is not an object')
+  // Read inside the serialised route, right before the write, so an approval that lands while this route waits its turn
+  // is kept. An approval landing between this read and the write is still overwritten: the PM's edit shares no
+  // lock with the hook.
+  const kept = await keepReason($, dir)
+  if (kept !== undefined) return logRule($, `plan-file route kept the existing plan: ${kept}`)
+  await $.fs.write(planPath(dir), JSON.stringify({ ...carried, approvedAt: null }, null, 2) + '\n')
+  try {
+    await $.fs.write(`${dir}/plan.md`, md)
+  } catch (err) {
+    await logRule($, `plan-file route wrote plan.json but not plan.md: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+// An amend-mode design engineer's hand-back: the goal merged into the approved plan.json, its readable plan
+// written to plan-<id>.md. Shares the plan route's chain, so the two never interleave. Says why in the debug log when it
+// writes nothing.
+// Resolves to the reason when nothing was written, undefined when the goal was installed.
+function writeAmendFiles($: $, state: State, message: string): Promise<string | undefined> {
+  const run = state.planRoute.catch(() => undefined).then(() => routeAmendFiles($, state, message))
+  state.planRoute = run.then(() => undefined, () => undefined)
+  return run
+}
+
+async function routeAmendFiles($: $, state: State, message: string): Promise<string | undefined> {
+  const nothing = async (reason: string) => {
+    await logRule($, `plan-amend route wrote nothing: ${reason}`)
+    return reason
+  }
+  const json = fencedBlock(message, '````json plan-amend.json')
+  const md = fencedBlock(message, '````markdown plan.md')
+  if (json === undefined || md === undefined) return nothing(json === undefined ? 'no plan-amend.json block' : 'no plan.md block')
+  const dir = await rootOf($, state)
+  if (dir === undefined) return nothing('no ankur dir')
+  let amend: unknown
+  try {
+    amend = JSON.parse(json.startsWith('﻿') ? json.slice(1) : json)
+  } catch {
+    return nothing('the plan-amend.json block is not JSON')
+  }
+  // read inside the serialised route, right before the write, so the PM's approval edits count
+  let existing: unknown
+  try {
+    if (await $.fs.exists(planPath(dir))) {
+      const text = String(await $.fs.read(planPath(dir)))
+      existing = JSON.parse(text.startsWith('﻿') ? text.slice(1) : text)
+    }
+  } catch {
+    existing = undefined
+  }
+  const merged = amendPlan(existing, amend, new Date(await $.clock.now()).toISOString())
+  if ('reason' in merged) return nothing(merged.reason)
+  await $.fs.write(planPath(dir), JSON.stringify(merged.plan, null, 2) + '\n')
+  const added = Array.isArray(merged.plan.crews) ? merged.plan.crews.filter(c => goalOf(c) === merged.id) : []
+  await logRule($, `plan-amend route added goal ${merged.id}: ${added.length} crews`)
+  try {
+    await $.fs.write(`${dir}/plan-${merged.id}.md`, md)
+  } catch (err) {
+    await logRule($, `plan-amend route wrote plan.json but not plan-${merged.id}.md: ${err instanceof Error ? err.message : String(err)}`)
+  }
+  // a designer's draft may only point at plan.json; check reads the fenced block of the goal file, so carry it there
+  for (const c of added) {
+    const slug = (c as { slug?: unknown }).slug
+    const test = (c as { acceptanceTest?: unknown }).acceptanceTest
+    if (typeof slug !== 'string' || typeof test !== 'string' || test.trim() === '') continue
+    const file = `${dir}/goals/${slug}.md`
+    try {
+      if (!(await $.fs.exists(file))) continue
+      const text = String(await $.fs.read(file))
+      const next = withAcceptanceTest(text, test)
+      if (next !== text) await $.fs.write(file, next)
+    } catch (err) {
+      await logRule($, `plan-amend route could not put the acceptance test into goals/${slug}.md: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return undefined
+}
+
+// The session's plan, read fresh on every call so the PM's edits count at once; never written here. Undefined
+// when there is no ankur dir or no readable plan.
+async function planOf($: $, state: State): Promise<Plan | undefined> {
+  const dir = await rootOf($, state)
+  if (dir === undefined || !(await $.fs.exists(planPath(dir)))) return undefined
+  return parsePlan(String(await $.fs.read(planPath(dir))))
+}
+
+// how long the idle prompt waits on the plan read before it names the 0.2.1 successor instead
+const PLAN_READ_MS = 2000
+
+// The plugin dir, from this module's own path (<plugin>/hooks/register.ts); undefined when it can't be worked out.
+function pluginDirOf(): string | undefined {
+  try {
+    let p = decodeURIComponent(new URL('..', import.meta.url).pathname)
+    if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1)
+    p = p.replace(/\/+$/, '')
+    return p === '' ? undefined : p
+  } catch {
+    return undefined
+  }
+}
+
+// The plan as planOf reads it, or undefined when the read hasn't settled within `ms` on the engine clock, so a hung
+// read never holds up the heartbeat pass that awaits it. The timer is cancelled once the read settles; a read that
+// settles after the bound is dropped. A read that throws rejects, as planOf does.
+function planWithin($: $, state: State, ms: number): Promise<Plan | undefined> {
+  return new Promise((resolve, reject) => {
+    const timer = $.clock.after(ms, () => resolve(undefined))
+    planOf($, state).then(
+      plan => {
+        timer.cancel()
+        resolve(plan)
+      },
+      (err: unknown) => {
+        timer.cancel()
+        reject(err)
+      },
+    )
+  })
+}
+
+// `step`'s value, or undefined when it hasn't settled within `ms` on the engine clock, as planWithin bounds the plan
+// read; a step that rejects rejects. For the QC and Examined reads, so a hung read lets the call or stop through.
+function within<T>($: $, ms: number, step: () => Promise<T>): Promise<T | undefined> {
+  return new Promise((resolve, reject) => {
+    const timer = $.clock.after(ms, () => resolve(undefined))
+    step().then(
+      value => {
+        timer.cancel()
+        resolve(value)
+      },
+      (err: unknown) => {
+        timer.cancel()
+        reject(err)
+      },
+    )
+  })
+}
+
+// the agent list, merged into what was seen before. `listed` is every agent the list returned, whatever its
+// status (a completed or killed agent can still be listed); test isLive for an agent that is still at work.
+async function agentsOf($: $, state: State): Promise<{ all: Agent[]; listed: Agent[] }> {
+  const answer = await $.agent.list()
+  const ids = new Set(answer.map(a => a.id))
+  for (const a of state.known.values()) if (!ids.has(a.id)) a.live = false
+  const listed: Agent[] = []
+  for (const a of answer) {
+    const before = state.known.get(a.id)
+    const seq = before?.seq ?? state.seq++
+    const agent: Agent = { id: a.id, type: a.type, status: a.status, description: a.description, name: a.name, parentId: a.parentId, label: state.labels.get(a.id), live: LIVE.has(a.status), seq }
+    state.known.set(a.id, agent)
+    listed.push(agent)
+  }
+  return { all: [...state.known.values()], listed }
+}
+
+// an agent did something: it is not stalled, whatever it was before
+function touch(state: State, id: string, at: number) {
+  const before = state.activity.get(id)
+  if (before === undefined || at > before) state.activity.set(id, at)
+  state.stalled.delete(id)
+}
+
+// Records activity without waiting on it: a tool call or a model step never pays for the clock read.
+function noteActivity($: $, state: State, id: string) {
+  try {
+    void $.clock.now().then(
+      at => touch(state, id, at),
+      () => undefined,
+    )
+  } catch {
+    // a clock that throws records nothing
+  }
+}
+
+// the main session's tool call or model request, recorded as noteActivity records an agent's
+function noteMainActivity($: $, state: State) {
+  try {
+    void $.clock.now().then(
+      at => {
+        if (state.mainActive === undefined || at > state.mainActive) state.mainActive = at
+      },
+      () => undefined,
+    )
+  } catch {
+    // a clock that throws records nothing
+  }
+}
+
+// what the stop gate needs of a stopping agent: whether it is a project manager the main thread started, and its descendants
+// as last listed. One not yet listed is taken at its event's type.
+async function stopperOf($: $, state: State, id: string, type: string | undefined): Promise<{ projectManager: boolean; descendants: Agent[] }> {
+  const all = (await agentsOf($, state)).all
+  const known = all.find(a => a.id === id)
+  const projectManager = stopperIsLead(known, type)
+  return { projectManager, descendants: projectManager ? descendantsOf(id, all) : [] }
+}
+
+const RULINGS: ReadonlySet<string> = new Set(['VERDICT: PASS', 'VERDICT: FAIL', 'STRESSTEST'])
+
+const isRuling = (text: string) => RULINGS.has(markerOf(text) ?? '')
+
+async function heldRuling($: $, path: string): Promise<boolean> {
+  return (await safely($, 'report read', async () => (await $.fs.exists(path)) && isRuling(String(await $.fs.read(path))))) === true
+}
+
+// `tags` false: an interim stop's text goes to <label>.interim.md, leaving the report alone, and neither sets nor
+// clears what /ankur shows
+async function writeReport($: $, state: State, crew: Crew, id: string, text: string, tags = true) {
+  const dir = await rootOf($, state)
+  if (dir === undefined) return
+  // an agent started before the mod loaded has no spawn name on record: its listed name, else its id
+  const known = state.known.get(id)
+  const label = state.labels.get(id) ?? (known === undefined ? id : labelOf(known))
+  // a report that holds a ruling is kept: a later stop by the same agent with no ruling of its own (a resumed QC's
+  // follow-up) is interim, since the merge gate and /ankur read the ruling from this file. A new ruling replaces it.
+  if (tags && !isRuling(text) && (await heldRuling($, reportPath(dir, crew.crew, label)))) tags = false
+  await $.fs.write(tags ? reportPath(dir, crew.crew, label) : interimPath(dir, crew.crew, label), text)
+  if (tags) await logEvent($, state, { event: 'report', crew: crew.crew, agent: label, marker: markerOf(text) })
+  // a QC's FAIL that spends the crew's rework allowance is recorded once more, as its own event
+  if (tags && markerOf(text) === 'VERDICT: FAIL' && isQcName(crew.crew.toLowerCase(), label.toLowerCase())) await safely($, 'rework allowance record', () => allowanceRecord($, state, crew.crew, label))
+  if (!crew.isProjectManager || !tags) return
+  // a project manager's captured text tells whether it stopped on a question, a blocker or a proposal
+  const tag = tagOf(text)
+  if (tag === undefined) state.waiting.delete(id)
+  else state.waiting.set(id, tag)
+  // a captured report ends the project manager's idle period; a final one excuses it until the project manager runs again
+  state.idleSince.delete(id)
+  state.idlePrompted.delete(id)
+  if (isFinalReport(text)) state.finals.set(id, await $.clock.now())
+}
+
+// one line onto the message log; past ROLL_BYTES the log moves to the next free messages.<n>.jsonl first
+async function appendMessage($: $, state: State, entry: { from: string; to: string; summary: string }) {
+  const dir = await rootOf($, state)
+  if (dir === undefined) return
+  const line = JSON.stringify({ ts: new Date(await $.clock.now()).toISOString(), ...entry })
+  await appendLine($, messagesPath(dir), n => rolledPath(dir, n), line)
+}
+
+// one line onto the event log, under docs/events.schema.json; rolls as the message log does
+async function appendEvent($: $, state: State, event: AnkurEvent) {
+  const dir = await rootOf($, state)
+  if (dir === undefined) return
+  const { event: name, ...fields } = event
+  const line = JSON.stringify({ v: 1, ts: new Date(await $.clock.now()).toISOString(), event: name, ...fields })
+  await appendLine($, eventsPath(dir), n => rolledEventsPath(dir, n), line)
+}
+
+// Resolves once `step` settles or after `ms` on the engine clock, whichever is first, calling `late` in the second
+// case; never rejects. The timer is cancelled once the step settles. With no clock it resolves at once.
+// Known limitation (red team B3): if another hook refuses $.clock.after without throwing, the timer never fires, so a
+// step that never settles holds the caller with it.
+function settledWithin($: $, ms: number, step: Promise<unknown>, late: () => void = () => {}): Promise<void> {
+  return new Promise(resolve => {
+    let timer: Timer
+    try {
+      timer = $.clock.after(ms, () => {
+        late()
+        resolve()
+      })
+    } catch {
+      resolve()
+      return
+    }
+    const done = () => {
+      timer.cancel()
+      resolve()
+    }
+    step.then(done, done)
+  })
+}
+
+// Queues one event-log line behind the ones before it and waits for it, at most EVENT_WAIT_MS. Never throws: a failed
+// append is logged and changes nothing else (P5). The queue is strictly serial and never released on a timer: an
+// append starts only once the one before it has settled, so a slow write that completes late can't clobber a newer
+// line. A caller whose wait runs out logs it and goes on; its line still lands later, in order, if the fs answers.
+// Past EVENT_BACKLOG_MAX queued appends, a new event is dropped and logged.
+function logEvent($: $, state: State, event: AnkurEvent): Promise<void> {
+  const failed = (reason: string) => {
+    try {
+      $.ui.log(`ankur: event log failed, letting the call through: ${reason}`, { to: 'debug' })
+    } catch {
+      // nothing left to do
+    }
+  }
+  if (state.eventsPending >= EVENT_BACKLOG_MAX) {
+    failed(`${EVENT_BACKLOG_MAX} appends already queued`)
+    return Promise.resolve()
+  }
+  state.eventsPending++
+  const settled = () => {
+    state.eventsPending--
+  }
+  // safely never rejects, so the chain never breaks on a failed append
+  const link = state.events.then(() => safely($, 'event log', () => appendEvent($, state, event))).then(settled, settled)
+  state.events = link
+  return settledWithin($, EVENT_WAIT_MS, link, () => failed(`no answer in ${EVENT_WAIT_MS}ms`))
+}
+
+// `$.fs` has no append: read the log, and past ROLL_BYTES copy it to the first free rolled path and start it over.
+// A roll whose copy landed but whose rewrite of the live log failed leaves the newest rolled file equal to the live
+// log; the next append finds that and only starts the live log over, so no line is rolled twice.
+async function appendLine($: $, path: string, rolled: (n: number) => string, line: string) {
+  let before = ''
+  if (await $.fs.exists(path)) {
+    const text = String(await $.fs.read(path))
+    if ((await $.fs.stat(path)).size >= ROLL_BYTES) {
+      let n = 1
+      while (await $.fs.exists(rolled(n))) n++
+      const copied = n > 1 && String(await $.fs.read(rolled(n - 1))) === text
+      if (!copied) await $.fs.write(rolled(n), text)
+    } else {
+      before = text
+    }
+  }
+  const sep = before === '' || before.endsWith('\n') ? '' : '\n'
+  await $.fs.write(path, `${before}${sep}${line}\n`)
+}
+
+async function lastModified($: $, dir: string): Promise<number | undefined> {
+  if (!(await $.fs.exists(dir))) return undefined
+  let last: number | undefined
+  for (const f of await $.fs.list(dir)) {
+    // an interim note is not a report
+    if (f.kind !== 'file' || isInterimFile(f.name)) continue
+    const { mtimeMs } = await $.fs.stat(`${dir}/${f.name}`)
+    if (last === undefined || mtimeMs > last) last = mtimeMs
+  }
+  return last
+}
+
+// One debug line naming the rule that refused or sent back, and whom; never report text (P7, P8). Waited for, so
+// the line lands before the call it explains returns, but at most EVENT_WAIT_MS: a hung log never holds a call.
+async function logRule($: $, line: string): Promise<void> {
+  try {
+    await settledWithin($, EVENT_WAIT_MS, Promise.resolve().then(() => $.ui.log(`ankur: ${line}`, { to: 'debug' })))
+  } catch {
+    // nothing left to do
+  }
+}
+
+// The crew's QC files modified at or after `since`, from reports/<crew>/. Texts are read only when `withText`.
+// No folder means no QC files (0 FAILs, no PASS). A list, stat or read that throws rejects, and
+// the caller's safely lets the call through.
+async function qcFilesOf($: $, dir: string, crew: string, since: number, withText: boolean): Promise<(QcFile & { path: string })[]> {
+  const files: (QcFile & { path: string })[] = []
+  if (!(await $.fs.exists(dir))) return files
+  for (const f of await $.fs.list(dir)) {
+    if (f.kind !== 'file' || isInterimFile(f.name) || !isQcFile(crew.toLowerCase(), f.name.toLowerCase())) continue
+    const { mtimeMs } = await $.fs.stat(`${dir}/${f.name}`)
+    if (!(mtimeMs >= since)) continue
+    files.push({ name: f.name.toLowerCase(), text: withText ? String(await $.fs.read(`${dir}/${f.name}`)) : '', mtimeMs, path: `${dir}/${f.name}` })
+  }
+  return files
+}
+
+// The crew's QC FAILs this run, with the plan's allowance rule; undefined when the plan sets none (v1, no or a bad
+// reworkAllowance, an approvedAt that doesn't parse, no ankur dir).
+// A plan read or QC-folder read that overruns its bound counts as no rule.
+async function failsOf($: $, state: State, crew: string): Promise<{ plan: Plan; fails: number } | undefined> {
+  const plan = await planWithin($, state, PLAN_READ_MS)
+  const since = runStart(plan)
+  if (plan === undefined || reworkAllowanceOf(plan) === undefined || since === undefined) return undefined
+  const dir = await rootOf($, state)
+  if (dir === undefined) return undefined
+  const files = await within($, EVENT_WAIT_MS, () => qcFilesOf($, reportDir(dir, crew), crew, since, true))
+  return files === undefined ? undefined : { plan, fails: qcFails(crew.toLowerCase(), files, since) }
+}
+
+// A QC-named Agent call from inside a crew whose rework allowance is spent is refused
+async function allowanceGate($: $, state: State, crew: string, name: unknown): Promise<{ deny: string } | undefined> {
+  // NTFS names are case-insensitive, so QC names and the crew compare case-folded; the refusal names the crew as given
+  const folded = typeof name === 'string' ? name.toLowerCase() : name
+  if (!isQcName(crew.toLowerCase(), folded)) return undefined
+  const counted = await failsOf($, state, crew)
+  const verdict = counted === undefined ? undefined : qcAllowanceVerdict(counted.plan, crew.toLowerCase(), folded, counted.fails)
+  const allowance = counted === undefined ? undefined : reworkAllowanceOf(counted.plan)
+  const refused = verdict === undefined || allowance === undefined ? undefined : { deny: allowanceRefusal(crew, counted?.fails ?? 0, allowance) }
+  if (refused !== undefined) await logRule($, `rework allowance gate refused a QC spawn in crew ${crew}: ${counted?.fails} QC FAILs this run`)
+  return refused
+}
+
+// A saved QC FAIL that leaves the crew's allowance spent appends one allowance-spent line
+async function allowanceRecord($: $, state: State, crew: string, agent: string) {
+  const counted = await failsOf($, state, crew)
+  if (counted === undefined || !allowanceSpent(counted.plan, counted.fails)) return
+  await logRule($, `rework allowance spent in crew ${crew} by QC ${agent}`)
+  await logEvent($, state, { event: ALLOWANCE_SPENT_EVENT, crew, agent })
+}
+
+const GIT_MS = 15_000
+
+// A ref git resolves against the checkout it runs in (HEAD, @, ORIG_HEAD and the like in any case, as Windows git
+// matches them, a per-worktree namespace, or a revision expression): in the session cwd it names the main
+// checkout's commit, not the crew's, so the head guard treats it as unknown.
+const PER_WORKTREE = /^(?:(?:[a-z_]*_)?head$|refs\/(?:worktree|bisect|rewritten)\/|worktrees\/|main-worktree\/)/i
+function checkoutRelativeRef(ref: string): boolean {
+  return ref === '@' || PER_WORKTREE.test(ref) || ['@{', '^', '~', ':'].some(c => ref.includes(c))
+}
+
+// the commit `branch` names, or undefined when git fails or prints anything but a 40-hex SHA
+async function headOf($: $, cwd: string | undefined, branch: string): Promise<string | undefined> {
+  if (branch.startsWith('-')) return undefined
+  try {
+    const r = await $.process.run(['git', 'rev-parse', '--verify', '--quiet', `${branch}^{commit}`], { cwd, timeoutMs: GIT_MS })
+    const out = r.stdout.replace(/\r/g, '').trim()
+    return r.exitCode === 0 && SHA40.test(out) ? out : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// PATCH_COMMAND's id for base...branch, or undefined when either half fails, is cut short or prints no id
+async function patchOf($: $, cwd: string | undefined, base: string, branch: string): Promise<string | undefined> {
+  if (base.startsWith('-') || branch.startsWith('-')) return undefined
+  try {
+    const diff = await $.process.run(['git', 'diff', '--no-color', '--no-ext-diff', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', `${base}...${branch}`], { cwd, timeoutMs: GIT_MS })
+    if (diff.exitCode !== 0 || diff.isStdoutTruncated) return undefined
+    const id = await $.process.run(['git', 'patch-id', '--stable'], { cwd, timeoutMs: GIT_MS, stdin: diff.stdout })
+    return id.exitCode === 0 && !id.isStdoutTruncated ? patchIdOf(id.stdout) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// On a project manager's text that would pass by its Proof section: on a v>=2 plan, the Examined headings,
+// then, for an untagged report, the head guard. Undefined: the stop goes through.
+// A plan read or QC-folder read that overruns its bound lets the stop through.
+async function finalReportVerdict($: $, state: State, id: string, text: string): Promise<{ block: string; rule: string } | undefined> {
+  const plan = await planWithin($, state, PLAN_READ_MS)
+  if (!planAtLeastV2(plan)) return undefined
+  const examined = examinedVerdict(plan, text)
+  if (examined !== undefined) return { ...examined, rule: 'examined headings missing' }
+  const since = runStart(plan)
+  const crew = crewOf(id, [...state.known.values()])
+  const dir = await rootOf($, state)
+  if (isTagged(text) || since === undefined || crew === undefined || dir === undefined) return undefined
+  const reports = reportDir(dir, crew.crew)
+  const read = await within($, EVENT_WAIT_MS, async () => {
+    const latest = latestQc(crew.crew.toLowerCase(), await qcFilesOf($, reports, crew.crew, since, false), since)
+    return { ruling: latest === undefined ? undefined : qcRuling(String(await $.fs.read((latest as QcFile & { path: string }).path))) }
+  })
+  if (read === undefined) return undefined
+  const { ruling } = read
+  // the rows that need no git: no clean PASS, or a PASS without its head lines
+  const early = headVerdict(plan, ruling, undefined, undefined)
+  if (early !== undefined) return { ...early, rule: early.block === NO_HEAD_REASON ? 'QC PASS has no head lines' : 'no clean QC PASS this run' }
+  const where = branchOf(text)
+  if (ruling === undefined || where === undefined || checkoutRelativeRef(where.branch) || checkoutRelativeRef(where.base)) return undefined
+  const cwd = await $.session.cwd()
+  const head = await headOf($, cwd, where.branch)
+  if (head === undefined || head === ruling.head) return undefined
+  const moved = headVerdict(plan, ruling, head, await patchOf($, cwd, where.base, where.branch))
+  return moved === undefined ? undefined : { ...moved, rule: 'head moved and patch id differs' }
+}
+
+async function statusOf($: $, state: State): Promise<string> {
+  const { all, listed } = await agentsOf($, state)
+  // a listed project manager shows its own status, completed or killed included; one the list dropped shows as ended
+  const listedIds = new Set(listed.map(a => a.id))
+  const dir = await rootOf($, state)
+  const now = await $.clock.now()
+  const crews: CrewStatus[] = []
+  const plan = await safely($, 'plan lines', () => planOf($, state))
+  const since = runStart(plan) ?? 0
+  for (const projectManager of all.filter(isProjectManager)) {
+    const crew = crewName(projectManager)
+    const counts: Record<string, number> = {}
+    const stalled: { label: string; minutes: number }[] = []
+    const members: NonNullable<CrewStatus['members']> = []
+    for (const a of listed) {
+      if (crewOf(a.id, all)?.projectManagerId !== projectManager.id) continue
+      const last = state.activity.get(a.id)
+      if (state.stalled.has(a.id) && a.status === 'running' && last !== undefined) stalled.push({ label: labelOf(a), minutes: Math.floor((now - last) / 60_000) })
+      if (a.id === projectManager.id || !LIVE.has(a.status)) continue
+      const m = family(state.models.get(a.id))
+      counts[m] = (counts[m] ?? 0) + 1
+      // an agent the mod never saw spawn counts from the first time it was seen
+      const since = state.started.get(a.id) ?? now
+      state.started.set(a.id, since)
+      members.push({ label: labelOf(a), status: a.status, runningMs: now - since, model: m, lastActiveMs: last })
+    }
+    const reports = dir === undefined ? undefined : reportDir(dir, crew)
+    const lastReportMs = reports === undefined ? undefined : await lastModified($, reports)
+    const qc = reports === undefined ? undefined : await safely($, 'QC verdict', async () => {
+      const latest = latestQc(crew.toLowerCase(), await qcFilesOf($, reports, crew, since, false), since)
+      return latest === undefined ? undefined : qcRuling(String(await $.fs.read(latest.path))).verdict
+    })
+    crews.push({
+      crew,
+      status: listedIds.has(projectManager.id) ? projectManager.status : 'ended',
+      live: counts,
+      lastReportMs,
+      tag: state.waiting.get(projectManager.id),
+      waitingOnMembers: !(listedIds.has(projectManager.id) && projectManager.status === 'running') && descendantsOf(projectManager.id, all).some(isLive),
+      lastActiveMs: state.activity.get(projectManager.id),
+      stalled,
+      qc,
+      dir: reports,
+      members,
+    })
+  }
+  const log = dir === undefined ? undefined : messagesPath(dir)
+  const text = statusText(crews, now, log !== undefined && (await $.fs.exists(log)) ? log : undefined, dir)
+  // the plan's crews go above the 0.2.1 lines; with no readable plan the output is exactly 0.2.1's
+  return plan === undefined ? text : [...planLines(plan), text].join('\n')
+}
+
+// Whether the project manager's report on disk, written in its current stint, is final or tagged. It is what a reloaded mod has
+// in place of `finals` and `waiting`. A report it cannot read excuses the project manager: a missed prompt beats a wrong one,
+// and the next pass reads again.
+async function excusedOnDisk($: $, state: State, projectManager: Agent, crew: Crew): Promise<boolean> {
+  const excused = await safely($, 'idle project manager report', async () => {
+    const dir = await rootOf($, state)
+    if (dir === undefined) return false
+    const path = reportPath(dir, crew.crew, state.labels.get(projectManager.id) ?? labelOf(projectManager))
+    if (!(await $.fs.exists(path))) return false
+    const stint = state.stints.get(projectManager.id)
+    if (stint !== undefined && (await $.fs.stat(path)).mtimeMs < stint) return false
+    const text = String(await $.fs.read(path))
+    return isFinalReport(text) || tagOf(text) !== undefined
+  })
+  return excused !== false
+}
+
+// A project manager a pass saw go from running to stopped, now `idle` (a normal end of turn: never waiting, killed, failed or
+// completed), with nothing of its crew at work, no waiting tag and no final report in its current stint, is prompted
+// for once per idle period, STALL_MS into it. Activity alone doesn't start a stint, so a sign-off after a final
+// hand-back doesn't undo it; a resume does. The heartbeat has no task list, so a member's background work counts
+// through the member's own entry in the agent list.
+async function idleProjectManagerCheck($: $, state: State, projectManager: Agent, crew: Crew, all: readonly Agent[], now: number) {
+  const final = state.finals.get(projectManager.id)
+  const stint = state.stints.get(projectManager.id)
+  const excused =
+    !state.stopped.has(projectManager.id) ||
+    projectManager.status !== 'idle' ||
+    state.waiting.has(projectManager.id) ||
+    (final !== undefined && (stint === undefined || final >= stint)) ||
+    isInterimStop(descendantsOf(projectManager.id, all), undefined) ||
+    (await excusedOnDisk($, state, projectManager, crew))
+  if (excused) {
+    state.idleSince.delete(projectManager.id)
+    state.idlePrompted.delete(projectManager.id)
+    return
+  }
+  const since = state.idleSince.get(projectManager.id) ?? now
+  state.idleSince.set(projectManager.id, since)
+  if (state.idlePrompted.has(projectManager.id) || now - since < STALL_MS) return
+  // flagged before any await, so an overlapping check never prompts twice
+  state.idlePrompted.add(projectManager.id)
+  let next = nextCrew(crew.crew)
+  try {
+    next = successorCrew(await planWithin($, state, PLAN_READ_MS), crew.crew)
+  } catch {
+    // fails open: any error reading the plan gives the 0.2.1 name
+  }
+  const minutes = Math.floor((now - since) / 60_000)
+  const text = idleProjectManagerText(labelOf(projectManager), crew.crew, minutes, next)
+  // queued, not awaited: the wake never waits on the event log
+  void logEvent($, state, { event: 'stall', crew: crew.crew, agent: labelOf(projectManager), kind: IDLE_LEAD_KIND, minutes })
+  await safely($, 'idle project manager wake', () => $.prompt.submit({ text }))
+}
+
+// One pass of the heartbeat: every running crew agent idle STALL_MS or more is reported once, with a toast and a
+// prompt to the main session, and every idle project manager goes through idleProjectManagerCheck. An agent with nothing on record
+// counts as active from now, and so does one that is running again after a pass that saw it stopped or unlisted.
+async function stallCheck($: $, state: State) {
+  const now = await $.clock.now()
+  const { all, listed } = await agentsOf($, state)
+  const before = state.lastPass
+  state.lastPass = new Map(listed.map(a => [a.id, a.status]))
+  for (const a of listed) {
+    if (!state.started.has(a.id)) state.started.set(a.id, now)
+    const crew = crewOf(a.id, all)
+    if (crew === undefined) continue
+    // a listed agent that is idle, waiting or done is never stalled; a project manager may be idle with its report lost
+    if (a.status !== 'running') {
+      if (crew.isProjectManager) {
+        if (before?.get(a.id) === 'running') state.stopped.add(a.id)
+        await idleProjectManagerCheck($, state, a, crew, all, now)
+      }
+      continue
+    }
+    // running: any idle period of a project manager is over
+    state.idleSince.delete(a.id)
+    state.idlePrompted.delete(a.id)
+    state.stopped.delete(a.id)
+    // resumed: a resumed agent may spend minutes compacting before its first tool call, so its clock starts now, and
+    // a new stint begins
+    if (before !== undefined && before.get(a.id) !== 'running') {
+      state.activity.set(a.id, now)
+      state.stints.set(a.id, now)
+      state.stalled.delete(a.id)
+      continue
+    }
+    const last = state.activity.get(a.id)
+    if (last === undefined) {
+      state.activity.set(a.id, now)
+      continue
+    }
+    if (state.stalled.has(a.id) || now - last < STALL_MS) continue
+    // flagged before any await, so an overlapping check never reports it twice
+    state.stalled.add(a.id)
+    const label = labelOf(a)
+    const minutes = Math.floor((now - last) / 60_000)
+    // queued, not awaited: the wake never waits on the event log
+    void logEvent($, state, { event: 'stall', crew: crew.crew, agent: label, kind: 'agent', minutes })
+    await safely($, 'stall wake', async () => {
+      try {
+        $.ui.toast(`${STALLED} ${label} (crew ${crew.crew}), no activity for ${minutes}m`)
+      } catch {
+        // the prompt below still goes out
+      }
+      await $.prompt.submit({ text: stallText(label, crew.crew, minutes) })
+    })
+  }
+}
+
+// The module's timers. A hot reload cancels them with the old module and starts this record over; a repeated
+// session.start in the same module replaces each, so there is never more than one of either.
+type Wakes = {
+  heartbeat?: Timer
+  // a stall check is under way; the next period skips rather than overlap it
+  checking: boolean
+  // the limit-reset timer and the resetsAt it is for
+  reset?: { resetsAt: string; timer: Timer }
+  // the resetsAt values this module has woken the PM for
+  fired: Set<string>
+  // limit-reset work runs one step at a time, so two triggers for one reset never both arm
+  work: Promise<unknown>
+}
+
+function startHeartbeat($: $, state: State, wakes: Wakes) {
+  wakes.heartbeat?.cancel()
+  wakes.heartbeat = $.clock.every(HEARTBEAT_MS, () => {
+    if (wakes.checking) return
+    wakes.checking = true
+    void safely($, 'stall check', () => stallCheck($, state)).finally(() => {
+      wakes.checking = false
+    })
+  })
+}
+
+// does $.state say positively that this resetsAt's wake has gone out? An unreadable or stale state says no.
+async function firedFor($: $, resetsAt: string): Promise<{ fired: boolean; version?: number; ours: boolean }> {
+  try {
+    const held = await $.state.get(LIMIT_RESET_REF)
+    const ours = held.value?.resetsAt === resetsAt
+    return { fired: ours && held.value?.fired === true, version: held.version, ours: ours || held.value === undefined }
+  } catch {
+    return { fired: false, ours: false }
+  }
+}
+
+// The timer's resetsAt is the source of truth: the wake goes out once for it unless $.state positively says it
+// already went. The module guard stops a second run in this module; the $.state claim stops one after a reload.
+async function fireReset($: $, state: State, wakes: Wakes, resetsAt: string) {
+  if (wakes.reset?.resetsAt === resetsAt) wakes.reset = undefined
+  if (wakes.fired.has(resetsAt)) return
+  wakes.fired.add(resetsAt)
+  const before = await firedFor($, resetsAt)
+  if (before.fired) return
+  // claimed before the prompt goes out; a state holding another window's reset is left alone
+  if (before.ours) {
+    const claimed = await $.state
+      .set(LIMIT_RESET_REF, { resetsAt, fired: true }, before.version === undefined ? undefined : { ifVersion: before.version })
+      .catch(() => undefined)
+    // lost the claim: fire anyway unless whoever won says this reset has fired
+    if (claimed !== undefined && !claimed.isSet && (await firedFor($, resetsAt)).fired) return
+  }
+  // the main session already ran after the reset (Claude Code continues it on its own): the wake would only repeat
+  // that. Checked after the claim, so the reset stays marked fired and never wakes later.
+  if (state.mainActive !== undefined && state.mainActive > Date.parse(resetsAt)) return
+  await $.prompt.submit({ text: limitResetText(resetsAt) })
+}
+
+async function scheduleReset($: $, state: State, wakes: Wakes, resetsAt: string) {
+  const due = Date.parse(resetsAt)
+  if (Number.isNaN(due)) return
+  const now = await $.clock.now()
+  wakes.reset?.timer.cancel()
+  const timer = $.clock.after(Math.max(0, due + RESET_GRACE_MS - now), () => {
+    void safely($, 'limit reset wake', () => fireReset($, state, wakes, resetsAt))
+  })
+  wakes.reset = { resetsAt, timer }
+}
+
+// a five-hour window at its limit while a crew is live: wake the PM once it resets, once per resetsAt
+async function armReset($: $, state: State, wakes: Wakes, resetsAt: string) {
+  if (Number.isNaN(Date.parse(resetsAt))) return
+  // a project manager still at work, not one that is listed but completed, failed or killed
+  if (!(await agentsOf($, state)).listed.some(a => isProjectManager(a) && isLive(a))) return
+  const held = await $.state.get(LIMIT_RESET_REF)
+  if (held.value?.resetsAt === resetsAt) {
+    // fired already, or a timer is running; one a reload took is armed again by session.start
+    if (held.value.fired || wakes.reset?.resetsAt === resetsAt) return
+  } else {
+    await $.state.set(LIMIT_RESET_REF, { resetsAt, fired: false })
+  }
+  await scheduleReset($, state, wakes, resetsAt)
+}
+
+// session.start: a reload took the limit-reset timer with the old module, so arm it again from $.state
+async function rearmReset($: $, state: State, wakes: Wakes) {
+  const held = await $.state.get(LIMIT_RESET_REF)
+  if (held.value !== undefined && !held.value.fired) await scheduleReset($, state, wakes, held.value.resetsAt)
+}
+
+async function resetFromUsage($: $, state: State, wakes: Wakes) {
+  const resetsAt = (await $.session.usage()).rateLimits.find(l => l.kind === 'five_hour' && l.percentUsed >= 100 && typeof l.resetsAt === 'string')?.resetsAt
+  if (resetsAt !== undefined) await armReset($, state, wakes, resetsAt)
+}
+
+function queueLimit($: $, wakes: Wakes, what: string, step: () => Promise<unknown>): Promise<unknown> {
+  wakes.work = wakes.work.then(() => safely($, what, step))
+  return wakes.work
+}
+
+// One refusal line for a call's result when it is one and the session has a plan (P24). The caller and the plan
+// check each wait at most EVENT_WAIT_MS, as the fetch gate's do; never throws and never changes the result.
+// `logged` holds the results already logged, so a deny that passes up through several of ankur's hooks is counted once.
+// Top-level function declarations, not closures in register: the hooks loader takes $ only into functions declared at
+// the top of the file (Claude Code 2.1.316 refuses to load the module otherwise).
+async function noteRefusal($: $, state: State, logged: WeakSet<object>, e: { readonly agentId?: string; readonly tool: string }, result: unknown): Promise<void> {
+  if (typeof result !== 'object' || result === null || logged.has(result) || refusalOf(result) === undefined) return
+  logged.add(result)
+  await safely($, 'refusal log', async () => {
+    const caller = await within($, EVENT_WAIT_MS, async () => {
+      if (e.agentId === undefined) return { crew: 'main', agent: 'main' }
+      const all = (await agentsOf($, state)).all
+      const self = all.find(a => a.id === e.agentId)
+      return { crew: crewOf(e.agentId, all)?.crew ?? 'main', agent: self === undefined ? e.agentId : labelOf(self) }
+    })
+    const hasPlan =
+      (await within($, EVENT_WAIT_MS, async () => {
+        const dir = await rootOf($, state)
+        return dir !== undefined && (await $.fs.exists(planPath(dir)))
+      })) === true
+    const line = refusalLine(e.tool, e as { readonly command?: unknown }, result, caller?.crew ?? 'main', caller?.agent ?? e.agentId ?? 'main', hasPlan)
+    if (line !== null) await logEvent($, state, line)
+  })
+}
+
+// ankur's own deny, logged as a refusal before it goes back
+async function refuse<R>($: $, state: State, logged: WeakSet<object>, e: { readonly agentId?: string; readonly tool: string }, refused: R): Promise<R> {
+  await noteRefusal($, state, logged, e, refused)
+  return refused
+}
+
+export const register: Register = on => {
+  const state: State = {
+    known: new Map(),
+    seq: 0,
+    labels: new Map(),
+    models: new Map(),
+    handedBack: new Set(),
+    planDesigners: new Map(),
+    planRoute: Promise.resolve(),
+    pendingPlanCalls: new Map(),
+    handBacks: new Map(),
+    withheld: new Set(),
+    waiting: new Map(),
+    activity: new Map(),
+    stalled: new Set(),
+    streaks: new Map(),
+    started: new Map(),
+    idleSince: new Map(),
+    idlePrompted: new Set(),
+    finals: new Map(),
+    stints: new Map(),
+    stopped: new Set(),
+    events: Promise.resolve(),
+    eventsPending: 0,
+  }
+  const wakes: Wakes = { checking: false, fired: new Set(), work: Promise.resolve() }
+  // appends to the messages log, one at a time
+  let appending: Promise<unknown> = Promise.resolve()
+  // results already logged as refusals: a deny that passes up through several of ankur's hooks is counted once
+  const refusalsLogged = new WeakSet<object>()
+
+  on('session.end', { reason: 'clear' }, async ($, e, next) => {
+    state.known.clear()
+    state.labels.clear()
+    state.models.clear()
+    state.handedBack.clear()
+    state.planDesigners.clear()
+    state.pendingPlanCalls.clear()
+    state.handBacks.clear()
+    state.withheld.clear()
+    state.waiting.clear()
+    state.activity.clear()
+    state.stalled.clear()
+    state.streaks.clear()
+    state.started.clear()
+    state.lastPass = undefined
+    state.idleSince.clear()
+    state.idlePrompted.clear()
+    state.finals.clear()
+    state.stints.clear()
+    state.stopped.clear()
+    state.root = undefined
+    state.rootSession = undefined
+    return next(e)
+  })
+
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    const id = started.agentId
+    // a plan-mode design engineer's spawn is bound by its Agent call's tool_use_id, never by order
+    const call = (e as unknown as { tool_use_id?: unknown }).tool_use_id
+    const mode = typeof call === 'string' ? state.pendingPlanCalls.get(call) : undefined
+    if (id !== undefined && typeof call === 'string' && mode !== undefined) {
+      state.pendingPlanCalls.delete(call)
+      state.planDesigners.set(id, mode)
+    }
+    if (id !== undefined) {
+      const label = e.name !== undefined && e.name !== '' ? e.name : id
+      state.labels.set(id, label)
+      state.known.set(id, { id, type: e.subagentType, status: 'running', description: e.description, name: e.name, parentId: e.parentAgentId, label, live: true, seq: state.seq++ })
+      state.models.set(id, started.model)
+      // a start is activity, and where the running time /ankur shows begins
+      await safely($, 'spawn time', async () => {
+        const at = await $.clock.now()
+        state.started.set(id, at)
+        touch(state, id, at)
+      })
+    }
+    return started
+  }).catch(failOpen)
+
+  on('tool.call', { tool: 'SendMessage' }, async ($, e, next) => {
+    const input = e as unknown as { to?: unknown; summary?: unknown; message?: unknown }
+    if (e.agentId === undefined) {
+      const resumed = await safely($, 'designer resume check', async () => designerResumeVerdict(input.to, (await agentsOf($, state)).all, state.planDesigners))
+      if (resumed !== undefined) return refuse($, state, refusalsLogged, e, resumed)
+      // the PM answering a project manager: that project manager is no longer waiting on the person
+      const result = await next(e)
+      if (result.deny === undefined && typeof input.to === 'string' && state.waiting.size > 0) {
+        const to = input.to
+        await safely($, 'answer check', async () => {
+          for (const t of recipientsOf(to, (await agentsOf($, state)).all)) state.waiting.delete(t.id)
+        })
+      }
+      return result
+    }
+    const sender = e.agentId
+    // an amend designer's teammate message with the amend block installs the goal as its hand-back does, or is refused
+    if (state.planDesigners.get(sender) === 'amend' && input.to === MAIN && typeof input.message === 'string' && fencedBlock(input.message, '````json plan-amend.json') !== undefined) {
+      const message = input.message
+      const why = await safely($, 'plan-amend message route', () => writeAmendFiles($, state, message))
+      if (typeof why === 'string') return refuse($, state, refusalsLogged, e, { deny: `[ankur] Refused: the plan amendment was not installed: ${why}. Fix the plan-amend.json and plan.md blocks and send the message again.` })
+    }
+    const decided = await safely($, 'SendMessage check', async () => messageVerdict(sender, input.to, (await agentsOf($, state)).all))
+    if (decided?.kind === 'deny') return refuse($, state, refusalsLogged, e, { deny: decided.reason })
+    const result = await next(e)
+    if (decided?.kind !== 'allow' || result.deny !== undefined) return result
+    if (input.to === MAIN && typeof input.message === 'string') {
+      // a tagged message to main sets what /ankur shows for the project manager; an untagged one replaces it with nothing
+      const tag = tagOf(input.message)
+      if (tag !== undefined) state.waiting.set(sender, tag)
+      else state.waiting.delete(sender)
+      // only a project manager may message main from inside a crew; its crew is as the verdict above just listed it, and a
+      // project manager goes by its crew's name
+      const projectManager = tag === undefined ? undefined : crewOf(sender, [...state.known.values()])
+      if (tag !== undefined && projectManager?.isProjectManager === true) await logEvent($, state, { event: 'tag', crew: projectManager.crew, agent: projectManager.projectManagerName, tag: tagName(tag) })
+    }
+    if (decided.crossCrew) {
+      const entry = { from: decided.fromCrew, to: decided.toCrew, summary: typeof input.summary === 'string' ? input.summary : '' }
+      // same shape as logEvent: the chain stays serial and is never released on a timer, so a late write can't clobber
+      // a newer line; the call waits at most EVENT_WAIT_MS for it, and the line still lands later if the fs answers
+      appending = appending.then(() => safely($, 'message log', () => appendMessage($, state, entry)))
+      await settledWithin($, EVENT_WAIT_MS, appending, () => {
+        try {
+          $.ui.log(`ankur: message log failed, letting the call through: no answer in ${EVENT_WAIT_MS}ms`, { to: 'debug' })
+        } catch {
+          // nothing left to do
+        }
+      })
+    }
+    return result
+  }).catch(failOpen)
+
+  on('tool.call', { tool: 'Agent' }, async ($, e, next) => {
+    // On a v>=2 plan, the main session's ankur:* calls set a model and an effort, before the plan gates
+    const type: unknown = e.subagent_type
+    if (e.agentId === undefined && roleOf(type) !== undefined) {
+      const refused = await safely($, 'main-session rule', async () => {
+        const verdict = mainCallVerdict(await planWithin($, state, PLAN_READ_MS), e.agentId, type, e.model, e.effort)
+        if (verdict !== undefined) await logRule($, `main-session rule refused a ${type} call: ${verdict.deny === MAIN_MODEL_REFUSAL ? 'no model' : 'no allowed effort'}`)
+        return verdict
+      })
+      if (refused !== undefined) return refuse($, state, refusalsLogged, e, refused)
+    }
+    const caller = await safely($, 'Agent check', async () => {
+      if (e.agentId === undefined) return undefined
+      const all = (await agentsOf($, state)).all
+      const self = all.find(a => a.id === e.agentId)
+      return {
+        crew: crewOf(e.agentId, all),
+        label: self === undefined ? e.agentId : labelOf(self),
+        refused: agentVerdict(e.agentId, e.model, all) ?? effortVerdict(e.agentId, e.effort, all),
+      }
+    })
+    if (caller?.refused !== undefined) return refuse($, state, refusalsLogged, e, caller.refused)
+    // A QC-named call from inside a crew whose rework allowance is spent
+    const callerCrew = caller?.crew?.crew
+    if (callerCrew !== undefined && isQcName(callerCrew.toLowerCase(), typeof e.name === 'string' ? e.name.toLowerCase() : e.name)) {
+      const spent = await safely($, 'rework allowance gate', () => allowanceGate($, state, callerCrew, e.name))
+      if (spent !== undefined) return refuse($, state, refusalsLogged, e, spent)
+    }
+    const startsProjectManager = e.agentId === undefined && isLeadType(e.subagent_type)
+    // the plan gates: only the main thread starting a named project manager; any failure lets the call through
+    const gated = leadStartName(e)
+    if (gated !== undefined) {
+      const refused = await safely($, 'plan gate', async () => {
+        const plan = await planOf($, state)
+        return plan === undefined ? undefined : planVerdict(plan, gated)
+      })
+      if (refused !== undefined) return refuse($, state, refusalsLogged, e, refused)
+    }
+    const unguarded = worktreeBriefVerdict(e as unknown as { isolation?: unknown; prompt?: unknown })
+    if (unguarded !== undefined) return refuse($, state, refusalsLogged, e, unguarded)
+    // a plan-mode design engineer from the main session: its hand-back is the plan to write. Marked before the
+    // call runs, since a foreground agent spawns and hands back inside it; agent.spawn binds the id by this tool_use_id.
+    const first = e.agentId === undefined && roleOf(e.subagent_type) === 'design-engineer' && typeof e.prompt === 'string' ? e.prompt.split('\n')[0].replace(/[\r ]+$/, '') : undefined
+    const planCall: 'plan' | 'amend' | undefined = first === 'Mode: plan' ? 'plan' : first === 'Mode: amend' ? 'amend' : undefined
+    const callId = (e as unknown as { tool_use_id?: unknown }).tool_use_id
+    const pending = planCall !== undefined && typeof callId === 'string' && callId !== '' ? callId : undefined
+    if (pending !== undefined && planCall !== undefined) state.pendingPlanCalls.set(pending, planCall)
+    let result: Awaited<ReturnType<typeof next>>
+    try {
+      result = await next(e)
+    } finally {
+      if (pending !== undefined) state.pendingPlanCalls.delete(pending)
+    }
+    if (result.deny !== undefined) return result
+    const raw = (result.result as { agentId?: unknown } | undefined)?.agentId
+    const id = typeof raw === 'string' ? raw : undefined
+    if (planCall !== undefined && id !== undefined) state.planDesigners.set(id, planCall)
+    if (caller?.crew === undefined && !startsProjectManager) return result
+    // the name agent.spawn recorded, which the report file will carry
+    const name = (id === undefined ? undefined : state.labels.get(id)) ?? (typeof e.name === 'string' && e.name !== '' ? e.name : id)
+    const note = await safely($, 'report note', async () => {
+      const dir = await rootOf($, state)
+      if (dir === undefined || id === undefined || name === undefined) return undefined
+      return reportNote(name, reportPath(dir, caller?.crew?.crew ?? name, name))
+    })
+    const agent = name ?? 'unknown'
+    await logEvent($, state, {
+      event: 'spawn',
+      crew: caller?.crew?.crew ?? agent,
+      agent,
+      agentId: id ?? null,
+      type: typeof e.subagent_type === 'string' && e.subagent_type !== '' ? e.subagent_type : 'general-purpose',
+      model: typeof e.model === 'string' ? e.model : null,
+      effort: typeof e.effort === 'string' ? e.effort : null,
+      by: caller?.label ?? MAIN,
+    })
+    return note === undefined ? result : withNote(result, note)
+  }).catch(failOpen)
+
+  on('tool.call', { tool: 'Workflow' }, async ($, e, next) => {
+    // On a v>=2 plan, the main session's Workflow calls run ankur agents only from the plugin's scripts
+    if (e.agentId === undefined) {
+      // A plugin script's args.ankurFile is expanded into args.ankur before the gate judges it
+      const expand = hasAnkurFile(e.args)
+      const outcome = await safely($, 'Workflow gate', async (): Promise<{ deny: string; args?: undefined } | { args: unknown; deny?: undefined } | undefined> => {
+        const plan = await planWithin($, state, PLAN_READ_MS)
+        if (!expand && !planAtLeastV2(plan)) return undefined
+        const readText = async (path: unknown): Promise<string | undefined> => {
+          if (typeof path !== 'string') return undefined
+          try {
+            const text = String(await $.fs.read(path))
+            return text === '' ? undefined : text
+          } catch {
+            return undefined
+          }
+        }
+        const pluginDir = pluginDirOf()
+        const texts = pluginDir === undefined ? [undefined, undefined] : await Promise.all([`${pluginDir}/workflows/plan.js`, `${pluginDir}/workflows/stage.js`].map(readText))
+        const script: unknown = e.script
+        const scriptPath: unknown = e.scriptPath
+        const scriptText = typeof script === 'string' ? script : await readText(scriptPath)
+        let args: unknown = e.args
+        if (expand) {
+          const match = pluginScriptMatch({ scriptPath, scriptText, pluginDir: pluginDir ?? '\0', pluginScriptTexts: texts })
+          if (match.byPath || match.byText) {
+            const root = await rootOf($, state)
+            // the repo's ankur root, parent of every session's ankur dir
+            const ankurRoot = root === undefined ? undefined : slashed(root).replace(/\/[^/]+$/, '')
+            // the file's real path must stay inside the ankur root too, so a symlink cannot lead out of it
+            const realPathOf = async (path: string): Promise<string | undefined> => (await $.fs.stat(path, { resolve: true })).realPath
+            const readReal = async (path: string): Promise<string> => {
+              if (root !== undefined && ankurRoot !== undefined) {
+                const realFile = await realPathOf(path)
+                const realDir = await realPathOf(ankurRoot)
+                if (realFile === undefined || realDir === undefined) throw new Error('its real path could not be resolved')
+                const real = normalPath(slashed(realFile))
+                const dir = normalPath(slashed(realDir))
+                if (!real.startsWith(`${dir}/`)) throw new Error(`it resolves to ${real}, outside the ankur dir`)
+              }
+              return String(await $.fs.read(path))
+            }
+            const expanded = await expandAnkurFile(e.args, root, readReal, realPathOf, ankurRoot)
+            if (expanded.deny !== undefined) {
+              await logRule($, `Workflow gate refused a call: ${expanded.deny}`)
+              return expanded
+            }
+            args = expanded.args
+          }
+        }
+        const verdict = workflowCallVerdict(plan, {
+          script,
+          scriptPath,
+          scriptText,
+          args,
+          pluginDir: pluginDir ?? ' ',
+          pluginScriptTexts: texts, // positional: [plan.js text, stage.js text]
+        })
+        if (verdict !== undefined) await logRule($, `Workflow gate refused a call: ${verdict.deny}`)
+        if (verdict !== undefined) return verdict
+        return args === e.args ? undefined : { args }
+      })
+      const refused = outcome?.deny !== undefined ? outcome : undefined
+      if (refused !== undefined) return refuse($, state, refusalsLogged, e, refused)
+      if (outcome !== undefined) return next({ ...e, args: outcome.args } as typeof e)
+    }
+    return next(e)
+  }).catch(failOpen)
+
+  // The push and merge gate (R-32): a main-session Bash command that runs retro scrub and then a git
+  // push or git merge that scrub does not gate (not joined by && all the way) is refused. Members are never push-gated; a
+  // member's command that backgrounds a process outside run_in_background is refused instead (the detach gate).
+  on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    if (e.agentId === undefined) {
+      const input = e as unknown as { command?: unknown; args?: unknown }
+      const command = typeof input.command === 'string' ? input.command : isRecord(input.args) ? input.args.command : undefined
+      // R-134: a Bash command that writes decisions.md is refused. Unlike safely() and failOpen, this guard fails closed: an
+      // error while judging a command that names the file refuses it, because a letting-through here is the very write the
+      // guard exists to stop, while a refused read is cheap to redo through `factory.ts decide` or a plain read.
+      let decisionLog: { deny: string } | undefined
+      if (namesDecisionLog(command)) {
+        try {
+          decisionLog = decisionLogBashVerdict(command, await $.session.id())
+        } catch (error) {
+          decisionLog = { deny: DECISION_LOG_REFUSAL }
+          try {
+            $.ui.log(`ankur: decision log Bash guard failed, refusing the call: ${String(error)}`, { to: 'debug' })
+          } catch {
+            // nothing left to do
+          }
+        }
+        if (decisionLog !== undefined) await safely($, 'decision log guard log', () => logRule($, 'decision log guard refused a Bash call: it writes decisions.md'))
+      }
+      if (decisionLog !== undefined) return refuse($, state, refusalsLogged, e, decisionLog)
+      const verdict = await safely($, 'push gate', async () => {
+        const v = pushGateVerdict(command)
+        if (v !== undefined) await logRule($, 'push gate refused a call: scrub is not joined to a push or merge by &&')
+        return v
+      })
+      if (verdict !== undefined) return refuse($, state, refusalsLogged, e, verdict)
+    } else {
+      // A member backgrounds a process only through run_in_background
+      const input = e as unknown as { command?: unknown; args?: unknown }
+      const command = typeof input.command === 'string' ? input.command : isRecord(input.args) ? input.args.command : undefined
+      const verdict = await safely($, 'detach gate', async () => {
+        const v = detachVerdict(command)
+        if (v !== undefined) await logRule($, 'detach gate refused a member call: it backgrounds a process outside run_in_background')
+        return v
+      })
+      if (verdict !== undefined) return refuse($, state, refusalsLogged, e, verdict)
+    }
+    return next(e)
+  }).catch(failOpen)
+
+  // Every tool call is activity, the main session's included. A report sent through the hand-back tool is the agent's
+  // real report; its last message may be only a sign-off. One with nothing in it, from inside a crew, is sent back.
+  // Every call's answer is read for a refusal from beneath ankur (the worktree guard, the classifier, a permission
+  // rule) and one line logged for it; a deny of ankur's own is logged where it is made, and counted once.
+  on('tool.call', async ($, e, next) => {
+    const answered = async (result: Awaited<ReturnType<typeof next>>) => {
+      await noteRefusal($, state, refusalsLogged, e, result)
+      return result
+    }
+    if (e.agentId === undefined) {
+      noteMainActivity($, state)
+      return answered(await next(e))
+    }
+    const id = e.agentId
+    noteActivity($, state, id)
+    if ((e.tool as string) !== 'SubagentHandback') return answered(await next(e))
+    const raw = (e as unknown as { message?: unknown }).message
+    const message = typeof raw === 'string' ? raw : ''
+    // outside every crew, or with the agent list down, an empty hand-back goes through
+    if (isEmptyHandBack(message)) {
+      const inCrew = await safely($, 'hand-back check', async () => crewOf(id, (await agentsOf($, state)).all) !== undefined)
+      if (inCrew === true) return refuse($, state, refusalsLogged, e, { deny: HANDBACK_REFUSAL })
+    }
+    if (message.trim() !== '') {
+      // a real report is marked before any await, so a stop that races this capture never overwrites it
+      state.handedBack.add(id)
+      state.handBacks.set(id, message)
+      state.withheld.delete(id)
+      await safely($, 'hand-back capture', async () => {
+        const all = (await agentsOf($, state)).all
+        const crew = crewOf(id, all)
+        if (crew === undefined) return
+        // a project manager's report the stop gate will send back is not its report: the stop that goes through writes it
+        if (crew.isProjectManager && !projectManagerStopPasses(message)) return
+        // on a v>=2 plan, one the Examined check will send back is not its report either; no git here
+        if (crew.isProjectManager && !isTagged(message)) {
+          const held = await safely($, 'examined check', async () => examinedVerdict(await planWithin($, state, PLAN_READ_MS), message))
+          if (held !== undefined) {
+            state.withheld.add(id)
+            await logRule($, `examined check held back the hand-back of the project manager of crew ${crew.crew}: headings missing`)
+            return
+          }
+        }
+        await writeReport($, state, crew, id, message)
+      })
+    }
+    const passed = await next(e)
+    // the plan-file route runs only for a hand-back that went through, not denied and not an error
+    const route = state.planDesigners.get(id)
+    if (passed.deny === undefined && !(passed as { isError?: unknown }).isError && route === 'plan') {
+      await safely($, 'plan-file route', () => writePlanFiles($, state, message))
+    } else if (passed.deny === undefined && !(passed as { isError?: unknown }).isError && route === 'amend') {
+      await safely($, 'plan-amend route', () => writeAmendFiles($, state, message))
+    }
+    return answered(passed)
+  }).catch(failOpen)
+
+  // every model request is activity, the main session's included; the stream passes untouched
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined) noteActivity($, state, e.agentId)
+    else noteMainActivity($, state)
+    return yield* next(e)
+  }).catch(async function* ($, e, next) {
+    // turn.step streams, so its catch is a generator: log as failOpen does, then let the stream go on
+    failOpen($, e, next)
+    return yield* next(e)
+  })
+
+  // The decision log is written only by `factory.ts decide`, which stamps the clock's time. An Edit or Write of this
+  // session's decisions.md is refused, never rewritten: a rewritten input gets no auto-mode verdict (retro F-9).
+  on('tool.call', { tool: ['Write', 'Edit'] }, async ($, e, next) => {
+    const isLog = await safely($, 'decision log', async () => isDecisionLog(e.file_path, await $.session.id()))
+    if (isLog === true) return refuse($, state, refusalsLogged, e, { deny: DECISION_LOG_REFUSAL })
+    return next(e)
+  }).catch(failOpen)
+
+  // The main-thread edit gate: refuses a main-thread Edit, Write, MultiEdit or NotebookEdit on
+  // repo files while a run is active. Subagents are never gated; every failure lets the call through.
+  on('tool.call', { tool: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] }, async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const input = e as unknown as { file_path?: unknown; notebook_path?: unknown }
+    const verdict = await safely($, 'main-edit gate', async () => {
+      const listed = await $.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: await $.session.cwd(), timeoutMs: 15_000 })
+      if (listed.exitCode !== 0) return undefined
+      const worktreeRoots = worktreeRootsOf(listed.stdout)
+      if (worktreeRoots.length === 0) return undefined
+      const dir = await rootOf($, state)
+      const planText = dir !== undefined && (await $.fs.exists(planPath(dir))) ? String(await $.fs.read(planPath(dir))) : undefined
+      let configPath = `${worktreeRoots[0]}/.claude/ankur.json`
+      if (!(await $.fs.exists(configPath))) configPath = `${worktreeRoots[0]}/.claude/truss.json` // ankur-allow-truss: a project not yet switched to ankur.json
+      let architecture: string | undefined
+      if (await $.fs.exists(configPath)) {
+        const cfg: unknown = JSON.parse(String(await $.fs.read(configPath)))
+        if (isRecord(cfg) && typeof cfg.architecture === 'string') architecture = cfg.architecture
+      }
+      return mainEditVerdict({ tool: e.tool, filePath: input.file_path ?? input.notebook_path, agentId: e.agentId }, { repoRoot: worktreeRoots[0], worktreeRoots, ankurDir: dir, planText, architecture })
+    })
+    if (verdict !== undefined) return refuse($, state, refusalsLogged, e, verdict)
+    return next(e)
+  }).catch(failOpen)
+
+  // The fetch gate: allows every call and logs one line when the session has a plan. The caller and the
+  // plan check each wait at most EVENT_WAIT_MS and count as "main" and "no plan" when they fail or overrun.
+  on('tool.call', { tool: ['WebFetch', 'WebSearch'] }, async ($, e, next) => {
+    const input = e as unknown as { url?: unknown; query?: unknown }
+    const caller = await safely($, 'fetch caller', () =>
+      within($, EVENT_WAIT_MS, async () => {
+        if (e.agentId === undefined) return { crew: 'main', agent: 'main' }
+        const all = (await agentsOf($, state)).all
+        const self = all.find(a => a.id === e.agentId)
+        return { crew: crewOf(e.agentId, all)?.crew ?? 'main', agent: self === undefined ? e.agentId : labelOf(self) }
+      }),
+    )
+    const hasPlan =
+      (await safely($, 'fetch plan check', () =>
+        within($, EVENT_WAIT_MS, async () => {
+          const dir = await rootOf($, state)
+          return dir !== undefined && (await $.fs.exists(planPath(dir)))
+        }),
+      )) === true
+    const verdict = fetchVerdict(e.tool as 'WebFetch' | 'WebSearch', input, caller?.crew ?? 'main', caller?.agent ?? e.agentId ?? 'main', hasPlan)
+    if (verdict.line !== null) await logEvent($, state, verdict.line)
+    if (verdict.kind === 'deny') return { deny: verdict.reason }
+    return next(e)
+  }).catch(failOpen)
+
+  on('tool.call', { tool: ['AskUserQuestion'] }, async ($, e, next) => {
+    const verdict = await unattendedAskVerdict(e, { ankurDir: await rootOf($, state), exists: p => $.fs.exists(p) })
+    if (verdict !== undefined) return refuse($, state, refusalsLogged, e, verdict)
+    return next(e)
+  }).catch(failOpen)
+
+  on('classic.SubagentStop', async ($, e, next) => {
+    const result = await next(e)
+    const id = e.agent_id
+    // A project manager may stop only on a finished report or a tagged hand-off, at most PROJECT_MANAGER_STOP_BLOCKS times a streak. A stop
+    // while its members still work is interim: it goes through and leaves the streak and the tag alone.
+    const gate = await safely($, 'project manager stop gate', async () => {
+      const stopper = await stopperOf($, state, id, e.agent_type)
+      if (!stopper.projectManager) return { projectManager: false, interim: false }
+      if (isInterimStop(stopper.descendants, e.background_tasks)) return { projectManager: true, interim: true }
+      const count = e.stop_hook_active ? (state.streaks.get(id) ?? 0) : 0
+      const text = state.handBacks.get(id) ?? e.last_assistant_message ?? ''
+      if (count >= PROJECT_MANAGER_STOP_BLOCKS) {
+        state.streaks.delete(id)
+        return { projectManager: true, interim: false }
+      }
+      if (projectManagerStopPasses(text)) {
+        // On a v>=2 plan; these send-backs share the streak, and an unanswered tag doesn't excuse them
+        const sent = await safely($, 'final report gate', () => finalReportVerdict($, state, id, text))
+        if (sent === undefined) {
+          state.streaks.delete(id)
+          return { projectManager: true, interim: false }
+        }
+        state.streaks.set(id, count + 1)
+        await logRule($, `project manager stop gate sent back the project manager of crew ${crewOf(id, [...state.known.values()])?.crew ?? id}: ${sent.rule}`)
+        return { projectManager: true, interim: false, block: sent.block }
+      }
+      // a project manager whose tagged message to main is unanswered has asked through that one channel: its stop goes through
+      // as interim, so it neither needs a tagged hand-back too nor loses the tag /ankur shows
+      if (state.waiting.has(id)) {
+        state.streaks.delete(id)
+        return { projectManager: true, interim: true }
+      }
+      state.streaks.set(id, count + 1)
+      return { projectManager: true, interim: false, block: PROJECT_MANAGER_STOP_REASON }
+    })
+    const handBack = state.handBacks.get(id)
+    state.handBacks.delete(id)
+    const withheld = state.withheld.delete(id)
+    if (gate?.block !== undefined) {
+      // the hand-back belonged to the stop sent back; the next one is judged and captured afresh
+      state.handedBack.delete(id)
+      return { ...result, block: gate.block }
+    }
+    const tags = gate?.interim !== true
+    // the hand-back already holds this stop's report; the agent's next stop is captured again
+    if (state.handedBack.delete(id)) {
+      // a project manager's hand-back the gate could have sent back was held; this stop went through, so it is the report. One
+      // the Examined check held is written even when the gate step failed (P5), by the agents last seen if the list fails
+      if (handBack !== undefined && (withheld || (gate?.projectManager === true && !projectManagerStopPasses(handBack)))) {
+        await safely($, 'report capture', async () => {
+          const all = (await safely($, 'agent list', async () => (await agentsOf($, state)).all)) ?? [...state.known.values()]
+          const crew = crewOf(id, all)
+          if (crew !== undefined) await writeReport($, state, crew, id, handBack, tags)
+        })
+      }
+      return result
+    }
+    await safely($, 'report capture', async () => {
+      const text = e.last_assistant_message
+      if (text === undefined || text.trim() === '') return
+      const crew = crewOf(id, (await agentsOf($, state)).all)
+      if (crew !== undefined) await writeReport($, state, crew, id, text, tags)
+    })
+    return result
+  }).catch(failOpen)
+
+  on('session.measure', async ($, e, next) => {
+    const result = await next(e)
+    const hit = e.rateLimits.find(l => l.kind === 'five_hour' && l.percentUsed >= 100 && typeof l.resetsAt === 'string')
+    const resetsAt = hit?.resetsAt
+    if (resetsAt !== undefined) await queueLimit($, wakes, 'limit reset', () => armReset($, state, wakes, resetsAt))
+    return result
+  }).catch(failOpen)
+
+  on('classic.StopFailure', async ($, e, next) => {
+    const result = await next(e)
+    if (e.error === 'rate_limit') await queueLimit($, wakes, 'limit reset', () => resetFromUsage($, state, wakes))
+    return result
+  }).catch(failOpen)
+
+  // the main session learns where this session's ankur files live, and, on a start that loads its agents afresh, records
+  // when, in session-start.json; both name the folder of the event's own session id
+  on('classic.SessionStart', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agent_id !== undefined) return result
+    const sid = typeof e.session_id === 'string' && e.session_id !== '' ? e.session_id : undefined
+    const dir = await safely($, 'dir note', () => rootOf($, state, sid))
+    const source = (e as unknown as { source?: unknown }).source
+    if (dir !== undefined && typeof source === 'string' && SESSION_START_SOURCES.has(source)) {
+      await safely($, 'session start record', async () => writeSessionStart($, dir, source, sid ?? (await $.session.id())))
+    }
+    return dir === undefined ? result : { ...result, additionalContext: [...(result.additionalContext ?? []), `${DIR_NOTE} ${dir}`] }
+  }).catch(failOpen)
+
+  on('session.start', async ($, e, next) => {
+    const started = await next(e)
+    await safely($, 'command register', () =>
+      $.command.register({ name: 'ankur', description: 'Show the ankur crews in this session: status, live members by model, last report', argumentHint: '[status]' }),
+    )
+    await safely($, 'stall timer', async () => startHeartbeat($, state, wakes))
+    await queueLimit($, wakes, 'limit reset re-arm', () => rearmReset($, state, wakes))
+    return started
+  })
+
+  on('command.run', { command: 'ankur' }, async ($, e) => {
+    const text = await safely($, 'status', () => statusOf($, state))
+    return { text: text ?? 'ankur could not read the crews; see the debug log.' }
+  })
+}
+
+// whether an agent type is the crew lead's: the one place the type is compared (PROJECT_MANAGER_TYPE)
+export function isLeadType(type: unknown): boolean {
+  return roleOf(type) === roleOf(PROJECT_MANAGER_TYPE) // an agent recorded as truss:project-manager is the lead too
+}
+
+// whether a stopping agent is a project manager the main thread started: a listed one by its type and its parent, one not
+// yet listed by its event's type
+export function stopperIsLead(known: Agent | undefined, type: string | undefined): boolean {
+  return known === undefined ? isLeadType(type) : isProjectManager(known)
+}
+
+// The name of the crew a call starts, or undefined when the call is no project-manager start: only the main thread
+// (no agentId) starting the project manager type with a non-empty text name (the plan gates)
+export function leadStartName(call: { agentId?: unknown; subagent_type?: unknown; name?: unknown }): string | undefined {
+  if (call.agentId !== undefined || !isLeadType(call.subagent_type)) return undefined
+  return typeof call.name === 'string' && call.name !== '' ? call.name : undefined
+}
+
+// the stall kind an idle project manager is logged as
+export const IDLE_LEAD_KIND = 'idle-project-manager'

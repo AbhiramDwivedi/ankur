@@ -1,0 +1,17 @@
+{
+  "name": "ankur",
+  "version": "0.36.0",
+  "types": "./types/index.d.ts",
+  "dependencies": [
+    { "name": "kit", "marketplace": "claude-ops", "version": ">=0.4.0" },
+    { "name": "worktrees", "marketplace": "claude-ops", "version": ">=0.8.4 <0.11.0" },
+    { "name": "subagent-limits", "marketplace": "claude-ops", "version": "^0.3.2" }
+  ],
+  "description": "Sets up a software factory for your project (agents, skills, architecture doc, ADRs and quality gates for its domain and tech stack), then uses it to build goals in parallel crews, each led by a project manager, checked by tests and a QC engineer, and merged only when the gates pass.",
+  "author": {
+    "name": "Abhiram Dwivedi",
+    "url": "https://github.com/AbhiramDwivedi"
+  },
+  "homepage": "https://github.com/AbhiramDwivedi/ankur",
+  "license": "MIT"
+}

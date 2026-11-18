@@ -1,0 +1,88 @@
+/* The architecture's mermaid diagrams in the D2 tokens. The page CSP has no style-src, so
+   mermaid's own <style> element and its colour style attributes are removed before the SVG is inserted
+   (MermaidBlock.tsx); this stylesheet is what colours the drawing. Dark mode follows because the tokens switch. */
+svg[id^="ankur-mmd-"] {
+  font-family: var(--font-sans);
+  font-size: var(--text-ui);
+  color: var(--fg);
+}
+
+svg[id^="ankur-mmd-"] text,
+svg[id^="ankur-mmd-"] tspan,
+svg[id^="ankur-mmd-"] .label,
+svg[id^="ankur-mmd-"] .nodeLabel,
+svg[id^="ankur-mmd-"] .edgeLabel,
+svg[id^="ankur-mmd-"] .messageText,
+svg[id^="ankur-mmd-"] .actor,
+svg[id^="ankur-mmd-"] .labelText,
+svg[id^="ankur-mmd-"] .loopText {
+  fill: var(--fg);
+  stroke: none;
+  font-family: var(--font-sans);
+  font-size: var(--text-ui);
+}
+
+/* Nodes, actors, notes and other filled shapes. */
+svg[id^="ankur-mmd-"] .node rect,
+svg[id^="ankur-mmd-"] .node circle,
+svg[id^="ankur-mmd-"] .node ellipse,
+svg[id^="ankur-mmd-"] .node polygon,
+svg[id^="ankur-mmd-"] .node path,
+svg[id^="ankur-mmd-"] rect.actor,
+svg[id^="ankur-mmd-"] rect.note,
+svg[id^="ankur-mmd-"] .labelBox,
+svg[id^="ankur-mmd-"] .state-start,
+svg[id^="ankur-mmd-"] .statediagram-state rect {
+  fill: var(--surface);
+  stroke: var(--border-strong);
+  stroke-width: 1px;
+}
+
+/* Subgraphs. */
+svg[id^="ankur-mmd-"] .cluster rect,
+svg[id^="ankur-mmd-"] .cluster polygon,
+svg[id^="ankur-mmd-"] .statediagram-cluster rect {
+  fill: var(--sunken);
+  stroke: var(--border-strong);
+}
+
+/* Edges, message lines and arrowheads. */
+svg[id^="ankur-mmd-"] .edgePath .path,
+svg[id^="ankur-mmd-"] .flowchart-link,
+svg[id^="ankur-mmd-"] .transition,
+svg[id^="ankur-mmd-"] .messageLine0,
+svg[id^="ankur-mmd-"] .messageLine1,
+svg[id^="ankur-mmd-"] .actor-line,
+svg[id^="ankur-mmd-"] .relation,
+svg[id^="ankur-mmd-"] path.path {
+  stroke: var(--muted);
+  fill: none;
+}
+
+svg[id^="ankur-mmd-"] marker,
+svg[id^="ankur-mmd-"] marker path,
+svg[id^="ankur-mmd-"] .arrowheadPath,
+svg[id^="ankur-mmd-"] .marker {
+  fill: var(--muted);
+  stroke: var(--muted);
+}
+
+/* Edge labels sit on the surface, so a line never runs through the text. */
+svg[id^="ankur-mmd-"] .edgeLabel,
+svg[id^="ankur-mmd-"] .edgeLabel rect,
+svg[id^="ankur-mmd-"] .labelBkg {
+  background-color: var(--surface);
+}
+
+svg[id^="ankur-mmd-"] .edgeLabel rect {
+  fill: var(--surface);
+  stroke: none;
+  opacity: 1;
+}
+
+/* Mermaid centres label text with a rule in the removed <style> element (CSP), so the rule lives here. */
+svg[id^="ankur-mmd-"] .node .label text,
+svg[id^="ankur-mmd-"] .cluster-label text,
+svg[id^="ankur-mmd-"] .edgeLabel text {
+  text-anchor: middle;
+}

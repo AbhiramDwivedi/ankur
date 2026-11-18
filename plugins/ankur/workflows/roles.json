@@ -1,0 +1,15 @@
+{
+  "designer": { "agentType": "ankur:design-engineer", "model": "opus", "effort": "medium", "isolation": "worktree" },
+  "checker": { "agentType": "ankur:checking-engineer", "model": "opus", "effort": "medium", "isolation": "none" },
+  "planner": { "agentType": "ankur:planning-engineer", "model": "opus", "effort": "medium", "isolation": "none" },
+  "tester": { "agentType": "general-purpose", "model": "sonnet", "effort": "medium", "isolation": "worktree", "typeFromProject": true },
+  "builder": { "agentType": "general-purpose", "model": "sonnet", "effort": "medium", "isolation": "worktree", "typeFromProject": true },
+  "resolver": { "agentType": "general-purpose", "model": "sonnet", "effort": "medium", "isolation": "none", "typeFromProject": "builder" },
+  "writer": { "agentType": "ankur:writer", "model": "opus", "effort": "medium", "isolation": "worktree" },
+  "rca": { "agentType": "general-purpose", "model": "opus", "effort": "medium", "isolation": "none" },
+  "stress":    { "agentType": "ankur:stress-engineer", "model": "opus", "effort": "medium", "isolation": "worktree" },
+  "qc": { "agentType": "ankur:qc-engineer", "model": "opus", "effort": "medium", "isolation": "none" },
+  "runner": { "agentType": "ankur:runner", "model": "sonnet", "effort": "low", "isolation": "none" },
+  "ux": { "agentType": "ankur:ux-engineer", "model": "opus", "effort": "medium", "isolation": "none" },
+  "po": { "agentType": "general-purpose", "model": "opus", "effort": "medium", "isolation": "none" }
+}

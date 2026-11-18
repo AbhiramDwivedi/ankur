@@ -1,0 +1,8 @@
+{
+  "name": "ankur",
+  "owner": { "name": "Abhiram Dwivedi" },
+  "allowCrossMarketplaceDependenciesOn": ["claude-ops"],
+  "plugins": [
+    { "name": "ankur", "source": "./plugins/ankur" }
+  ]
+}
