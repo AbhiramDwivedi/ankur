@@ -7,7 +7,7 @@
     { "name": "worktrees", "marketplace": "claude-ops", "version": ">=0.8.4 <0.11.0" },
     { "name": "subagent-limits", "marketplace": "claude-ops", "version": "^0.3.2" }
   ],
-  "description": "Sets up a software factory for your project (agents, skills, architecture doc, ADRs and quality gates for its domain and tech stack), then uses it to build goals in parallel crews, each led by a project manager, checked by tests and a QC engineer, and merged only when the gates pass.",
+  "description": "A Claude Code plugin that grows a project-specific software factory, then uses it to ship production-grade code.",
   "author": {
     "name": "Abhiram Dwivedi",
     "url": "https://github.com/AbhiramDwivedi"

@@ -1,8 +1,8 @@
 # Ankur
 
-![Ankur: the program manager at the top, crews led by project managers in the middle, the design engineer and QC engineer at the two ends](docs/ankur.svg)
+![A young seedling with two staggered leaves growing out of dark soil](docs/ankur.webp)
 
-Ankur is a Claude Code plugin that sets up a software factory for a project, then runs it. For a given domain and tech stack it first builds the factory: the agents, skills, architecture doc, ADRs and quality gates the project needs. Then it uses that factory to build goals in parallel crews, each led by a project manager, checked by tests and a QC engineer, and merged only when the gates pass. The client is asked only for decisions the repo cannot answer.
+A Claude Code plugin that grows a project-specific software factory, then uses it to ship production-grade code. For a given domain and tech stack it first builds the factory: the agents, skills, architecture doc, ADRs and quality gates the project needs. Then it uses that factory to build goals in parallel crews, each led by a project manager, checked by tests and a QC engineer, and merged only when the gates pass. The client is asked only for decisions the repo cannot answer.
 
 The name is Sanskrit: ankur (अंकुर) means "sprout".
 
