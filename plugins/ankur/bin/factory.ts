@@ -48,6 +48,7 @@ const CORE_COMMANDS: Record<string, Cmd> = {
   'owns-check': async (f) => (await import('./factory/crew.ts')).cmdOwnsCheck(f),
   'owns-extend': async (f) => (await import('./factory/crew.ts')).cmdOwnsExtend(f),
   'tests-check': async (f) => (await import('./factory/crew.ts')).cmdTestsCheck(f),
+  'commit-trailers': async (f) => (await import('./factory/crew.ts')).cmdCommitTrailers(f),
   finish: async (f) => (await import('./factory/finish.ts')).cmdFinish(f),
   land: async (f) => (await import('./factory/finish.ts')).cmdLand(f),
   doctor: async (f) => (await import('./factory/doctor.ts')).cmdDoctor(f),

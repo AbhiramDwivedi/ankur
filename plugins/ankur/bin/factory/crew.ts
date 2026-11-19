@@ -3,7 +3,7 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { acceptanceCommand } from './goal-file.ts'
 import path from 'node:path'
-import { configOf, isObj, need, refuse, repoPathOf, usage } from '../core.ts'
+import { configOf, isObj, need, refuse, repoPathOf, str, usage } from '../core.ts'
 import type { Flags, Obj } from '../core.ts'
 import { withLock } from '../lock.ts'
 import { concludeFrontmatterMerge, docOfFragment } from '../fragments.ts'
@@ -277,7 +277,8 @@ function knowledgeDocs(c: { dir: string; repo: string; slug: string; wt: string;
   return new Set([...byCrew].filter(isDoc))
 }
 
-// Guarded = every file a `Ankur-Role: test-writer` commit in <base>..HEAD touched, whatever its name, plus every existing path
+// Guarded = every file a `Ankur-Role: test-writer` commit in <base>..HEAD touched that isTestPath accepts (a product file under
+// that label is no tester file: tests-check reports it as `mislabelled`, a warning, and guards nothing), plus every existing path
 // the acceptanceTest names that is a test file by name (isTestPath). Lists every builder or resolver commit there that touched
 // one, the check of agents/qc-engineer.md step 8 done before a QC engineer is paid for it. Read oldest first with
 // `--name-status -M`: a pure rename (R100) of a guarded file is no touch and the guard follows the new path; a rename with an
@@ -285,12 +286,33 @@ function knowledgeDocs(c: { dir: string; repo: string; slug: string; wt: string;
 // (`--cc`), so integrating a tester's branch is no touch. History is what QC reads, so a later commit that restores the file
 // doesn't clear it.
 export function cmdTestsCheck(f: Flags): Obj {
-  const { touched, tests } = guardedOf(crewCtx(f))
-  if (touched.length > 0) throw refuse({ ok: false, touched, tests })
-  return { ok: true, tests }
+  const { touched, tests, mislabelled } = guardedOf(crewCtx(f))
+  // a warning, never a refusal; the key is absent when no test-writer commit holds a non-test file
+  const warn = mislabelled.length > 0 ? { mislabelled } : {}
+  if (touched.length > 0) throw refuse({ ok: false, touched, tests, ...warn })
+  return { ok: true, tests, ...warn }
+}
+
+// `commit-trailers --repo R [--commit SHA]`: the trailers git parses from one commit's message as JSON, so no caller parses
+// `git log` output or quotes a format string. `trailers` is every parsed `Key: value` in order, `crew` and `role` the
+// Ankur-Crew and Ankur-Role values (absent when git did not parse them), `unparsed` the Ankur-Crew or Ankur-Role keys that
+// the message holds as a line but git does not read as a trailer (not in the last block, or a blank line inside it).
+export function cmdCommitTrailers(f: Flags): Obj {
+  const repo = repoOf(f)
+  const commit = str(f, 'commit') || 'HEAD'
+  if (!/^[A-Za-z0-9._\/~^@-]+$/.test(commit) || commit.startsWith('-')) throw usage(`bad --commit: ${commit}`)
+  const sha = gitOrFail(repo, ['rev-parse', '--verify', '--end-of-options', `${commit}^{commit}`])
+  const parsed = gitOrFail(repo, ['log', '-1', '--format=%(trailers:only,unfold)', sha]).split('\n').filter((l) => l.trim() !== '')
+  const trailers = parsed.map((l) => { const i = l.indexOf(':'); return { key: l.slice(0, i).trim(), value: l.slice(i + 1).trim() } })
+  const body = gitOrFail(repo, ['log', '-1', '--format=%B', sha])
+  const seen = new Set(trailers.map((t) => t.key.toLowerCase()))
+  const unparsed = ['Ankur-Crew', 'Ankur-Role'].filter((k) => !seen.has(k.toLowerCase()) && new RegExp(`^${k}:`, 'mi').test(body))
+  const crew = trailers.find((t) => t.key.toLowerCase() === 'ankur-crew')?.value
+  const role = trailers.find((t) => t.key.toLowerCase() === 'ankur-role')?.value
+  return { ok: true, commit: sha, trailers, ...(crew !== undefined ? { crew } : {}), ...(role !== undefined ? { role } : {}), unparsed }
 }
 // The one guarded-set rule, used by tests-check and by the start entry's `guarded`.
-export function guardedOf(c: { dir: string; slug: string; wt: string; target: string }): { touched: Obj[]; tests: string[] } {
+export function guardedOf(c: { dir: string; slug: string; wt: string; target: string }): { touched: Obj[]; tests: string[]; mislabelled: Obj[] } {
   const out = gitOrFail(c.wt, ['-c', 'core.quotepath=off', 'log', '--cc', '--name-status', '-M', '--format=%x00%H %(trailers:key=Ankur-Role,valueonly,separator=%x2C)%(trailers:key=Truss-Role,valueonly,separator=%x2C)', `${baseOf(c.wt, c.target)}..HEAD`]) // ankur-allow-truss
   // a merge commit's --cc name list holds every file that differs from all parents, a clean auto-merge included; the resolver
   // wrote a line of it only when the combined diff of that file has a hunk
@@ -319,15 +341,18 @@ export function guardedOf(c: { dir: string; slug: string; wt: string; target: st
     : []
   const guarded = new Set<string>(named.filter(isTestPath))
   const touched: Obj[] = []
+  const mislabelled: Obj[] = [] // test-writer commits' non-test files, oldest first
   for (const x of commits) {
     const role = x.roles.find((r) => r === 'builder' || r === 'resolver')
     const writer = x.roles.includes('test-writer')
     const files: string[] = []
+    const wrong: string[] = []
     for (const e of x.entries) {
       const renamed = e.st.startsWith('R')
       if (writer) {
         if (renamed) guarded.delete(e.from)
-        if (!e.st.startsWith('D')) guarded.add(e.to)
+        // the label guards only what is a test file by name: a product file under it is a mislabel, reported and left unguarded
+        if (!e.st.startsWith('D')) { if (isTestPath(e.to)) guarded.add(e.to); else wrong.push(e.to) }
         continue
       }
       if (!guarded.has(e.from)) continue
@@ -336,15 +361,25 @@ export function guardedOf(c: { dir: string; slug: string; wt: string; target: st
       if (renamed) { guarded.delete(e.from); guarded.add(e.to) }
     }
     if (role !== undefined && !writer && files.length > 0) touched.push({ commit: x.sha, role, files })
+    if (wrong.length > 0) mislabelled.push({ commit: x.sha, files: wrong })
   }
-  return { touched, tests: [...guarded].sort() }
+  return { touched, tests: [...guarded].sort(), mislabelled }
 }
 
-// A test file by name: basename `.test|spec|check.[cm]?[jt]sx?`, `test_*.py`, `*_test.py|go`, `conftest.py`, or a directory segment
-// tests/ test/ __tests__/ spec/ checks/ e2e/ fixtures/.
+// A test file by layout, for any language. Backslashes read as `/`. By file name (case-sensitive where the language's
+// convention is): `.test|spec|check.<ext>`, `test_*.py`, `tests.py`, `*_test.<ext>`, `*_spec.<ext>`, `*.snap`, `conftest.py`,
+// `FooTest|FooTests|FooIT.java|kt|cs|swift|scala|groovy|php`, `testutil*` and `test_helpers*`. By directory segment: tests test
+// __tests__ spec specs checks e2e fixtures testdata testutil __mocks__ __snapshots__ androidTest, and .NET or Swift `Foo.Tests`
+// and `FooTests`. A product name that merely contains "test" (`testing.ts`, `contest.py`, `latest.ts`, `attestation/`) is not one.
+// Every caller (guardedOf, the stress-fix test list and source filter in check.ts, ownTests in start.ts) wants this wide rule.
 export function isTestPath(p: string): boolean {
-  const parts = p.split('/')
+  const parts = p.replace(/\\/g, '/').split('/')
   const b = parts[parts.length - 1] ?? ''
-  return /\.(test|spec|check)\.[cm]?[jt]sx?$/.test(b) || /^test_.*\.py$/.test(b) || /_test\.(py|go)$/.test(b) || b === 'conftest.py'
-    || parts.slice(0, -1).some((s) => ['tests', 'test', '__tests__', 'spec', 'checks', 'e2e', 'fixtures'].includes(s))
+  const dirs = parts.slice(0, -1)
+  return /\.(test|spec|check)\.[a-z]+$/i.test(b) || /^test_.*\.py$/.test(b) || b === 'tests.py' || b === 'conftest.py'
+    || /_(test|spec)\.[a-z]+$/.test(b) || /\.snap$/.test(b)
+    || /(^|[a-z0-9])(Tests?|IT)\.(java|kt|kts|cs|swift|scala|groovy|php)$/.test(b)
+    || /^test[-_]?(utils?|helpers?)(\.|$)/i.test(b)
+    || dirs.some((s) => ['tests', 'test', '__tests__', 'spec', 'specs', 'checks', 'e2e', 'fixtures', 'testdata', 'testutil', 'testutils', 'test_helpers',
+      '__mocks__', '__snapshots__', 'androidTest'].includes(s) || /(^|[a-z0-9])Tests$|\.Tests?$/.test(s))
 }

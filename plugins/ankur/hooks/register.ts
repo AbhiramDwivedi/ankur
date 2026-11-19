@@ -125,6 +125,17 @@ function slashed(path: string): string {
   return path.replace(/\\/g, '/').replace(/\/+$/, '')
 }
 
+// A slashed path with `.` and `..` segments and doubled slashes collapsed, so a prefix match sees where the path lands.
+function collapseDots(path: string): string {
+  const out: string[] = []
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+  return `${path.startsWith('/') ? '/' : ''}${out.join('/')}`
+}
+
 // Where this session's ankur files live: in the repo's git common dir, so every worktree of it shares one place,
 // or under the home folder outside git. Undefined when neither is known.
 // `runName` is the run dir's name under the common dir: the old one only when it alone exists (see runDirIn).
@@ -971,10 +982,9 @@ export function worktreeBriefVerdict(input: { isolation?: unknown; prompt?: unkn
   return { deny: `${MARK} Refused: an Agent in a worktree needs the shell rules in its brief. Call Agent again with this block added to the prompt, word for word: "${SHELL_RULES}"` }
 }
 
-// the decision log of session `sessionId`, wherever its ankur folder is
-export function isDecisionLog(path: string, sessionId: string): boolean {
-  const p = slashed(path)
-  return p.endsWith(`/ankur/${safeName(sessionId)}/decisions.md`) || p.endsWith(`/truss/${safeName(sessionId)}/decisions.md`) // ankur-allow-truss: a run started under the old name
+// the decision log of any session: <...>/ankur/<id>/decisions.md, or the same under the old truss name
+export function isDecisionLog(path: string): boolean {
+  return /\/(ankur|truss)\/[A-Za-z0-9._-]+\/decisions\.md$/.test(slashed(path)) // ankur-allow-truss: a run started under the old name
 }
 
 export function limitResetText(resetsAt: string): string {
@@ -1077,7 +1087,7 @@ export function worktreeRootsOf(porcelain: string): string[] {
 }
 
 // While a run is active (a plan with a crew not merged or dropped), the main thread may not
-// Edit or Write repo files; it delegates. Allowed: the ankur dir, the requirements path beside the architecture doc,
+// Edit or Write repo files; it delegates. Allowed: the ankur dir, any file under a checkout's .git/ankur or .git/truss, the requirements path beside the architecture doc,
 // .claude/settings.json, and every path outside the repo and its worktrees. Pure; fails open on anything unreadable.
 export function mainEditVerdict(
   call: { tool: string; filePath: unknown; agentId: string | undefined },
@@ -1091,14 +1101,16 @@ export function mainEditVerdict(
   if (plan === undefined) return undefined
   const active = plan.crews.some(c => !(isRecord(c) && (c.status === 'merged' || c.status === 'dropped')))
   if (!active) return undefined
-  const path = slashed(call.filePath)
+  const path = collapseDots(slashed(call.filePath))
   const inside = (root: string): boolean => {
-    const r = slashed(root)
+    const r = collapseDots(slashed(root))
     return r !== '' && (path === r || path.startsWith(`${r}/`))
   }
   const repoRoot = slashed(ctx.repoRoot)
   if (![repoRoot, ...ctx.worktreeRoots].some(inside)) return undefined
   if (ctx.ankurDir !== undefined && inside(ctx.ankurDir)) return undefined
+  // a file under a checkout's .git/ankur or .git/truss (another session's run dir) is run state, never a repo file
+  if ([repoRoot, ...ctx.worktreeRoots].some(r => slashed(r) !== '' && [`${collapseDots(slashed(r))}/.git/ankur/`, `${collapseDots(slashed(r))}/.git/truss/`].some(p => path.startsWith(p)))) return undefined // ankur-allow-truss: the old run dir name
   if (path === `${repoRoot}/.claude/settings.json`) return undefined
   if (ctx.architecture !== undefined && ctx.architecture !== '') {
     const arch = slashed(ctx.architecture)
@@ -1112,8 +1124,8 @@ export function mainEditVerdict(
 
 // A command split at the shell operators &&, ||, ;, | (|& counts as |) and newline, outside quotes and backslash
 // escapes, as the shell reads it. A redirection such as 2>&1 or &> holds no operator. ops[i] joins segments i and i+1.
-// With splitAmp a lone & (background) is an operator too, as the decision-log guard reads it.
-export function commandSegments(command: string, splitAmp = false): { segments: string[]; ops: string[] } {
+// A lone & (background) is not an operator here.
+export function commandSegments(command: string):{ segments: string[]; ops: string[] } {
   const segments: string[] = []
   const ops: string[] = []
   let cur = ''
@@ -1148,7 +1160,6 @@ export function commandSegments(command: string, splitAmp = false): { segments: 
     else if (c === '|') op = '|'
     else if (c === ';') op = ';'
     else if (c === '\n') op = '\n'
-    else if (splitAmp && c === '&' && command[i + 1] !== '>' && !/[<>]/.test(command[i - 1] ?? '')) op = '&'
     if (op === undefined) {
       cur += c
       continue
@@ -1206,901 +1217,102 @@ export function pushGateVerdict(command: unknown): { deny: string } | undefined 
   return undefined
 }
 
-// R-134 (0.32.0): decisions.md is written only by `factory.ts decide`, whichever tool writes it. The Edit and Write guard
-// cannot see a Bash redirect, so a main-session Bash command that names decisions.md is read as the shell reads it, and
-// refused when it writes the file or when it names it with a target this guard cannot resolve (a variable, a glob, a
-// substitution, eval, a shell it cannot read). Reads (cat, grep, tail, ...) and the decide command stay allowed.
-// R-191 (0.37.0) closes four more forms: a glob that expands to the name (reachesDecisionLog), a variable set to the log's
-// path (collectLogVars), text a command writes that another one runs as shell (`... | sed e`, a heredoc script run with
-// sh, `. f`, `source f`; segmentFacts, writesDecisionLog), and a Windows backslash path (slashesOf).
-// The name counts only as a whole file name: not after a name character, so `product-decisions.md` is another file.
-const DECISIONS_NAME = /(?<![\w.-])decisions\.md/i
-// quotes removed, and backslashes removed (`decision\s.md` still names the file) or read as separators (`C:\x\decisions.md`)
-function hasDecisionsName(s: string): boolean {
-  const q = s.replace(/['"]/g, '')
-  return DECISIONS_NAME.test(q.replace(/\\/g, '')) || DECISIONS_NAME.test(q.replace(/\\/g, '/'))
-}
-export function namesDecisionLog(command: unknown): boolean {
-  return typeof command === 'string' && hasDecisionsName(command)
-}
+// R-196 (0.37.1): the decision-log Bash guard is an accident catcher, not a security boundary. decisions.md is written only
+// by `factory.ts decide`; an agent that writes it by hand through Bash is refused when the command plainly writes a file
+// whose base name is decisions.md: a `>` or `>>` redirect target, a `tee` operand, a `sed -i` or `perl -i` operand, or the
+// destination of `cp` or `mv`. Everything else passes, reads included. The approval defence is the typed-prompt proof, which
+// never trusts the log. One pass over the characters, so a long command costs linear time; a parse trouble lets the call through.
+const isLogName = (w: string): boolean => (w.split(/[\\/]/).pop() ?? '').toLowerCase() === 'decisions.md'
 
-// R-191: a glob (`decision*.md`, `decisions.m?`, `decision{s,}.md`) expands to the log's name without ever spelling it.
-// globBody turns a glob into a regex body (`*` any run, `?` one character, [...] a class, {a,b} an alternation).
-function globBody(g: string): string {
-  let re = ''
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i]
-    const close = c === '[' ? g.indexOf(']', i + 2) : c === '{' ? g.indexOf('}', i + 1) : -1
-    if (c === '*') re += '.*'
-    else if (c === '?') re += '.'
-    else if (c === '[' && close > 0) {
-      const cls = g.slice(i + 1, close)
-      re += `[${cls.startsWith('!') ? '^' + cls.slice(1) : cls.replace(/\\/g, '\\\\')}]`
-      i = close
-    } else if (c === '{' && close > 0) {
-      re += `(?:${g.slice(i + 1, close).split(',').map(globBody).join('|')})`
-      i = close
-    } else re += c.replace(/[.+^$()|\\\]{}[]/g, '\\$&')
-  }
-  return re
-}
-// Does a word of this text hold a glob whose file name can be decisions.md? A quoted span is dropped first (the shell does
-// not expand it: `find -name '*.md'` and a file really named `decision*.md` are not the log), and a `name=` prefix is
-// ignored (`of=decision*.md`). Only a run dir (`.git/ankur|truss`) or a variable-built directory set to one is judged.
-function globNamesLog(s: string, k?: DecisionWalk): boolean {
-  // a quoted glob character is literal; the quotes are dropped so `"<run>/decision"*.md` is the one glob the shell joins
-  const unquoted = (w: string): string => w.replace(/'([^']*)'|"((?:\\.|[^"\\])*)"/g, (_m, a?: string, b?: string) => (a ?? b ?? '').replace(/[*?[{]/g, '\u0001'))
-  for (const q of s.match(/(?:'[^']*'|"(?:\\.|[^"\\])*"|[^\s;&|<>()'"])+/g) ?? []) {
-    const w = unquoted(q)
-    const full = w.replace(/\\/g, '/').replace(/^\w+=/, '')
-    const b = full.split('/').pop() ?? ''
-    if (!/[*?[{]/.test(b)) continue
-    // A relative directory is not the run dir (the shell's cwd is unknown, and `docs/*.md` is another tree), and a bare
-    // glob with no letter beyond a `.md` suffix (`*`, `*.md`) is every file of the cwd: neither names the log by itself.
-    // A directory other than a `.git/ankur|truss` run dir (relative or absolute: `/tmp/build/*`) is another tree. A directory
-    // built from a variable counts only when the command set that variable to the log's path (the pre-filter, with no
-    // command to read, lets it through to the judge).
-    const dir = full.includes('/') ? full.slice(0, full.lastIndexOf('/')) : ''
-    const viaVar = /\$/.test(dir) && (k === undefined || refsLogVar(dir, k))
-    // a relative directory is judged like a bare glob: only its file name counts (`s1/decision*.md` after a cd)
-    const relative = dir !== '' && !/^(?:[A-Za-z]:)?\//.test(dir) && !/^[~$]/.test(dir)
-    if (dir !== '' && !relative && !/(?:^|\/)\.git\/(?:ankur|truss)(?:\/|$)/.test(dir) && !viaVar) continue
-    if ((dir === '' || relative) && !/[A-Za-z]/.test(b.replace(/\.md$/i, '').replace(/[[\]{}!,]/g, ''))) continue
-    try {
-      if (new RegExp(`^${globBody(b)}$`, 'i').test('decisions.md')) return true
-    } catch {
-      return true
-    }
-  }
-  return false
-}
-// Does a Bash command spell the log's name or hold a glob that expands to it? The Bash handler judges only those.
-export function reachesDecisionLog(command: unknown): boolean {
-  return typeof command === 'string' && (hasDecisionsName(command) || globNamesLog(command) || DYN_NAME.test(command) || (LOG_STEM.test(command) && SETS_VARIABLE.test(command)))
-}
-// R-191: the start of the name followed, in the same word, by something the shell expands (`decision$F.md`,
-// `decision$(echo s).md`, `decision${X:-s}.md`, `"$(echo <run>/decision)s.md"`) completes it at run time.
-const DYN_NAME = /(?<![\w.-])decision[\w.-]*(?:\$|`|\)[\w.-])/i
-// a variable value that is the start of the name or the name itself, bare or after a directory (`decision`, `<run>/decisions`)
-const STEM_VALUE = /(?:^|\/)decisions?(?:\.m?d?)?$/i
-// R-191: a variable can hold only a piece of the name (`F=decision; echo x >> ${F}s.md`): a command that sets a variable (or
-// reads one) and spells the start of the name is judged. A stem after a name character (`product-decisions`) is another file.
-const LOG_STEM = /(?<![\w.-])decision/i
-const SETS_VARIABLE = /(?:^|[\s;&|({])(?:(?:export|local|declare|readonly)\s+(?:-\w+\s+)?)?\w+=|\bread\b|\bfor\s+\w+\s+in\b/
-
-type ShellTok = { kind: 'word' | 'out' | 'in'; text: string; dyn: boolean; quoted?: boolean }
-
-// One command segment as the shell reads it: words with the quotes removed (`dyn` where the shell would expand them: a $,
-// a backtick, an unquoted glob character or ~; `quoted` where a quote or backslash was in the word), the redirection
-// operators, and the bodies of every command or process substitution. Unquoted parentheses and whitespace separate words,
-// and an unquoted # at the start of a word starts a comment. `open` is true when the text ends inside a quote or an
-// unclosed substitution, so a caller reading line by line knows to take the next line too.
-function shellTokens(seg: string): { toks: ShellTok[]; subs: string[]; open: boolean } {
-  const toks: ShellTok[] = []
-  const subs: string[] = []
+// Words of each command segment (split on an unquoted ; & | or newline), quotes removed. An unquoted > is a word of its own
+// ('>', '>>' or '>&'), so `echo x>decisions.md` and `2>decisions.md` read the same as `> decisions.md`.
+function shellWords(command: string): string[][] {
+  const segments: string[][] = []
+  let words: string[] = []
   let cur = ''
-  let dyn = false
   let has = false
-  let quoted = false
-  let unclosed = false
-  let quote: "'" | '"' | undefined
-  const flush = () => {
-    if (has) toks.push({ kind: 'word', text: cur, dyn, quoted })
+  let quote = ''
+  const endWord = () => {
+    if (has) words.push(cur)
     cur = ''
-    dyn = false
     has = false
-    quoted = false
   }
-  // the index of the paren closing the group that opens at seg[i], or the segment's end
-  const group = (i: number): number => {
-    let depth = 0
-    let q: string | undefined
-    for (let j = i; j < seg.length; j++) {
-      const c = seg[j]
-      if (q !== undefined) {
-        if (c === '\\' && q === '"') j++
-        else if (c === q) q = undefined
-        continue
-      }
-      if (c === '\\') j++
-      else if (c === "'" || c === '"') q = c
-      else if (c === '(') depth++
-      else if (c === ')' && --depth === 0) return j
-    }
-    unclosed = true
-    return seg.length
+  const endSegment = () => {
+    endWord()
+    if (words.length > 0) segments.push(words)
+    words = []
   }
-  for (let i = 0; i < seg.length; i++) {
-    const c = seg[i]
-    if (quote === "'") {
-      if (c === "'") quote = undefined
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]
+    if (quote !== '') {
+      if (c === quote) quote = ''
       else cur += c
-      continue
-    }
-    if (c === '\\' && i + 1 < seg.length) {
-      // inside double quotes a backslash escapes only $ ` " \ and a newline; before any other character it stays (`"C:\r\.git"`)
-      if (quote === '"' && !/[$\x60"\\\n]/.test(seg[i + 1])) cur += c
-      cur += seg[i + 1]
-      has = quoted = true
-      i++
-      continue
-    }
-    if (c === '$' && seg[i + 1] === '(') {
-      const end = group(i + 1)
-      subs.push(seg.slice(i + 2, end))
-      cur += seg.slice(i, end + 1)
-      dyn = has = true
-      i = end
-      continue
-    }
-    if (c === '`') {
-      const close = seg.indexOf('`', i + 1)
-      if (close < 0) unclosed = true
-      const end = close < 0 ? seg.length : close
-      subs.push(seg.slice(i + 1, end))
-      cur += seg.slice(i, end + 1)
-      dyn = has = true
-      i = end
-      continue
-    }
-    if (c === '$') {
-      cur += c
-      dyn = has = true
-      continue
-    }
-    if (quote === '"') {
-      if (c === '"') quote = undefined
-      else cur += c
-      continue
-    }
-    if (c === "'" || c === '"') {
+    } else if (c === '"' || c === "'") {
       quote = c
-      has = quoted = true
-      continue
-    }
-    if (c === '#' && !has) {
-      // a comment runs to the end of the line
-      while (i + 1 < seg.length && seg[i + 1] !== '\n') i++
-      continue
-    }
-    if (/\s/.test(c)) {
-      flush()
-      continue
-    }
-    if (c === '(' || c === ')') {
-      flush()
-      continue
-    }
-    if (c === '>' || c === '<') {
-      if (seg[i + 1] === '(') {
-        flush()
-        const end = group(i + 1)
-        subs.push(seg.slice(i + 2, end))
-        toks.push({ kind: 'word', text: seg.slice(i, end + 1), dyn: true })
-        i = end
-        continue
-      }
-      // a leading fd (2>) or & (&>) belongs to the operator
-      if (has && (cur === '&' || /^\d+$/.test(cur))) {
-        cur = ''
-        dyn = false
-        has = false
-      } else flush()
-      let op = c
-      if (seg[i + 1] === c) {
-        op += c
+      has = true
+    } else if (c === ';' || c === '&' || c === '|' || c === '\n') {
+      if (c === '|' && command[i - 1] === '>') continue
+      if (c === '&' && command[i - 1] === '>') continue
+      endSegment()
+    } else if (c === ' ' || c === '\t' || c === '\r') {
+      endWord()
+    } else if (c === '>') {
+      if (/^\d+$/.test(cur)) cur = ''
+      endWord()
+      let op = '>'
+      if (command[i + 1] === '>') {
+        op = '>>'
         i++
-        if (c === '<' && seg[i + 1] === '<') {
-          op += '<'
-          i++
-        }
       }
-      if (op === '<<' && seg[i + 1] === '-') {
-        op += '-'
-        i++
-      } else if (c === '>' && (seg[i + 1] === '|' || seg[i + 1] === '&')) {
-        op += seg[++i]
-      } else if (c === '<' && op === '<' && (seg[i + 1] === '&' || seg[i + 1] === '>')) {
-        op += seg[++i]
-      }
-      toks.push({ kind: c === '>' || op === '<>' ? 'out' : 'in', text: op, dyn: false })
-      continue
-    }
-    if (c === '*' || c === '?' || c === '[' || (c === '{' && (cur !== '' || (i + 1 < seg.length && !/\s/.test(seg[i + 1])))) || (c === '~' && !has)) dyn = true
-    cur += c
-    has = true
-  }
-  flush()
-  return { toks, subs, open: quote !== undefined || unclosed }
-}
-
-// read-only commands: a command that only reads the file may name it
-const READ_ONLY = new Set(['cat', 'grep', 'egrep', 'fgrep', 'rg', 'tail', 'head', 'wc', 'less', 'more', 'ls', 'stat', 'file', 'diff', 'cmp', 'test', '[', '[[', 'echo', 'printf', 'nl', 'tac', 'od', 'cut', 'uniq', 'md5sum', 'shasum', 'sha256sum', 'realpath', 'dirname', 'basename', 'true', ':'])
-const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'ash', 'fish', 'csh', 'tcsh'])
-// words in front of the command word that run it
-export const WRAPPERS = new Set(['env', 'command', 'sudo', 'nohup', 'nice', 'time', 'exec', 'builtin', 'stdbuf', '!', '{', 'if', 'then', 'else', 'elif', 'do', 'while', 'until'])
-// commands that run the next command word on their input or after a delay: a shell behind one still runs the text
-export const RUNNERS = new Set(['timeout', 'xargs', 'busybox'])
-// options of a wrapper or runner that take their value as the next word (`timeout --signal KILL 5 sh`); the =-joined form is one word
-const OPTION_VALUES: Record<string, RegExp> = {
-  timeout: /^(?:-s|-k|--signal|--kill-after)$/,
-  env: /^(?:-u|-C|-S|--unset|--chdir|--split-string)$/,
-  nice: /^(?:-n|--adjustment)$/,
-  sudo: /^(?:-u|-g|-h|-p|-C|-r|-t|-U|-D|--user|--group|--host|--prompt|--close-from|--role|--type|--other-user|--chdir)$/,
-  stdbuf: /^(?:-i|-o|-e|--input|--output|--error)$/,
-  xargs: /^(?:-I|-n|-P|-d|-L|-s|-E|-a|--max-args|--max-procs|--delimiter|--max-lines|--max-chars|--arg-file|--eof|--replace)$/,
-}
-// The index of a segment's command word among its words: past assignments, wrappers, runners and their options (separate-value
-// and =-joined) and timeout's duration. Every command-word check takes it from here and keeps no skip list of its own.
-function commandIndex(words: string[]): number {
-  let n = 0
-  while (n < words.length) {
-    const w = baseName(words[n])
-    if (/^\w+=/.test(words[n])) n++
-    else if (WRAPPERS.has(w) || RUNNERS.has(w)) {
-      n++
-      while (n < words.length && words[n].startsWith('-')) n += OPTION_VALUES[w]?.test(words[n]) ? 2 : 1
-      if (w === 'timeout' && /^\d[\w.]*$/.test(words[n] ?? '')) n++
-    } else break
-  }
-  return n
-}
-const INTERPRETERS = new Set(['node', 'nodejs', 'tsx', 'deno', 'bun', 'python', 'python3', 'perl', 'ruby', 'awk', 'gawk', 'php', 'lua'])
-// commands that run text this guard cannot read
-const OPAQUE = new Set(['eval', 'source', '.', 'xargs', 'find'])
-
-const baseName = (w: string): string => (w.replace(/\\/g, '/').split('/').pop() ?? '').toLowerCase().replace(/\.exe$/, '')
-
-function normalizePath(p: string): string {
-  const head = /^(?:[A-Za-z]:)?\//.exec(p)?.[0] ?? ''
-  const out: string[] = []
-  for (const part of p.slice(head.length).split('/')) {
-    if (part === '' || part === '.') continue
-    if (part === '..') out.pop()
-    else out.push(part)
-  }
-  return head + out.join('/')
-}
-
-// `vars` holds the shell variables set to the log's path (or to a glob for it) in the command being judged, so `F=<log>;
-// echo x >> "$F"` is read as the write it is (R-191). It is shared with the shell bodies the walk recurses into.
-type DecisionWalk = { sid: string; vars?: Set<string>; outsideRunDir?: boolean }
-const DEST_LAST = new Set(['cp', 'mv', 'install', 'ln', 'rsync', 'scp', 'dd', 'truncate'])
-
-// Is this write target the session's decision log, or one the guard cannot resolve? A relative path is never resolved: a
-// Bash cd carries over between calls, so the hook cannot know the shell's cwd, and only the file's name is judged.
-function hitsDecisionLog(t: ShellTok, k: DecisionWalk): boolean {
-  if (t.dyn) return true
-  const p = slashed(t.text)
-  const absolute = /^(?:[A-Za-z]:)?\//.test(p)
-  if (!absolute) return baseName(p) === 'decisions.md'
-  return isDecisionLog(normalizePath(p).toLowerCase(), k.sid.toLowerCase())
-}
-
-// sed's long options that only read. GNU sed also takes any unambiguous prefix of a long option, so one that is not exactly
-// on this list (--in, --expr=, --fil=, ...) is refused, as are --in-place and --file.
-const SED_LONG = new Set(['--quiet', '--silent', '--regexp-extended', '--null-data', '--separate', '--posix', '--debug', '--sandbox', '--unbuffered', '--binary', '--follow-symlinks', '--zero-terminated', '--help', '--version'])
-
-// Does this sed command write, run a command, or read a script the guard cannot see? Without -i sed only reads, unless a
-// script writes (w, e) or comes from a file. Every script is judged: each -e, each --expression, an attached -eSCRIPT, and
-// the first operand when no script option is given. -e is case-sensitive (-E is the extended-regex flag).
-function sedRefused(args: ShellTok[]): boolean {
-  const scripts: ShellTok[] = []
-  const positional: ShellTok[] = []
-  let hasScript = false
-  let options = true
-  for (let j = 0; j < args.length; j++) {
-    const a = args[j]
-    const t = a.text
-    if (!options || t === '-' || !t.startsWith('-')) {
-      positional.push(a)
-      continue
-    }
-    if (t === '--') {
-      options = false
-      continue
-    }
-    if (t.startsWith('--')) {
-      if (t === '--expression') {
-        if (args[j + 1] === undefined) return true
-        hasScript = true
-        scripts.push(args[++j])
-      } else if (t.startsWith('--expression=')) {
-        hasScript = true
-        scripts.push({ ...a, text: t.slice('--expression='.length) })
-      } else if (t === '--line-length') j++
-      else if (t.startsWith('--line-length=') || SED_LONG.has(t)) continue
-      else return true
-      continue
-    }
-    for (let c = 1; c < t.length; c++) {
-      const ch = t[c]
-      if (ch === 'i' || ch === 'I' || ch === 'f' || ch === 'F') return true
-      if (ch === 'e') {
-        hasScript = true
-        if (c + 1 < t.length) scripts.push({ ...a, text: t.slice(c + 1) })
-        else if (args[j + 1] !== undefined) scripts.push(args[++j])
-        else return true
-        break
-      }
-      if (ch === 'l') {
-        if (c + 1 >= t.length) j++
-        break
-      }
-    }
-  }
-  if (!hasScript && positional.length > 0) scripts.push(positional[0])
-  return scripts.some((s) => hasDecisionsName(s.text) || (s.dyn && /[wWe]/.test(s.text)))
-}
-
-// R-191: does this sed command run its pattern space as a shell command (the `e` command or the s///e flag)? Its input is
-// then code: `echo "echo x >> <log>" | sed e` writes the log, and neither segment writes it as the guard reads one. The
-// scripts are taken as sedRefused takes them: each -e, each --expression, a cluster ending in e, else the first operand.
-const SED_E_CMD = /(?:^|[;{}\n])\s*(?:(?:\d+|\$|\/[^/]*\/)(?:\s*,\s*(?:\d+|\$|\/[^/]*\/))?)?\s*!?\s*e(?:\s|;|}|$)/
-const SED_E_FLAG = /s([^\s\w\\])(?:\\.|(?!\1)[^\\])*\1(?:\\.|(?!\1)[^\\])*\1[a-zA-Z0-9]*e/
-function sedExecutes(args: ShellTok[]): boolean {
-  const scripts: string[] = []
-  let explicit = false
-  let first: string | undefined
-  let options = true
-  for (let j = 0; j < args.length; j++) {
-    const t = args[j].text
-    if (!options || t === '-' || !t.startsWith('-')) {
-      first ??= t
-    } else if (t === '--') options = false
-    else if (t === '--expression') {
-      explicit = true
-      if (args[j + 1] !== undefined) scripts.push(args[++j].text)
-    } else if (t.startsWith('--expression=')) {
-      explicit = true
-      scripts.push(t.slice('--expression='.length))
-    } else if (!t.startsWith('--')) {
-      const e = t.indexOf('e', 1)
-      if (e < 0) continue
-      explicit = true
-      if (e + 1 < t.length) scripts.push(t.slice(e + 1))
-      else if (args[j + 1] !== undefined) scripts.push(args[++j].text)
-    }
-  }
-  if (!explicit && first !== undefined) scripts.push(first)
-  return scripts.some((s) => SED_E_CMD.test(s) || SED_E_FLAG.test(s))
-}
-
-// What one command segment hands to a shell or interpreter as code (R-191). `shell`: it runs text from its input (sed e, a
-// shell with no -c and no file, `bash <<EOF`) or a script file (`sh f`, `. f`, `source f`, `./f.sh`) as shell. `interp`: an
-// interpreter (node, python, ...) runs a script or its input. `code`: the text it writes that such a run could execute (the
-// arguments of echo and printf, and every here-string), which the caller judges as shell when something runs it.
-// `to` is the file an echo or printf redirects its text into: text written to a file nothing runs is not code. `refs` are
-// the words of a command that could run or read such a file (none for a pure reader, chmod, ls, rm, cd), and `scriptArgs`
-// the arguments handed to the script a shell runs.
-type CodeText = { text: string; to?: string }
-type SegmentFacts = { shell: boolean; interps: string[]; code: CodeText[]; refs: string[]; scriptArgs: string[] }
-const SYSTEM_DIR = /^\/(?:usr|bin|sbin|opt|etc|lib)\//
-function outTarget(toks: ShellTok[]): string | undefined {
-  let to: string | undefined
-  for (let i = 0; i < toks.length; i++) {
-    if (toks[i].kind === 'word') continue
-    const target = toks[i + 1]
-    if (target?.kind !== 'word') continue
-    if (toks[i].kind === 'out' && !(toks[i].text.endsWith('&') && /^(?:\d+|-)$/.test(target.text))) to = target.text
-    i++
-  }
-  return to
-}
-function segmentFacts(seg: string): SegmentFacts {
-  const { toks } = shellTokens(seg)
-  const words: ShellTok[] = []
-  const code: CodeText[] = []
-  const to = outTarget(toks)
-  for (let i = 0; i < toks.length; i++) {
-    if (toks[i].kind === 'word') words.push(toks[i])
-    else if (toks[i + 1]?.kind === 'word') {
-      if (toks[i].text === '<<<') code.push({ text: toks[i + 1].text })
-      i++
-    }
-  }
-  const n = commandIndex(words.map((w) => w.text))
-  if (n >= words.length) return { shell: false, interps: [], code, refs: [], scriptArgs: [] }
-  const cmd = baseName(words[n].text)
-  const args = words.slice(n + 1)
-  if (cmd === 'echo' || cmd === 'printf') code.push({ text: args.map((a) => a.text).join(' ').replace(/\\n/g, '\n'), to })
-  const decide = (cmd === 'node' || cmd === 'nodejs') && args.some((a, j) => /(?:^|[\\/])factory\.ts$/.test(a.text) && args[j + 1]?.text === 'decide')
-  let shell = false
-  let interps: string[] = []
-  let scriptArgs: string[] = []
-  let innerRefs: string[] = []
-  const operands = args.filter((a) => !a.text.startsWith('-')).map((a) => a.text)
-  if (SHELLS.has(cmd)) {
-    const c = args.findIndex((a) => /^-[a-z]*c[a-z]*$/i.test(a.text))
-    if (c < 0) {
-      shell = true
-      scriptArgs = operands.slice(1)
-    } else if (args[c + 1] !== undefined) {
-      // a -c body is judged by the segment itself; what it runs as a shell or interpreter is a fact of this command too
-      const inner = commandSegments(args[c + 1].text, true).segments.map(segmentFacts)
-      shell = inner.some((f) => f.shell)
-      interps = inner.flatMap((f) => f.interps)
-      scriptArgs = inner.flatMap((f) => f.scriptArgs)
-      innerRefs = inner.flatMap((f) => f.refs)
-    } else shell = true // `xargs sh -c` with no body: the body comes from the input
-
-  } else if (cmd === 'source' || cmd === '.') {
-    shell = true
-    scriptArgs = operands.slice(1)
-  } else if (cmd === 'sed') shell = sedExecutes(args)
-  else if (INTERPRETERS.has(cmd)) {
-    // -c, -e and -p bodies are judged by the segment itself; -V, --version, -h and node's -v only print
-    const prints = args.some((a) => /^(?:-V|--version|-h|--help)$/.test(a.text) || (a.text === '-v' && /^node(?:js)?$/.test(cmd)))
-    if (!decide && !prints && !args.some((a) => /^-[a-z]*[cep][a-z]*$/i.test(a.text))) interps = [cmd]
-  } else if (/^\.\.?[\\/]/.test(words[n].text) || /\.(?:sh|bash|zsh|ksh|dash)$/i.test(words[n].text) || words[n].dyn || (/[\\/]/.test(words[n].text) && !SYSTEM_DIR.test(words[n].text))) {
-    // a script run by its path (any name: `chmod +x f; f`), or by a word the shell expands
-    shell = true
-    scriptArgs = args.map((a) => a.text)
-  }
-  const inert = READ_ONLY.has(cmd) || cmd === 'chmod' || cmd === 'rm' || cmd === 'cd'
-  // a script fed to a shell on stdin (`sh < f`, `cat f | sh`): the file read by redirect, or by cat, is a script the shell runs
-  const stdin = toks.flatMap((t, i) => (t.kind === 'in' && t.text === '<' && toks[i + 1]?.kind === 'word' ? [toks[i + 1].text] : []))
-  const fed = cmd === 'cat' ? operands : []
-  return { shell, interps, code, refs: (inert ? fed : words.slice(n).map((w) => w.text).concat(innerRefs)).concat(stdin), scriptArgs }
-}
-
-function segmentWritesDecisionLog(seg: string, k: DecisionWalk, depth: number): boolean {
-  const { toks, subs } = shellTokens(seg)
-  const words: ShellTok[] = []
-  const outs: ShellTok[] = []
-  for (let i = 0; i < toks.length; i++) {
-    const t = toks[i]
-    if (t.kind === 'word') {
-      words.push(t)
-      continue
-    }
-    const target = toks[i + 1]
-    if (target === undefined || target.kind !== 'word') {
-      if (t.kind === 'out') return true // an output operator with no target the guard can read
-      continue
-    }
-    i++
-    // >&2 and 2>&1 copy a descriptor; every other output target is a file
-    if (t.kind === 'out' && !(t.text.endsWith('&') && /^(?:\d+|-)$/.test(target.text))) outs.push(target)
-  }
-  if (outs.some((t) => hitsDecisionLog(t, k))) return true
-  if (subs.some((s) => writesDecisionLog(s, k, depth + 1))) return true
-  const n = commandIndex(words.map((w) => w.text))
-  if (n >= words.length) return false
-  const cmd = baseName(words[n].text)
-  const args = words.slice(n + 1)
-  if (cmd === 'cd' || cmd === 'pushd' || cmd === 'popd') return false
-  if ((cmd === 'node' || cmd === 'nodejs') && args.some((a, j) => /(?:^|[\\/])factory\.ts$/.test(a.text) && args[j + 1]?.text === 'decide')) return false
-  if (SHELLS.has(cmd)) {
-    const c = args.findIndex((a) => /^-[a-z]*c[a-z]*$/i.test(a.text))
-    if (c >= 0 && args[c + 1] !== undefined) return writesDecisionLog(args[c + 1].text, k, depth + 1)
-  }
-  if (cmd === 'tee') return args.filter((a) => !a.text.startsWith('-')).some((a) => hitsDecisionLog(a, k))
-  if (cmd === 'sed') return sedRefused(args)
-  if (cmd === 'python' || cmd === 'python3') {
-    const c = args.findIndex((a) => a.text === '-c')
-    if (c >= 0 && args[c + 1] !== undefined) {
-      const code = args[c + 1].text
-      if (args.some((a, j) => j !== c + 1 && (hasDecisionsName(a.text) || (a.dyn && refsLogVar(a.text, k))))) return true
-      return (hasDecisionsName(code) || refsLogVar(code, k)) && !pythonReadsOnly(code)
-    }
-  }
-  // uniq writes its second operand
-  if (cmd === 'uniq') return args.filter((a) => a.text === '-' || !a.text.startsWith('-')).slice(1).some((a) => hitsDecisionLog(a, k))
-  if (READ_ONLY.has(cmd)) return false
-  if (OPAQUE.has(cmd)) return true
-  if (INTERPRETERS.has(cmd)) return args.some((a) => hasDecisionsName(a.text) || (a.dyn && (globNamesLog(a.text, k) || refsLogVar(a.text, k))))
-  // rm and mv remove a file whatever operand it is, so a glob that expands to the log is refused (R-191)
-  if ((cmd === 'rm' || cmd === 'shred' || cmd === 'unlink' || cmd === 'mv') && words.slice(n + 1).some((w) => w.dyn && globNamesLog(w.text, k))) return true
-  // cp, mv, install, ln, rsync and dd write their last operand (dd: of=), so a glob there that expands to the log is refused
-  if (DEST_LAST.has(cmd) && words.slice(n + 1).some((w, j, rest) => w.dyn && globNamesLog(w.text, k) && (j === rest.length - 1 || /^of=/.test(w.text)))) return true
-  // any other command (cp, mv, dd, truncate, ...) is refused when one of its words is the file itself
-  if (words.slice(n).some((w) => baseName(w.text) === 'decisions.md')) return true
-  // ... or a variable set to it. A copy or move only writes its destination (mv removes every operand), so a variable
-  // that is only a source (`cp $F /tmp/copy.md`) reads the log and is allowed.
-  const viaVar = (w: ShellTok): boolean => w.dyn && refsLogVar(w.text, k)
-  if (DEST_LAST.has(cmd) && cmd !== 'mv') {
-    const ops = words.slice(n + 1).filter((w) => w.text === '-' || !w.text.startsWith('-'))
-    return (cmd === 'dd' ? ops.filter((w) => /^of=/.test(w.text)) : ops.slice(-1)).some(viaVar)
-  }
-  return words.slice(n).some(viaVar)
-}
-
-// Python code that opens the log only for reading, judged as an allowlist: it passes only when every call is a known read
-// (open with a read-only mode literal, .read, .readlines, print, sys.stdout.write, len, string methods, ...), the only
-// imports are sys, io, codecs, re and json, and nothing can call a value the guard cannot name. Anything else is refused.
-const PY_BUILTINS = new Set(['print', 'len', 'str', 'int', 'float', 'repr', 'sorted', 'list', 'tuple', 'set', 'dict', 'enumerate', 'range', 'min', 'max', 'sum', 'reversed', 'any', 'all', 'bool', 'abs', 'zip', 'round', 'ord', 'chr'])
-const PY_KEYWORDS = new Set(['and', 'or', 'not', 'in', 'is', 'if', 'else', 'elif', 'for', 'while', 'with', 'as', 'lambda', 'return', 'pass', 'True', 'False', 'None', 'import', 'assert'])
-// names that run or reach code the allowlist cannot see, refused wherever they appear as a bare name
-const PY_BARE_DENY = new Set(['open', 'exec', 'eval', 'compile', 'getattr', 'setattr', 'delattr', 'vars', 'globals', 'locals', 'breakpoint', 'input', 'map', 'filter', 'type', 'object', 'super', 'dir', 'help', 'exit', 'quit', 'memoryview', 'classmethod', 'staticmethod', 'property', 'from', 'del', 'global', 'nonlocal', 'class', 'def', 'async', 'await', 'yield', 'try', 'except', 'raise', 'finally'])
-const PY_METHODS = new Set(['read', 'readlines', 'readline', 'splitlines', 'split', 'rsplit', 'strip', 'lstrip', 'rstrip', 'decode', 'encode', 'lower', 'upper', 'title', 'startswith', 'endswith', 'join', 'count', 'find', 'rfind', 'index', 'format', 'partition', 'rpartition', 'isdigit', 'close', 'get', 'items', 'keys', 'values', 'flush', 'findall', 'finditer', 'search', 'match', 'sub'])
-const PY_MODULES = new Set(['sys', 'io', 'codecs', 're', 'json'])
-const PY_MODULE_CALLS = new Set(['sys.stdout.write', 'sys.stderr.write', 'sys.stdout.flush', 'sys.stdin.read', 'sys.stdin.readlines', 'sys.stdin.readline', 'io.open', 'codecs.open', 're.findall', 're.finditer', 're.search', 're.match', 're.sub', 're.split', 're.compile', 'json.loads', 'json.load', 'json.dumps'])
-const PY_MODULE_VALUES = new Set(['sys.stdout', 'sys.stderr', 'sys.stdin', 'sys.argv'])
-function balancedArgs(s: string, from: number): string | undefined {
-  let depth = 0
-  let quote: string | undefined
-  for (let i = from; i < s.length; i++) {
-    const c = s[i]
-    if (quote) {
-      if (c === '\\') i++
-      else if (c === quote) quote = undefined
-    } else if (c === "'" || c === '"') quote = c
-    else if (c === '(' || c === '[' || c === '{') depth++
-    else if (c === ')' || c === ']' || c === '}') {
-      if (--depth === 0) return s.slice(from + 1, i)
-    }
-  }
-  return undefined
-}
-function topLevelCommas(s: string): string[] {
-  const out: string[] = []
-  let depth = 0
-  let quote: string | undefined
-  let cur = ''
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i]
-    if (quote) {
+      if (command[i + 1] === '&') op = '>&'
+      words.push(op)
+    } else {
       cur += c
-      if (c === '\\' && i + 1 < s.length) cur += s[++i]
-      else if (c === quote) quote = undefined
-      continue
+      has = true
     }
-    if (c === "'" || c === '"') quote = c
-    else if (c === '(' || c === '[' || c === '{') depth++
-    else if (c === ')' || c === ']' || c === '}') depth--
-    else if (c === ',' && depth === 0) {
-      out.push(cur.trim())
-      cur = ''
-      continue
-    }
-    cur += c
   }
-  out.push(cur.trim())
-  return out
-}
-function pythonReadsOnly(code: string): boolean {
-  const c = code
-  if (c.includes('__')) return false
-  // string literals masked, so a name inside one is not code; a quote left over is an unterminated string
-  let masked = c.replace(/'''[\s\S]*?'''|"""[\s\S]*?"""|'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, 'S')
-  if (/['"@\\]|[^\x00-\x7f]|\*\*/.test(masked)) return false
-  // an f-string runs code inside its text
-  if (/(?:^|[^\w])(?:[fF][rRbB]?|[rR][fF])['"]/.test(c)) return false
-  // imports: only the names in PY_MODULES; `from ... import` is refused as a bare name
-  for (const m of masked.matchAll(/\bimport\b([^;\n]*)/g)) {
-    if (!m[1].split(',').every((n) => PY_MODULES.has(n.trim()))) return false
-  }
-  masked = masked.replace(/\bimport\b[^;\n]*/g, '')
-  // a call of a call's result, an index or a group (`x()()`, `d['k']()`) calls a value the guard cannot name
-  for (const m of masked.matchAll(/\(/g)) {
-    const before = masked.slice(0, m.index).trimEnd()
-    if (/[)\]}]$/.test(before)) return false
-  }
-  for (const m of masked.matchAll(/[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*/g)) {
-    const start = m.index ?? 0
-    if (start > 0 && /[\w]/.test(masked[start - 1])) continue // the tail of a number such as 1e5
-    const parts = m[0].split(/\s*\.\s*/)
-    const chain = parts.join('.')
-    const dotBefore = masked.slice(0, start).trimEnd().endsWith('.')
-    const call = masked.slice(start + m[0].length).trimStart().startsWith('(')
-    const first = parts[0]
-    if (!dotBefore && PY_MODULES.has(first)) {
-      if (call ? !PY_MODULE_CALLS.has(chain) : !PY_MODULE_VALUES.has(chain)) return false
-      continue
-    }
-    if (parts.length === 1 && !dotBefore) {
-      if (first === 'open') {
-        if (!call) return false
-      } else if (PY_BARE_DENY.has(first)) return false
-      else if (call && !PY_BUILTINS.has(first) && !PY_KEYWORDS.has(first)) return false
-      continue
-    }
-    if (call && !PY_METHODS.has(parts[parts.length - 1])) return false
-  }
-  for (const m of c.matchAll(/\bopen\s*\(/g)) {
-    const before = c.slice(0, m.index).trimEnd()
-    if (before.endsWith('.') && !/\b(?:io|codecs)\.$/.test(before)) return false
-    const args = balancedArgs(c, m.index + m[0].length - 1)
-    if (args === undefined) return false
-    const parts = topLevelCommas(args)
-    if (parts.some((p) => p.startsWith('*'))) return false
-    let mode: string | undefined
-    if (parts[1] !== undefined && !/^\w+\s*=/.test(parts[1])) mode = parts[1]
-    for (const p of parts) {
-      const kw = /^mode\s*=\s*([\s\S]*)$/.exec(p)
-      if (kw) mode = kw[1]
-    }
-    if (mode === undefined) continue
-    const lit = /^(['"])([rbtU]*)\1$/.exec(mode.trim())
-    if (!lit) return false
-  }
-  return true
+  endSegment()
+  return segments
 }
 
-// Node code that only reads, judged as an allowlist like pythonReadsOnly: the only module is fs (or node:fs) and the only
-// fs call readFileSync; names are console, process.stdout/stderr.write, process.argv, JSON and variables the code declares,
-// with a short list of string methods. A template literal, regex, array index, arrow function, import, new or any other
-// name is refused.
-const NODE_METHODS = new Set(['readFileSync', 'toString', 'split', 'trim', 'slice', 'join', 'length', 'includes', 'startsWith', 'endsWith', 'toLowerCase', 'toUpperCase', 'log', 'error', 'info', 'write', 'parse', 'stringify'])
-const NODE_CHAINS = new Set(['console', 'process.stdout', 'process.stderr', 'process.argv', 'JSON', 'require'])
-function nodeReadsOnly(code: string): boolean {
-  if (/[`\\@#]|[^\x00-\x7f]|=>|\bimport\b|\bnew\b/.test(code.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, 'S'))) return false
-  const requires = code.match(/\brequire\b/g)?.length ?? 0
-  if (requires !== (code.match(/\brequire\s*\(\s*(['"])(?:node:)?fs\1\s*\)/g)?.length ?? 0)) return false
-  const masked = code.replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, 'S')
-  if (/[\][/]/.test(masked)) return false
-  for (const m of masked.matchAll(/\(/g)) {
-    if (/[)\]}]$/.test(masked.slice(0, m.index).trimEnd())) return false
-  }
-  const declared = new Set([...masked.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]))
-  for (const m of masked.matchAll(/[A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)*/g)) {
-    const start = m.index ?? 0
-    if (start > 0 && /[\w$]/.test(masked[start - 1])) continue
-    const parts = m[0].split(/\s*\.\s*/)
-    const dotBefore = masked.slice(0, start).trimEnd().endsWith('.')
-    if (dotBefore) {
-      if (!parts.every((p) => NODE_METHODS.has(p))) return false
-      continue
-    }
-    if (['const', 'let', 'var', 'true', 'false', 'null', 'undefined', 'S'].includes(parts[0]) && parts.length === 1) continue
-    if (declared.has(parts[0])) {
-      if (!parts.slice(1).every((p) => NODE_METHODS.has(p))) return false
-      continue
-    }
-    const head = NODE_CHAINS.has(parts.slice(0, 2).join('.')) ? parts.slice(0, 2).join('.') : parts[0]
-    if (!NODE_CHAINS.has(head)) return false
-    if (!parts.slice(head.split('.').length).every((p) => NODE_METHODS.has(p))) return false
-  }
-  return true
-}
-
-// Does every command of this line only read its standard input as data? Only a known pure reader qualifies: cat and the
-// other READ_ONLY commands, and tee to a file that is not the log. A wrapper, a shell, an interpreter, patch, ex, ed, a
-// dynamic command word or any command not listed does not, so the body it reads is judged.
-function heredocReaderIsPure(line: string, k: DecisionWalk): boolean {
-  for (const seg of commandSegments(line, true).segments) {
-    const { toks } = shellTokens(seg)
-    const words: ShellTok[] = []
-    for (let i = 0; i < toks.length; i++) {
-      if (toks[i].kind === 'word') words.push(toks[i])
-      else if (toks[i + 1]?.kind === 'word') i++
-    }
-    const n = commandIndex(words.map((w) => w.text))
-    if (n >= words.length) continue
-    if (words[n].dyn) return false
-    const cmd = baseName(words[n].text)
-    if (cmd === 'tee') {
-      if (words.slice(n + 1).filter((a) => !a.text.startsWith('-')).some((a) => hitsDecisionLog(a, k))) return false
-    } else if (!READ_ONLY.has(cmd)) return false
-  }
-  return true
-}
-
-// Heredoc bodies are data for the command that reads them. The `<<` operators are found with the shell tokenizer, so none
-// is taken from a quote or a comment, `<<<` is a here-string, and a quoted or partly quoted delimiter (E"OF") is the word
-// the shell reads. A line is joined with the next while it ends inside a quote or after a backslash. A body is dropped
-// only when its reader is a known pure reader (heredocReaderIsPure) and, for an unquoted delimiter, holds no
-// substitution; any other body comes back as `opaque` with its command line, to be judged as the code it may be. A
-// heredoc that never ends leaves its lines as commands.
-function splitHeredocs(text: string, k: DecisionWalk): { text: string; opaque: { head: string; body: string }[]; pure: CodeText[] } {
-  const lines = text.split('\n')
-  const out: string[] = []
-  const opaque: { head: string; body: string }[] = []
-  const pure: CodeText[] = [] // bodies dropped as data: a script a `cat > f <<EOF` writes is data until something runs it
-  let i = 0
-  while (i < lines.length) {
-    let acc = lines[i]
-    let end = i
-    let sc = shellTokens(acc)
-    while ((sc.open || /\\$/.test(acc)) && end + 1 < lines.length) {
-      acc += '\n' + lines[++end]
-      sc = shellTokens(acc)
-    }
-    out.push(acc)
-    i = end + 1
-    const marks: { delim: string; quoted: boolean; strip: boolean }[] = []
-    for (let t = 0; t < sc.toks.length; t++) {
-      const tok = sc.toks[t]
-      if (tok.kind !== 'in' || (tok.text !== '<<' && tok.text !== '<<-')) continue
-      const d = sc.toks[t + 1]
-      if (d?.kind !== 'word') continue
-      marks.push({ delim: d.text, quoted: d.quoted === true, strip: tok.text === '<<-' })
-      t++
-    }
-    if (marks.length === 0) continue
-    const isPure = heredocReaderIsPure(acc, k)
-    for (const m of marks) {
-      let e = i
-      while (e < lines.length && (m.strip ? lines[e].replace(/^\t+/, '') : lines[e]) !== m.delim) e++
-      if (e >= lines.length) break // unterminated: the lines stay commands
-      const body = lines.slice(i, e).join('\n')
-      if (!isPure) opaque.push({ head: acc, body })
-      else {
-        pure.push({ text: body, to: outTarget(sc.toks) })
-        if (!m.quoted && /\$\(|`/.test(body)) body.split('\n').forEach((l) => out.push(l))
-      }
-      i = e + 1
-    }
-  }
-  return { text: out.join('\n'), opaque, pure }
-}
-
-// Does this text spell the log's name, hold a glob for it, or read a variable set to it (R-191)?
-function refsLogVar(s: string, k: DecisionWalk): boolean {
-  return k.vars !== undefined && k.vars.size > 0 && new RegExp(`\\$\\{?[!#]?(?:${[...k.vars].join('|')})(?!\\w)`).test(s)
-}
-function reachesLog(s: string, k: DecisionWalk): boolean {
-  return hasDecisionsName(s) || globNamesLog(s, k) || refsLogVar(s, k) || (k.outsideRunDir !== true && DYN_NAME.test(s))
-}
-
-// The shell variables a command sets to the log's path or a glob for it: `F=<log>`, `export F=<log>`, `G=$F`, and the
-// variable of `for F in <log or glob>`. Read to a fixpoint so an assignment from another one counts whatever the order.
-function collectLogVars(text: string, k: DecisionWalk): void {
-  const vars = (k.vars ??= new Set())
-  const lists: ShellTok[][] = []
-  for (const seg of commandSegments(text, true).segments) {
-    const words = shellTokens(seg).toks.filter((t) => t.kind === 'word')
-    lists.push(words)
-  }
-  // `<log> | while read F`: the text before a pipe into `read` reaches the log, so F holds a path of it
-  const piped = [...text.matchAll(/([^|;&\n]*)\|\s*(?:(?:while|until)\s+)?read\b([^;\n|&]*)/g)].map((m) => ({ left: m[1], names: (m[2].match(/(?<![-\w])\w+(?!\w)/g) ?? []).filter((n) => !/^(?:do|done)$/.test(n)) }))
-  for (let again = true; again; ) {
-    again = false
-    for (const p of piped) {
-      if (!reachesLog(p.left, k)) continue
-      for (const n of p.names) {
-        if (!vars.has(n)) {
-          vars.add(n)
-          again = true
-        }
-      }
-    }
-    for (const words of lists) {
-      const loop = words[0]?.text === 'for' && words[2]?.text === 'in' && /^\w+$/.test(words[1]?.text ?? '')
-      if (loop && !vars.has(words[1].text) && words.slice(3).some((w) => reachesLog(w.text, k))) {
-        vars.add(words[1].text)
-        again = true
-      }
-      // `read F <<< <log>` sets F from text that reaches the log (the here-string target is a word of the segment)
-      const rd = words[0]?.text === 'read' ? words.slice(1).filter((w) => !w.text.startsWith('-')) : []
-      if (rd.some((w) => reachesLog(w.text, k) || STEM_VALUE.test(w.text))) {
-        for (const w of rd) {
-          if (/^\w+$/.test(w.text) && !vars.has(w.text)) {
-            vars.add(w.text)
-            again = true
-          }
-        }
-      }
-      for (const w of words) {
-        const m = /^(\w+)=([\s\S]*)$/.exec(w.text)
-        if (m && !vars.has(m[1]) && (hasDecisionsName(m[2]) || globNamesLog(m[2], k) || reachesLog(m[2], k) || STEM_VALUE.test(m[2]))) {
-          vars.add(m[1])
-          again = true
-        }
-      }
-      // `printf -v F %s <log>` sets F like an assignment does
-      if (words[0]?.text === 'printf' && words[1]?.text === '-v' && /^\w+$/.test(words[2]?.text ?? '') && !vars.has(words[2].text) && words.slice(3).some((w) => reachesLog(w.text, k) || STEM_VALUE.test(w.text))) {
-        vars.add(words[2].text)
-        again = true
-      }
-    }
-  }
-}
-
-function opaqueBodyWrites(o: { head: string; body: string }, k: DecisionWalk, depth: number): boolean {
-  if (!reachesLog(o.body, k)) return false
-  const cmds = o.head.split(/[\s;&|()]+/).map(baseName)
-  if (cmds.some((b) => SHELLS.has(b))) return writesDecisionLog(o.body, k, depth + 1)
-  if (cmds.some((b) => /^python[\d.]*$/.test(b))) return !pythonReadsOnly(o.body)
-  return true
-}
-
-// a file name a script is run by: a shell extension, or no extension (`chmod +x f; f`)
-const SCRIPT_FILE = /\.(?:sh|bash|zsh|ksh|dash)$|(?:^|[\\/])[^.\\/]+$/i
-const slashesOf = (seg: string): string => seg.replace(/(?<=[\w.-])\\(?=[\w.-])/g, '/')
-
-function writesDecisionLog(text: string, k: DecisionWalk, depth: number): boolean {
-  if (depth > 6) return true
-  const split = splitHeredocs(text, k)
-  if (split.opaque.some((o) => opaqueBodyWrites(o, k, depth))) return true
-  text = split.text
-  collectLogVars(text, k)
-  const segments = commandSegments(text, true).segments
-  // R-191: text one segment writes can be run by another (`echo "<cmd>" | sed e`, `cat > f <<EOF` then `sh f`). When a
-  // shell or interpreter runs input or a script anywhere in the command, the text written for it is judged as that code.
-  const facts = segments.flatMap((seg) => [segmentFacts(seg), segmentFacts(slashesOf(seg))])
-  const asShell = facts.some((f) => f.shell)
-  const interps = facts.flatMap((f) => f.interps)
-  // an interpreter runs the text only as code of its own language: it is a write unless that code only reads (an
-  // interpreter other than python and node is not judged, so it is a write)
-  const isPy = (i: string): boolean => /^python[\d.]*$/.test(i)
-  const isNode = (i: string): boolean => i === 'node' || i === 'nodejs'
-  const interpWrites = (c: string): boolean => {
-    if (interps.length === 0) return false
-    if (interps.some((i) => !isPy(i) && !isNode(i))) return true
-    return !((interps.some(isPy) && pythonReadsOnly(c)) || (interps.some(isNode) && nodeReadsOnly(c)))
-  }
-  // a shell script run with arguments that reach the log (`sh w.sh <run>/decision*.md`) writes it when the script writes
-  // "$1": the text is judged again with each positional parameter replaced by what the shell passed
-  const runs = facts.filter((f) => f.shell && f.scriptArgs.some((a) => reachesLog(a, k)))
-  const expand = (c: string, args: string[]): string => {
-    const arg = (a: string | undefined): string => (a !== undefined && globNamesLog(a) ? a.replace(/[^/\\]*$/, 'decisions.md') : (a ?? ''))
-    return c.replace(/\$\{?(\d+|[@*])\}?/g, (_m, n: string) => (n === '@' || n === '*' ? args.map(arg).join(' ') : arg(args[Number(n) - 1])))
-  }
-  // text written to a file counts only when a later command could run or read that file as code
-  const norm = (p: string): string => slashed(p).replace(/^\.\//, '')
-  const refs = facts.flatMap((f) => f.refs.map(norm))
-  const codeWrites = (item: CodeText): boolean => {
-    // a script file written here may be run by a later Bash call, which the hook judges alone: refuse the write itself
-    if (item.to !== undefined && SCRIPT_FILE.test(item.to) && !/^\/dev\//.test(item.to) && reachesLog(item.text, k) && writesDecisionLog(item.text, k, depth + 1)) return true
-    if (item.to !== undefined && !/^\/dev\//.test(item.to) && !refs.includes(norm(item.to))) return false
-    return [item.text, ...runs.map((f) => expand(item.text, f.scriptArgs))].some((c) => reachesLog(c, k) && ((asShell && writesDecisionLog(c, k, depth + 1)) || interpWrites(c)))
-  }
-  if (split.pure.some(codeWrites) || facts.some((f) => f.code.some(codeWrites))) return true
-  for (const seg of segments) {
-    if (!reachesLog(seg, k)) continue
-    if (segmentWritesDecisionLog(seg, k, depth)) return true
-    // a Windows path (`.git\ankur\<id>\decisions.md`, Git Bash) read with its backslashes as separators, which the shell's
-    // own reading drops as escapes
-    const slashes = slashesOf(seg)
-    if (slashes !== seg && segmentWritesDecisionLog(slashes, k, depth)) return true
+// Whether one sed or perl argument is an in-place switch: a short-switch bundle whose letters before the i take no value
+// (-i, -i.bak, -pi, -pie, -ni, -Ei), or --in-place. Value-taking letters stop the scan: perl -Mstrict, -Ilib, -mX, -e, -E, -x, -d, -C;
+// sed -e, -f, -l, -s alone is a read.
+function inPlaceFlag(cmd: string, word: string): boolean {
+  if (cmd === 'sed' && /^--in-place(=|$)/.test(word)) return true
+  if (!/^-[A-Za-z0-9]/.test(word)) return false
+  const valued = cmd === 'perl' ? 'IMmeExdC' : 'efl'
+  for (const ch of word.slice(1)) {
+    if (ch === 'i') return true
+    if (valued.includes(ch)) return false
+    if (!/[A-Za-z0-9]/.test(ch)) return false
   }
   return false
 }
 
-// Fail closed: the caller refuses when this throws on a command that names decisions.md (see the Bash handler).
-// A command that names a run dir (or cds into one) and writes to a target holding an expansion (`$`, `${`, a backtick,
-// `$(`) can build the log's name from pieces the name guard cannot join, so that write is refused. Outside a run dir a
-// dynamic name (`docs/decision-$(date +%F).md`) is an ordinary file.
-const RUN_DIR = /\.git[\\/](?:ankur|truss)(?:[\\/]|$)/
-// A target that is one bare variable (`"$F"`) is left to the variable walk, which knows what F holds.
-function writesExpandedTarget(command: string): boolean {
-  const expands = (w: string): boolean => /[$\x60]/.test(w) && !/^"?\$(?:\w+|\{\w+\})"?$/.test(w)
-  for (const seg of commandSegments(command, true).segments) {
-    const toks = shellTokens(seg).toks
-    if (expands(outTarget(toks) ?? '')) return true
-    const words = toks.filter((t) => t.kind === 'word').map((t) => t.text)
-    const n = commandIndex(words)
-    const cmd = baseName(words[n] ?? '')
-    const args = words.slice(n + 1)
-    const anyExpands = (w: string): boolean => /[$\x60]/.test(w)
+const SKIPPED_PREFIX =new Set(['sudo', 'env', 'command', 'time', 'nice', 'nohup', 'exec'])
+
+export function writesDecisionLogByHand(command: unknown): boolean {
+  if (typeof command !== 'string' || !/decisions\.md/i.test(command)) return false
+  for (const words of shellWords(command)) {
+    for (let i = 0; i < words.length - 1; i++) if ((words[i] === '>' || words[i] === '>>' || words[i] === '>&') && isLogName(words[i + 1])) return true
+    const rest = words.filter((w, i) => w !== '>' && w !== '>>' && w !== '>&' && words[i - 1] !== '>' && words[i - 1] !== '>>' && words[i - 1] !== '>&')
+    let n = 0
+    while (n < rest.length && (/^\w+=/.test(rest[n]) || SKIPPED_PREFIX.has(rest[n]))) n++
+    const cmd = (rest[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
+    const args = rest.slice(n + 1)
     const operands = args.filter((w) => !w.startsWith('-'))
-    if (cmd === 'tee' && operands.some(expands)) return true
-    // a command that writes its operands: the target (last operand, or every operand) holding any expansion, a bare variable too
-    if (['cp', 'mv', 'ln', 'install'].includes(cmd) && (anyExpands(operands[operands.length - 1] ?? '') || args.some((w, i) => /^(?:-t|--target-directory)$/.test(args[i - 1] ?? '') && anyExpands(w)))) return true
-    if (['truncate', 'touch', 'chmod', 'rm', 'rsync', 'shred'].includes(cmd) && operands.some(anyExpands)) return true
-    if (cmd === 'sed' && args.some((w) => /^-[a-z]*i|^--in-place/.test(w)) && operands.some(anyExpands)) return true
-    if (cmd === 'dd' && args.some((w) => /^of=/.test(w) && anyExpands(w))) return true
+    if (cmd === 'tee' && operands.some(isLogName)) return true
+    if ((cmd === 'sed' || cmd === 'perl') && args.some((w) => inPlaceFlag(cmd, w)) && operands.some(isLogName)) return true
+    // with -t DIR (or --target-directory) the destination is a directory, never the log
+    const targetDir = args.some((w) => w === '-t' || /^-t./.test(w) || /^-[a-zA-Z]+t$/.test(w) || w.startsWith('--target-directory'))
+    if ((cmd === 'cp' || cmd === 'mv') && !targetDir && operands.length >= 2 && isLogName(operands[operands.length - 1])) return true
   }
   return false
 }
-export function decisionLogBashVerdict(command: unknown, sessionId: string): { deny: string } | undefined {
-  if (typeof command !== 'string') return undefined
-  const inRunDir = RUN_DIR.test(command)
-  if (inRunDir && writesExpandedTarget(command)) return { deny: DECISION_LOG_REFUSAL }
-  if (!reachesDecisionLog(command)) return undefined
-  return writesDecisionLog(command, { sid: sessionId, outsideRunDir: !inRunDir }, 0) ? { deny: DECISION_LOG_REFUSAL } : undefined
+
+export function decisionLogBashVerdict(command: unknown): { deny: string } | undefined {
+  return writesDecisionLogByHand(command) ? { deny: DECISION_LOG_REFUSAL } : undefined
 }
 
 async function homeDir($: $): Promise<string | undefined> {
@@ -3334,24 +2546,12 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       const input = e as unknown as { command?: unknown; args?: unknown }
       const command = typeof input.command === 'string' ? input.command : isRecord(input.args) ? input.args.command : undefined
-      // R-134: a Bash command that writes decisions.md is refused. Unlike safely() and failOpen, this guard fails closed: an
-      // error while judging a command that names the file refuses it, because a letting-through here is the very write the
-      // guard exists to stop, while a refused read is cheap to redo through `factory.ts decide` or a plain read.
-      let decisionLog: { deny: string } | undefined
-      if (reachesDecisionLog(command)) {
-        try {
-          decisionLog = decisionLogBashVerdict(command, await $.session.id())
-        } catch (error) {
-          decisionLog = { deny: DECISION_LOG_REFUSAL }
-          try {
-            $.ui.log(`ankur: decision log Bash guard failed, refusing the call: ${String(error)}`, { to: 'debug' })
-          } catch {
-            // nothing left to do
-          }
-        }
-        if (decisionLog !== undefined) await safely($, 'decision log guard log', () => logRule($, 'decision log guard refused a Bash call: it writes decisions.md'))
+      // R-196: a Bash command that plainly writes decisions.md by hand is refused. An accident catcher: it fails open.
+      const decisionLog = await safely($, 'decision log Bash guard', async () => decisionLogBashVerdict(command))
+      if (decisionLog !== undefined) {
+        await safely($, 'decision log guard log', () => logRule($, 'decision log guard refused a Bash call: it writes decisions.md'))
+        return refuse($, state, refusalsLogged, e, decisionLog)
       }
-      if (decisionLog !== undefined) return refuse($, state, refusalsLogged, e, decisionLog)
       const verdict = await safely($, 'push gate', async () => {
         const v = pushGateVerdict(command)
         if (v !== undefined) await logRule($, 'push gate refused a call: scrub is not joined to a push or merge by &&')
@@ -3443,7 +2643,7 @@ export const register: Register = on => {
   // The decision log is written only by `factory.ts decide`, which stamps the clock's time. An Edit or Write of this
   // session's decisions.md is refused, never rewritten: a rewritten input gets no auto-mode verdict (retro F-9).
   on('tool.call', { tool: ['Write', 'Edit'] }, async ($, e, next) => {
-    const isLog = await safely($, 'decision log', async () => isDecisionLog(e.file_path, await $.session.id()))
+    const isLog = await safely($, 'decision log', async () => isDecisionLog(e.file_path))
     if (isLog === true) return refuse($, state, refusalsLogged, e, { deny: DECISION_LOG_REFUSAL })
     return next(e)
   }).catch(failOpen)

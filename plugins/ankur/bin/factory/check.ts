@@ -337,6 +337,49 @@ function rerunFlakes(dir: string, slug: string, cwd: string, r: { exit: number; 
     : { exit: r.exit, text: `${r.text}\nre-run of ${x.reran.join(', ')} on the same head failed too:\n${x.text}`, ...(signal ? { signal } : {}) }
 }
 
+// The test files a `node --test` step of the command names that do not exist. Node 26 prints nothing and exits 0 for such a file when
+// another named file passes, so the command text is read, not its output. It fails open: a missed file is the old behaviour, a false
+// one would block every green. Segments split on newlines, && || ; and |. Only a segment that starts with `node ... --test` counts,
+// and only plain file names after `--test` up to a redirect (no glob, flag, variable or quote). A plain literal `cd <dir>` moves the
+// base for later segments; a cd with a variable, glob or no target, a cd inside a subshell, braces or a function, pushd or popd stops
+// all checking for the rest of the command. Paths are forward-slashed so Windows paths read the same. `exists` is a seam for tests.
+const VALUE_FLAGS = new Set(['--import', '--require', '-r', '--loader', '--env-file', '--test-reporter', '--test-reporter-destination', '--test-name-pattern', '--test-skip-pattern', '--test-concurrency', '--test-timeout'])
+export function missingTestFiles(command: string, cwd: string, exists: (p: string) => boolean = existsSync, platform: string = process.platform): string[] {
+  const out: string[] = []
+  // an MSYS-style /c/Users/x on Windows is C:/Users/x
+  const msys = (p: string): string => (platform === 'win32' ? p.replace(/^\/([a-zA-Z])(?=\/|$)/, (_m, d: string) => `${d.toUpperCase()}:`) : p)
+  let base = flat(cwd).replace(/\/+$/, '')
+  for (const raw of command.split(/&&|\|\||;|\||\r?\n/)) {
+    const seg = raw.trim().replace(/^(?:[!({]\s*|\w+=\$\(\s*|\w+=\S*\s+)+/, '')
+    if (seg === '') continue
+    const words = seg.split(/\s+/)
+    if (/^(?:pushd|popd)$/.test(words[0]) || (words[0] !== 'cd' && words.includes('cd'))) return out
+    if (words[0] === 'cd') {
+      const t = words[1]
+      if (words.length !== 2 || t === undefined || t.startsWith('-') || /[$`*?[\]{}()~'"]/.test(t) || /[(){}`]/.test(raw) || raw.trim() !== seg) return out
+      const ft = flat(t)
+      base = /^(?:[A-Za-z]:)?\//.test(ft) ? msys(ft) : `${base}/${ft}`
+      base = base.replace(/\/\.(?=\/|$)/g, '').replace(/\/+$/, '') || '/'
+      continue
+    }
+    const isNode = /^node(?:\.exe)?$/.test(flat(words[0]).split('/').pop() ?? '')
+    const t = isNode ? words.indexOf('--test') : -1
+    // anything before the first `node --test` that could create or delete files (a build, an rm, a script) means the files named later
+    // may be made or removed by the command itself: stop checking. Only these harmless leaders and fail-function bodies go on.
+    if (t < 0 && !/^(?:cd|test|\[|ls|echo|printf|true|set|export|exit|\}|function|\w+=\S*|\w+\(\))$/.test(words[0])) return out
+    if (t < 0) continue
+    for (let i = t + 1; i < words.length; i++) {
+      const w = words[i].replace(/^(['"])(.*)\1$/, '$2')
+      if (/^\d*[<>&]/.test(w)) break
+      if (VALUE_FLAGS.has(words[i - 1])) continue
+      if (w.startsWith('-') || /[*?[\]{}$`<>()'"|&]/.test(w) || !/\.(?:[cm]?[jt]s|[jt]sx)$/.test(w)) continue
+      const abs = /^(?:[A-Za-z]:)?[\\/]/.test(w) ? msys(flat(w)) : `${base}/${flat(w)}`
+      if (!exists(abs)) out.push(flat(w))
+    }
+  }
+  return out
+}
+
 export function cmdCheck(f: Flags): Obj {
   const dir = dirOf(f)
   const slug = need(f, 'slug')
@@ -360,9 +403,16 @@ export function cmdCheck(f: Flags): Obj {
   const command = cut.blanket && !suiteOnly ? cut.command : acceptanceTest
   // a failed install goes into the check text, so the env catalog sees it
   const installs = expect === 'green' ? installMissingDeps(cwd).filter((i) => i.status !== 0) : []
+  // 0.37.1: node 26 exits 0 for a missing named file when other named files pass; a missing file is a failure, red or green.
+  // Read before the run, so a file the command itself builds or removes is never judged by what is left after it.
+  const missing = missingTestFiles(command, cwd)
   const acc = suiteOnly ? suiteRun(f, dir, slug, cwd, command) : bashRun(cwd, command)
   let exit = acc.exit
   let text = installs.map((i) => `npm ci failed in ${i.dir} (exit ${i.status}):\n${i.output}\n`).join('') + acc.text
+  if (exit === 0 && missing.length > 0) {
+    exit = 1
+    text += `\nacceptance test names a file that does not exist: ${missing.join(', ')}\n`
+  }
   let tests: Obj | undefined = suiteOnly ? { mode: 'full', why: ['the acceptance test is the full suite'], files: [], commands: [command] } : undefined
   let slot: Obj | undefined = 'slot' in acc ? acc.slot : undefined
   if (expect === 'green' && exit === 0 && !suiteOnly) {

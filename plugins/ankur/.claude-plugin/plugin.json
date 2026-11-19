@@ -1,6 +1,6 @@
 {
   "name": "ankur",
-  "version": "0.37.0",
+  "version": "0.37.1",
   "types": "./types/index.d.ts",
   "dependencies": [
     { "name": "kit", "marketplace": "claude-ops", "version": ">=0.5.0" },

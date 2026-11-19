@@ -1039,7 +1039,7 @@ function memberPrompt(crew, role, parts) {
     'Co-Authored-By: Name <name@example.com>',
     'Claude-Session: https://example.com/session',
     '',
-    'After each commit, run `git log -1 --format=%B` and check that its last block holds the Ankur-Crew and Ankur-Role lines; if it does not, fix the message with git commit --amend. A merge refuses a commit whose Ankur-Crew or Ankur-Role git cannot read.',
+    `After each commit, run \`node ${sh(`${F.plugin}/bin/factory.ts`)} commit-trailers --repo ${parts.inCrewWorktree ? sh(crew.e.worktree) : '.'}\` and check that its JSON has "unparsed" empty and "crew" and "role" as named above; if not, fix the message with git commit --amend. A merge refuses a commit whose Ankur-Crew or Ankur-Role git cannot read.`,
     '',
     'You have no Agent tool; do the work yourself.',
     `${parts.inCrewWorktree ? `Work and commit on the crew branch ${crew.e.branch} in the crew worktree ${crew.e.worktree}` : 'Commit on your branch'} and report the branch and commit. Put your proof in the proof field. marker is DONE when finished, CHECKPOINT when you must stop early (put a handoff note in text), QUESTION, BLOCKED or PROPOSAL when you cannot go on.`,
@@ -2097,7 +2097,9 @@ function backstopPrompt(crew, what, lines) {
     'These builder commits on the crew branch touch tester-owned files, so the tests check fails:',
     ...lines,
     '',
-    `Rewrite them on the crew branch ${e.branch} itself. Split each listed commit so its changes to the files listed for it sit in their own commit with the trailers Ankur-Crew: ${crew.slug} and Ankur-Role: ${TRAILER_ROLE.tester}, and the rest stays in a commit with its original trailers.`,
+    `Rewrite them on the crew branch ${e.branch} itself. Split each listed commit so its changes to the files listed for it sit in their own commit, and the rest stays in a commit with its original trailers.`,
+    `Labelling rule: a split half that touches only test files (a file named as a test, or under a tests, test, __tests__, spec, checks, e2e or fixtures directory) gets the trailers Ankur-Crew: ${crew.slug} and Ankur-Role: ${TRAILER_ROLE.tester}. Any half that touches a non-test path keeps the original builder trailers, whatever else it holds.`,
+    `After you make each new commit, run \`node ${sh(`${F.plugin}/bin/factory.ts`)} commit-trailers --repo ${sh(e.worktree)} --commit <sha>\` and require "unparsed" to be empty and "role" to be the one the rule gives that commit.`,
     'Keep the tree identical: git diff between the old and the new tip must be empty, and no file content changes.',
     `Report the branch ${e.branch} and its new tip as the commit.`,
   ]
@@ -2418,11 +2420,23 @@ async function greenFix(crew, what, detail) {
     const reroute = err instanceof Stop && err.member && (err.tag === 'BLOCKED' || err.tag === 'QUESTION') && tf.some((file) => namesFile(String(err.text || ''), file))
     if (!reroute) throw err
     const said = `The ${what} fix builder ended ${err.tag}, naming a tester file. Its report:\n${err.text}`
+    // the stopped fix builder may have committed on its own branch: land it on the crew branch first, so the tester and the green
+    // re-check see it and no later member is told to merge a branch the crew already holds (a branch with no commits merges as a no-op)
+    // best effort: integrate fails closed (an unreadable range, a commit with no trailer), and that must not turn a reroute into a
+    // crew stop. On a failure the old behaviour stands: the tester runs and the code half gets the stopped branch as its previous branch.
+    let prev = typeof err.branch === 'string' && err.branch !== '' && err.branch !== crew.e.branch ? err.branch : ''
+    if (prev !== '') {
+      try {
+        await integrate(crew, prev, crew.step)
+        prev = ''
+      } catch (ierr) {
+        log(`green fix: crew ${crew.slug}, the stopped fix builder's branch ${prev} was not integrated (${String(ierr && ierr.message || ierr).slice(0, 300)}); the tester fix goes on and the code half gets the branch to merge`)
+      }
+    }
     await fixBuilder(crew, `${what}, tester file named by the fix builder`, said, 'tester', '', undefined, true)
     await testsBackstop(crew, what)
     if (!namesCode(String(err.text), tf)) return
-    // the stopped fix builder may have committed code on its branch already; the code-half builder carries it on
-    await fixBuilder(crew, `${what}, the code half of the fix builder's report`, said, 'builder', typeof err.branch === 'string' ? err.branch : '', undefined, true)
+    await fixBuilder(crew, `${what}, the code half of the fix builder's report`, said, 'builder', prev, undefined, true)
   }
   await testsBackstop(crew, what)
 }
