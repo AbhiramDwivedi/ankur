@@ -1,6 +1,6 @@
 // The plan commands: settings, plan-args, plan-write, plan-check and approve. Moved unchanged from bin/factory.ts (0.31.0
 // item 5). Never imports factory.ts, whose top-level await would make an import cycle.
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
 import { configOf, isObj, need, readText, refuse, str, usage } from '../core.ts'
@@ -12,7 +12,7 @@ import { ltcPlan, ltcPlanGate } from '../guard.ts'
 import { goalOf, RUN_GOAL } from '../../hooks/intake.ts'
 import { stripBlanketSuite } from '../testmap.ts'
 import { approvalProof, confirmApproval, onPlanApprove } from '../inbox.ts'
-import { buildPersonas, parsePersonaFile, PERSONA_KEBAB, personaFault } from './personas.ts'
+import { areaCovers, buildPersonas, parsePersonaFile, PERSONA_KEBAB, pathTokens, personaFault } from './personas.ts'
 import { excludeScratch, retireBranch, retireWorktree, worktreesOf } from './retire.ts'
 import type { RetireCtx, RetireWhy } from './retire.ts'
 import { runOf } from './runs.ts'
@@ -68,7 +68,7 @@ export function cmdPlanArgs(f: Flags): Obj {
     ankur: {
       kind: 'plan', dir, repo, plugin: PLUGIN, schema: `${PLUGIN}/docs/plan.schema.json`, architecture: archPath(repo, cfg.architecture),
       maxParallelCrews: intOr(cfg.maxParallelCrews, 4, 1), reworkAllowance: intOr(cfg.reworkAllowance, 1, 0), roles: rolesWithTypes(PLUGIN, [], cfg.roles),
-      scriptPath: scriptPathAuto(PLUGIN, 'plan.js', str(f, 'scripts-dir'), repo, dir), personas: buildPersonas(repo).personas, workTypes: profilesOf(cfg).profiles,
+      scriptPath: scriptPathAuto(PLUGIN, 'plan.js', str(f, 'scripts-dir'), repo, dir), personas: buildPersonas(repo, dir).personas, workTypes: profilesOf(cfg).profiles,
       ...(existsSync(`${repo}/${featureMap}`) ? { featureMap } : {}),
       ...knowledgeArgsOf(repo, false),
     },
@@ -166,8 +166,8 @@ export function cmdPlanWrite(f: Flags): Obj {
   })
   writeFileSync(`${dir}/plan.md`, md as string)
   const left = retirePlanRun(f, dir, run_.id)
-  const drafts = writePersonaDrafts(dir, message)
-  return { written: true, longTermCosts, ...(left.length > 0 ? { leftWorktrees: left } : {}), ...(drafts.personas.length > 0 ? { personas: drafts.personas } : {}), ...(drafts.problems.length > 0 ? { personaProblems: drafts.problems } : {}) }
+  const drafts = writePersonaDrafts(repoOf(f), dir, message)
+  return { written: true, longTermCosts, ...(left.length > 0 ? { leftWorktrees: left } : {}), ...(drafts.personas.length > 0 ? { personas: drafts.personas } : {}), ...(drafts.covered.length > 0 ? { personaCovered: drafts.covered } : {}),...(drafts.problems.length > 0 ? { personaProblems: drafts.problems } : {}) }
 }
 
 // The `PERSONA: <name>` lines of a design engineer's report, each followed by its whole file in one fenced block. A block that is
@@ -203,16 +203,27 @@ export function personaDrafts(report: string): { drafts: { name: string; text: s
   return { drafts, problems }
 }
 // Writes each draft of the report to <dir>/personas/<name>.md (a later draft of the same name wins); lists them with their paths.
-function writePersonaDrafts(dir: string, report: string): { personas: { name: string; path: string }[]; problems: string[] } {
+// A draft whose area tokens are all covered by the paths of an installed editing persona is not written: it is listed in `covered`. A draft with
+// no area token is kept, since nothing says an installed persona covers it.
+function writePersonaDrafts(repo: string, dir: string, report: string): { personas: { name: string; path: string }[]; covered: string[]; problems: string[] } {
   const { drafts, problems } = personaDrafts(report)
   const personas: { name: string; path: string }[] = []
-  if (drafts.length > 0) mkdirSync(`${dir}/personas`, { recursive: true })
+  const covered: string[] = []
+  const areas = Object.values(buildPersonas(repo).personas).flatMap((p) => (isObj(p) && p.readOnly === false && Array.isArray(p.paths) ? (p.paths as string[]) : []))
+  // drafts of an earlier plan-write are this plan's no longer: a draft the report drops, or that is covered now, stays no live draft
+  if (existsSync(`${dir}/personas`)) for (const n of readdirSync(`${dir}/personas`)) if (n.endsWith('.md')) rmSync(`${dir}/personas/${n}`, { force: true })
   for (const d of drafts) {
+    const tokens = pathTokens(String(parsePersonaFile(d.text)?.fm.description ?? ''))
+    if (tokens.length > 0 && tokens.every((t) => areas.some((a) => areaCovers(a, t)))) {
+      if (!covered.includes(d.name)) covered.push(d.name)
+      continue
+    }
+    if (!existsSync(`${dir}/personas`)) mkdirSync(`${dir}/personas`, { recursive: true })
     const p = `${dir}/personas/${d.name}.md`
     writeFileSync(p, d.text)
     if (!personas.some((x) => x.name === d.name)) personas.push({ name: d.name, path: p })
   }
-  return { personas, problems }
+  return { personas, covered: covered.filter((n) => !personas.some((x) => x.name === n)), problems }
 }
 
 // The plan run's worktrees (worktree-<run>-<n>) are done once its plan is written: each is retired, its tip archived when the target

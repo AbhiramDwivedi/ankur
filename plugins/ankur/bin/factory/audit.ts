@@ -203,6 +203,20 @@ export function logPassed(dir: string, passed: Audit[]): void {
   }
 }
 
+// One four-field decision line per fallback a stage result names, once: `member <label> ran as <agentType>, a fallback | <reason>`.
+export function logFallbacks(dir: string, results: Record<string, unknown>[] | undefined): void {
+  for (const r of results ?? []) {
+    if (!Array.isArray(r.fallbacks)) continue
+    for (const fb of r.fallbacks) {
+      if (typeof fb !== 'object' || fb === null) continue
+      const { label, agentType, reason } = fb as Record<string, unknown>
+      if (typeof label !== 'string' || typeof agentType !== 'string' || typeof reason !== 'string') continue
+      const line = `member ${label} ran as ${agentType}, a fallback | ${reason}`
+      if (!(existsSync(`${dir}/decisions.md`) && readFileSync(`${dir}/decisions.md`, 'utf8').includes(`${line} | none | followed`))) appendDecision(dir, line)
+    }
+  }
+}
+
 // Session audit: every Workflow run of the session at or after the run start, in scope.
 // An agent that did no work (NO_WORK) or is still running in another live workflow (IN_PROGRESS) is not an entry; it goes in `passed`.
 export function sessionAudit(dir: string, rootDir: string, thisRunId: string, factorySlugs: Set<string>, waived: Set<string>, passed?: Audit[]): Audit[] {

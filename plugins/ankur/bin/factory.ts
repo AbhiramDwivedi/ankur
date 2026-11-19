@@ -183,8 +183,8 @@ if (isMain) {
   // an attach skipped the fold, so the caller must keep its reap due
   if (attach && reapSlug !== null) body.reapSkipped = true
   if (admitted) body.admittedFirst = admitted
-  // persona-install refuses with one stderr line (and no stdout), not the JSON error object the other commands print
+  // persona-install refuses with one stderr line too (ankur:init shows it), besides the JSON line every command prints
   if (argv[0] === 'persona-install' && code !== 0) process.stderr.write(`persona-install: ${typeof body.error === 'string' ? body.error : JSON.stringify(body)}\n`.replace(/\n(?=.)/g, ' '))
-  else process.stdout.write(JSON.stringify(body) + '\n' + (on ? statusLine(body) + '\n' : ''))
+  process.stdout.write(JSON.stringify(body) + '\n' + (on ? statusLine(body) + '\n' : ''))
   process.exitCode = code
 }

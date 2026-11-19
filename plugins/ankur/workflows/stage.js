@@ -197,6 +197,19 @@ function rulesFor(rules, files) {
 }
 // rule globs: end
 
+// Whether a persona `paths` token covers a file (the 22:21 ruling): the token matches the file in the dialect above (a trailing `/`
+// means the directory), and a token whose last segment is a glob, such as a star-dot-ts name in `plugins/ankur/bin`, covers the whole
+// subtree of its directory (`plugins/ankur/bin/` and everything below). A token with no wildcard in its last segment names one file and covers
+// only it, and a root-level glob (a star-dot-ts name with no directory) covers no subtree, or it would cover the repo.
+function personaCovers(token, file) {
+  if (typeof token !== 'string' || !token || typeof file !== 'string') return false
+  if (globMatches(token, file)) return true
+  const g = flatPath(token)
+  const cut = g.lastIndexOf('/')
+  if (cut <= 0 || !isGlob(g.slice(cut + 1))) return false
+  return globMatches(`${g.slice(0, cut + 1)}**`, file)
+}
+
 // The owned-path stress trigger: a crew whose `owns` names one of these kinds of path runs the stress engineer even when the entry's
 // stressTest flag is off. The kinds are the trigger list of the 0.35.0 goal: auth or permission code, money or payment code, a stored
 // data migration or schema change, code that deletes stored data, CI or deploy config, and a lockfile. A pattern matches a whole word
@@ -262,6 +275,7 @@ const PLANNER_SCHEMA = {
           role: { type: 'string', enum: ['tester', 'builder', 'writer'] },
           effort: { type: 'string', enum: ['low', 'medium', 'high'] },
           persona: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+          noPersona: { type: 'string' },
           files: { type: 'array', items: { type: 'string' } },
           reads: { type: 'array', items: { type: 'string' } },
           brief: { type: 'string' },
@@ -313,6 +327,10 @@ function spawn(role, label, prompt, opts = {}) {
     effort = m.effort
   }
   let agentType = r.agentType
+  // R-193: a builder, tester or resolver member that starts without its persona's own type is a named fallback; the reason is one of
+  // the fixed texts, and ask() hands over opts.fallbacks (the crew's list) and opts.noPersona (the planner's reason, when there is one)
+  // a project with no editing persona is the case this rule exists for: its builder and tester run as the generic type, so they are named too
+  let fallback = !persona && PERSONA_ROLES.includes(role) ? opts.noPersona || 'no project persona' : null
   // a persona's model stands, its effort is the higher of its own and the task's, and its type runs the member when this
   // session loaded it; otherwise general-purpose runs it with the persona file's body as the first lines of the prompt
   if (persona) {
@@ -321,7 +339,7 @@ function spawn(role, label, prompt, opts = {}) {
     model = persona.model
     const task = opts.effort === undefined ? persona.effort : opts.effort
     effort = PERSONA_EFFORTS.indexOf(task) > PERSONA_EFFORTS.indexOf(persona.effort) ? task : persona.effort
-    if (persona.loaded === true) {
+    if (persona.loaded === true && persona.draft !== true) {
       if (typeof persona.agentType !== 'string' || !persona.agentType || BANNED_TYPES.includes(persona.agentType)) throw new Error(`persona ${opts.persona} has agentType ${persona.agentType}, which is not allowed`)
       agentType = persona.agentType
     } else {
@@ -329,9 +347,11 @@ function spawn(role, label, prompt, opts = {}) {
       // never gets every tool; an editing persona that is not loaded runs as general-purpose
       const inline = persona.readOnly === true ? (typeof persona.inlineType === 'string' && persona.inlineType && !BANNED_TYPES.includes(persona.inlineType) ? persona.inlineType : 'ankur:judge') : null
       agentType = inline ?? 'general-purpose'
+      if (PERSONA_ROLES.includes(role) && persona.readOnly !== true) fallback = persona.draft === true ? 'persona draft awaiting client approval' : `persona ${opts.persona} not loaded in this session`
       prompt = `You are the ${opts.persona} persona. Its definition follows and is your system prompt for this task:\n\n${String(persona.body || '').replace(/\s+$/, '')}\n---\n${prompt}`
     }
   }
+  if (fallback && Array.isArray(opts.fallbacks)) opts.fallbacks.push({ label, agentType, reason: fallback })
   const o = { label, agentType, model, effort }
   if (opts.schema) o.schema = opts.schema
   if (r.isolation === 'worktree') o.isolation = 'worktree'
@@ -358,7 +378,7 @@ const seededLearned = (list) =>
     .map((i) => ({ kind: i.kind, text: i.text.trim(), source: typeof i.source === 'string' ? i.source : '', ...(typeof i.target === 'string' && i.target.trim() ? { target: i.target.trim() } : {}), task: typeof i.task === 'string' && i.task ? i.task : 'earlier run', member: typeof i.member === 'string' && i.member ? i.member : 'earlier run' }))
 
 function makeCrew(entry) {
-  return { e: entry, slug: entry.slug, step: 'red', counters: {}, fails: 0, head: null, proofs: [], stressTest: null, deferred: Array.isArray(entry.deferred) ? entry.deferred : [], lock: Promise.resolve(), halted: null, direction: directionOf(entry), uxReview: null, greenOut: '', learned: seededLearned(entry.learned), decisions: [], asked: new Set(), calls: {}, checkpointed: false, sourceChanges: [], lint: null, lintHead: null, stepEnds: [] }
+  return { e: entry, slug: entry.slug, step: 'red', counters: {}, fails: 0, head: null, proofs: [], stressTest: null, deferred: Array.isArray(entry.deferred) ? entry.deferred : [], lock: Promise.resolve(), halted: null, direction: directionOf(entry), uxReview: null, greenOut: '', learned: seededLearned(entry.learned), fallbacks: [], decisions: [], asked: new Set(), calls: {}, checkpointed: false, sourceChanges: [], lint: null, lintHead: null, stepEnds: [] }
 }
 
 // stage.js has no clock: finish reads the time a step ended from the transcript of the last agent that returned while the crew was at it.
@@ -367,7 +387,9 @@ function endStep(crew, label) {
   crew.stepEnds = crew.stepEnds.filter((s) => s.step !== crew.step)
   crew.stepEnds.push({ step: crew.step, agent: label })
 }
-const stepEndsOf = (crew) => ({ stepEnds: crew.stepEnds.map((s) => ({ ...s })) })
+// R-193: stepEndsOf also carries the crew's fallbacks (one {label, agentType, reason} per build, test or fix member that started without
+// its own persona type), so every result builder that spreads it, a stopped result and a passed one, names them; none leaves the key out.
+const stepEndsOf = (crew) => ({ stepEnds: crew.stepEnds.map((s) => ({ ...s })), ...(crew.fallbacks.length ? { fallbacks: crew.fallbacks.map((f) => ({ ...f })) } : {}) })
 
 
 // a crew builds UI only when its entry says ux true; a missing ux is false
@@ -387,6 +409,14 @@ const uxResult = (crew) => ({
 const knowledgeResult = (crew, stopped = false) => {
   const k = { items: crew.learned.filter((i) => i.member !== 'po').length, ran: false, sourceChanges: crew.sourceChanges.length }
   return stopped && !k.items && !k.sourceChanges ? {} : { knowledge: k }
+}
+
+// the planner's noPersona reason of the first task of the crew whose role this member's role works for ('' when none gave one): a fix or
+// resolver member with no persona inherits it, as personaFor inherits a persona
+function noPersonaOf(crew, role) {
+  const tasks = (crew.tasks && crew.tasks.length ? crew.tasks : crew.e.tasks) || []
+  const hit = tasks.find((t) => t && (role === 'resolver' ? ['builder', 'tester'].includes(t.role) : t.role === role) && typeof t.noPersona === 'string' && t.noPersona.trim())
+  return hit ? hit.noPersona.trim() : ''
 }
 
 function stopResult(crew, err) {
@@ -481,7 +511,7 @@ async function ask(crew, role, prompt, opts = {}) {
   dropGates(crew)
   crew.rode = []
   try {
-    const out = await spawn(role, label, prompt, member ? { ...rest, member } : rest)
+    const out = await spawn(role, label, prompt, { ...rest, ...(member ? { member } : {}), fallbacks: crew.fallbacks, ...(!persona && !rest.noPersona ? { noPersona: noPersonaOf(crew, role) } : {}) })
     endStep(crew, label)
     return out
   } finally {
@@ -1799,24 +1829,28 @@ const passedAt = (crew, key) => {
 // the persona a task's member runs as (a builder or tester task with a persona), else null
 const taskPersona = (task) => (['builder', 'tester'].includes(task.role) && typeof task.persona === 'string' && task.persona ? task.persona : null)
 
-// A resolver or fix member inherits the persona of the task it works for: the task `at` names, else the one task of its role
-// whose files `text` names, else the one persona all of the crew's tasks of its role share; null when none is clear.
+// A resolver or fix member inherits the persona of the task it works for: the task `at` names, else the persona of the tasks of its
+// role whose files `text` names, else the persona with the most tasks of its role (R-193). On a tie the persona of the first of
+// them in task order wins. Null only when no task of the role has a persona.
 function personaFor(crew, role, text, at) {
   const tasks = (crew.tasks && crew.tasks.length ? crew.tasks : crew.e.tasks) || []
   const byAt = tasks.find((t) => t.name === at)
   if (byAt) return taskPersona(byAt)
   const pool = tasks.filter((t) => (role === 'resolver' ? ['builder', 'tester'].includes(t.role) : t.role === role))
   const pick = (list) => {
-    const set = new Set(list.map(taskPersona))
-    return set.size === 1 && !set.has(null) ? [...set][0] : null
+    const names = list.map(taskPersona).filter((p) => p !== null)
+    const count = (p) => names.filter((n) => n === p).length
+    return names.reduce((best, p) => (best === null || count(p) > count(best) ? p : best), null)
   }
   const named = text ? pool.filter((t) => (t.files || []).some((f) => namesFile(String(text), f))) : []
-  return pick(named) ?? (pool.length ? pick(pool) : null)
+  return pick(named) ?? pick(pool)
 }
 
+// the member options of a task: its persona, or, for a builder or tester task with none, the reason it is a named fallback
 function taskOpts(task) {
   const persona = taskPersona(task)
-  return { title: task.name, ...(task.role === 'builder' || persona ? { effort: task.effort } : {}), ...(persona ? { persona } : {}) }
+  const why = !persona && ['builder', 'tester'].includes(task.role) && typeof task.noPersona === 'string' && task.noPersona.trim() ? { noPersona: task.noPersona.trim() } : {}
+  return { title: task.name, ...(task.role === 'builder' || persona ? { effort: task.effort } : {}), ...(persona ? { persona } : {}), ...why }
 }
 
 // 0.32.0: the new answers at a task whose role is "tester" (the PM's ruling orders a test change, which a builder may not make)
@@ -2129,6 +2163,7 @@ function validateTasks(tasks, owns, ownTests = null, guarded = []) {
   const errors = []
   if (!Array.isArray(tasks) || tasks.length === 0) return ['the plan has no tasks']
   const owned = owns.map(globToRegExp)
+  const editing = Object.keys(PERSONAS).filter((n) => PERSONAS[n] && typeof PERSONAS[n] === 'object' && PERSONAS[n].readOnly !== true)
   if (Array.isArray(ownTests)) {
     const testGlobs = ownTests.map((g) => ({ g, re: globToRegExp(g) }))
     const testerOf = new Map()
@@ -2153,6 +2188,13 @@ function validateTasks(tasks, owns, ownTests = null, guarded = []) {
       if (typeof t.persona !== 'string') errors.push(`task ${t.name} has persona ${JSON.stringify(t.persona)}; use a persona name or null`)
       else if (!Object.hasOwn(PERSONAS, t.persona)) errors.push(`task ${t.name} has persona ${t.persona}, which is not a persona of this project (${Object.keys(PERSONAS).join(', ') || 'none defined'}); use one of them or null`)
       else if (PERSONAS[t.persona] && PERSONAS[t.persona].readOnly === true) errors.push(`task ${t.name} has persona ${t.persona}, which is read-only (a judge); give the task an editing persona or null`)
+    }
+    // R-193: a builder or tester task with no persona is a named fallback. With an editing persona in the project it needs a reason
+    // (noPersona), and it is refused whatever the reason when an editing persona's paths cover one of its files ("covers or could cover").
+    if (['builder', 'tester'].includes(t.role) && (t.persona === undefined || t.persona === null) && editing.length) {
+      const hit = (Array.isArray(t.files) ? t.files : []).flatMap((f) => (typeof f === 'string' ? editing.filter((n) => (Array.isArray(PERSONAS[n].paths) ? PERSONAS[n].paths : []).some((p) => personaCovers(p, f))).map((n) => ({ n, f })) : []))[0]
+      if (hit) errors.push(`task ${t.name} has persona null, but persona ${hit.n} covers its file ${hit.f}; give the task that persona (split the task when it also changes files of another persona), whatever its noPersona reason says`)
+      else if (typeof t.noPersona !== 'string' || t.noPersona.trim() === '') errors.push(`task ${t.name} has persona null and no noPersona reason; name the persona that fits, or set noPersona to why no persona covers its files`)
     }
     for (const f of t.files || []) {
       if (typeof f !== 'string' || f === '' || f.endsWith('/') || /\\|\/\/|^\/|^\.\//.test(f) || f.split('/').some((seg) => seg === '.' || seg === '..')) errors.push(`task ${t.name} lists file ${f}, which is not a canonical repo-relative path; use forward slashes, no leading / or ./, no // and no . or .. segments`)
@@ -2219,7 +2261,7 @@ function plannerPrompt(crew, errors) {
   if (rules.length) lines.push('', "Rules index (area rules, each loaded for the files its globs match). List a rule file in a task's reads when one of its globs matches one of the task's files:", ...rules.map((r) => `- ${r.path}: ${r.paths.join(', ')}`))
   const names = Object.keys(PERSONAS)
   if (names.length) {
-    lines.push('', "Personas (project agents, each specialised by stack and area). Give every builder and tester task the editing persona whose stack and area fit the task's files; a task never spans two personas' areas, so split it instead; persona is null only when no persona fits. A read-only persona is a judge and never takes a task:")
+    lines.push('', "Personas (project agents, each specialised by stack and area). Give every builder and tester task the editing persona whose stack and area fit the task's files; a task never spans two personas' areas, so split it instead; persona is null only when no persona fits. A persona covers a file when an area its description names covers it, and a named file glob (a wildcard file name in a directory, such as every .ts file of plugins/ankur/bin) covers that directory and everything below it; a task whose files a persona covers never has persona null, and a task that has persona null for files no persona covers carries noPersona, one sentence on why (it is logged as a decision). A read-only persona is a judge and never takes a task:")
     for (const n of names) lines.push(`- ${n}: ${String((PERSONAS[n] && PERSONAS[n].description) || '')} (${PERSONAS[n] && PERSONAS[n].readOnly === true ? 'read-only' : 'editing'})`)
   } else {
     lines.push('', 'This project defines no personas: set persona to null on every task.')

@@ -98,7 +98,7 @@ The `Status: ` line starts with the status word and gives its date. `Decided by:
 
 **Uncovered domains come first.** A domain the goal touches is uncovered when no loaded pack or doc section covers its expensive decisions. Then write no plan: report one `UNCOVERED: <domain> | <why the goal touches it>` line each and stop.
 
-**Personas.** Map each crew's areas to the existing personas in the brief, and name the stack where none exists.
+**Personas.** Map each crew's areas to the existing personas in the brief. For each stack-area the goal edits that no persona's `paths` cover, write a `PERSONA: <name>` draft in the report format of init step 7 (that line, then the whole file in a four-backtick fenced block). Its `description` names the paths it covers. `plan-write` writes the drafts to `<ankur dir>/personas/`. The client approves the first install; until then the crew runs the task as `general-purpose` with the draft inlined, so name the stack in the task as well.
 
 **Outputs.** A draft `plan.json` valid against `plan.schema.json` and a readable `plan.md`, in `.ankur-scratch/`, handed back in your report.
 

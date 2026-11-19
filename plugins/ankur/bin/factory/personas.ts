@@ -2,9 +2,10 @@
 // unchanged from bin/factory.ts (0.31.0 item 5). Never imports factory.ts, whose top-level await would make an import cycle.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
-import { flat, need, readText, usage } from '../core.ts'
+import { flat, listOf, need, readText, refuse, str, usage } from '../core.ts'
 import type { Flags, Obj } from '../core.ts'
-import { gitOrFail, repoOf, run } from './cli.ts'
+import { personaInstallProof } from '../inbox.ts'
+import { dirOf, gitOrFail, repoOf, run } from './cli.ts'
 import { sessionStartOnce } from './warnings.ts'
 
 // ==== personas ====
@@ -70,22 +71,83 @@ function personaInlineType(): string {
   return READ_ONLY_HOST
 }
 
+// The area tokens of a persona description: each whitespace-separated token holding a `/`, with the wrapping `(`, `)`, `,`, `;`, `:`, quotes and
+// a trailing `.` trimmed (a leading `.` stays: `.claude/agents/`). A trailing `/` names a directory subtree; a glob is kept as written.
+export function pathTokens(description: string): string[] {
+  const out: string[] = []
+  for (const raw of description.split(/\s+/)) {
+    if (!raw.includes('/')) continue
+    const t = raw.replace(/^[(,;:'"`]+/, '').replace(/[),;:'"`.]+$/, '')
+    if (t.includes('/') && !out.includes(t)) out.push(t)
+  }
+  return out
+}
+
+const hasGlob = (t: string): boolean => /[*?[\]{}]/.test(t)
+// The fixed part of an area token: the whole token, or for a glob the directories before its first glob segment ('' when the glob opens the token).
+function areaBase(t: string): string {
+  if (!hasGlob(t)) return t
+  const segs = t.split('/')
+  const i = segs.findIndex(hasGlob)
+  return i <= 0 ? '' : `${segs.slice(0, i).join('/')}/`
+}
+
+// The glob dialect of an area token (ruling 22:21): `*` stays inside a segment, `**` crosses them.
+function globRe(g: string): RegExp {
+  let re = ''
+  for (let i = 0; i < g.length; i++) {
+    const ch = g[i] as string
+    if (ch === '*') {
+      if (g[i + 1] === '*') {
+        i++
+        if (g[i + 1] === '/') { i++; re += '(?:.*/)?' } else re += '.*'
+      } else re += '[^/]*'
+    } else if (ch === '?') re += '[^/]'
+    else re += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  }
+  return new RegExp(`^${re}$`)
+}
+
+// Whether the persona area `area` covers `p` (a path, a dir ending in `/` or a glob; compared by its fixed part). A directory token covers its
+// subtree; a file glob such as plugins/ankur/bin/*.ts covers its whole directory subtree (plugins/ankur/bin/**); a literal file covers itself.
+export function areaCovers(area: string, p: string): boolean {
+  const base = areaBase(p)
+  if (hasGlob(area)) {
+    const dir = areaBase(area)
+    if (dir !== '') return base.startsWith(dir)
+    return area === p || (!hasGlob(p) && globRe(area).test(p))
+  }
+  if (area.endsWith('/')) return base.startsWith(area) || (!hasGlob(p) && `${p}/` === area)
+  return !hasGlob(p) && (p === area || p.startsWith(`${area}/`))
+}
+
 // The personas the stage args carry, from the main checkout's .claude/agents/*.md. loaded: the file is not newer than the session
 // start (the session loads agent types only at start); false too when the start can't be read, the safe side. An unloaded
 // persona carries its body, since stage.js runs it as general-purpose with that body inlined. A malformed file is skipped with a warning.
-export function buildPersonas(repo: string): { personas: Obj; warnings: string[] } {
+// `paths` are the area tokens of the description. With an ankur dir, a draft <dir>/personas/<name>.md that is not installed is listed too, as
+// {draft: true, loaded: false, body}: its tasks run as general-purpose with the body inlined until the client approves its install.
+export function buildPersonas(repo: string, ankurDir?: string): { personas: Obj; warnings: string[] } {
   const personas: Obj = {}
   const warnings: string[] = []
   const dir = `${flat(repo)}/.claude/agents`
-  let names: string[]
+  let names: string[] = []
   try {
     names = readdirSync(dir).filter((n) => n.endsWith('.md')).sort()
   } catch {
-    return { personas, warnings }
+    // no agents dir: only drafts can follow
   }
+  const draftDir = ankurDir === undefined ? undefined : `${flat(ankurDir)}/personas`
+  let drafts: string[] = []
+  try {
+    if (draftDir !== undefined) drafts = readdirSync(draftDir).filter((n) => n.endsWith('.md') && !names.includes(n)).sort()
+  } catch {
+    // no drafts dir
+  }
+  if (names.length === 0 && drafts.length === 0) return { personas, warnings }
   const started = sessionStartOnce()
-  for (const n of names) {
-    const file = `${dir}/${n}`
+  for (const n of [...names, ...drafts]) {
+    const draft = !names.includes(n)
+    const file = `${draft ? draftDir : dir}/${n}`
     const name = n.slice(0, -'.md'.length)
     let text: string
     let changed: number
@@ -102,20 +164,24 @@ export function buildPersonas(repo: string): { personas: Obj; warnings: string[]
       warnings.push(`persona file ${file} is skipped: ${fault}`)
       continue
     }
-    const loaded = started !== undefined && !(changed > started)
+    const loaded = !draft && started !== undefined && !(changed > started)
     const readOnly = personaReadOnly(doc.fm)
+    const description = doc.fm.description as string
     personas[name] = {
-      agentType: name, model: doc.fm.model ?? 'sonnet', effort: doc.fm.effort ?? 'medium', file, description: (doc.fm.description as string).slice(0, PERSONA_DESCRIPTION_MAX),
-      readOnly, ...(readOnly ? { inlineType: personaInlineType() } : {}), loaded, ...(loaded ? {} : { body: doc.body }),
+      agentType: name, model: doc.fm.model ?? 'sonnet', effort: doc.fm.effort ?? 'medium', file, description: description.slice(0, PERSONA_DESCRIPTION_MAX), ...(pathTokens(description).length ? { paths: pathTokens(description) } : {}),
+      readOnly, ...(readOnly ? { inlineType: personaInlineType() } : {}), ...(draft ? { draft: true } : {}), loaded, ...(loaded ? {} : { body: doc.body }),
     }
-    if (!loaded) {
+    if (draft) {
+      warnings.push(`persona ${name} is a draft awaiting the client (${file}); its tasks run as ${readOnly ? READ_ONLY_HOST : 'general-purpose'} with the draft inlined until the client approves \`factory persona-install\``)
+    } else if (!loaded) {
       warnings.push(`persona ${name} (${file}) is ${started === undefined ? "not known to be loaded (I can't read the session start)" : 'newer than the session start, so this session has not loaded it'}; its tasks run as ${readOnly ? READ_ONLY_HOST : 'general-purpose'} with its definition inlined. Restart the session to load it`)
     }
   }
   return { personas, warnings }
 }
 
-// factory persona-install --from <dir> --repo <root> [--replace]: copies <dir>/*.md into <root>/.claude/agents/ and commits them.
+// factory persona-install --from <dir> --repo <root> [--replace] [--dir <ankur dir> --item <E-id>...]: copies <dir>/*.md into
+// <root>/.claude/agents/ and commits them. With --dir, each persona it writes needs an approved client-question item (see the gate below).
 export function cmdPersonaInstall(f: Flags): Obj {
   const from = need(f, 'from')
   const repo = repoOf(f)
@@ -135,10 +201,35 @@ export function cmdPersonaInstall(f: Flags): Obj {
     jobs.push({ name, text: readText(path.join(from, n)) })
   }
   const target = path.join(repo, '.claude', 'agents')
+  // --dir is the run's ankur dir: the install is a mid-run one, which waits for the client (R-56). Each persona that would be written
+  // needs a client-question item `persona:<name>` of this session that the client approved with a typed prompt; nothing is written otherwise.
+  // A --from that is a run's <ankur dir>/personas is a mid-run install even without --dir: leaving --dir out never skips the gate.
+  const inRun = /\/(ankur|truss)\/[^/]+$/.test(flat(path.dirname(path.resolve(from)))) && path.basename(path.resolve(from)) === 'personas' // ankur-allow-truss: the legacy run dir
+  const held: string[] = []
+  if (str(f, 'dir') !== undefined || inRun) {
+    const dir = str(f, 'dir') !== undefined ? dirOf(f) : flat(path.dirname(path.resolve(from)))
+    const items = listOf(f, 'item')
+    const pending = jobs.filter((j) => {
+      const to = path.join(target, `${j.name}.md`)
+      return !existsSync(to) || (!readFileSync(to).equals(readFileSync(path.join(from, `${j.name}.md`))) && replace)
+    })
+    // each draft stands on its own yes: a draft without an approved item of its own is held back, the approved ones install
+    const unproven: string[] = []
+    for (const j of pending) {
+      const drafted = statSync(path.join(from, `${j.name}.md`)).mtimeMs
+      const why = items.map((it) => personaInstallProof(repo, dir, it, j.name, drafted))
+      if (!why.some((w) => w === null)) {
+        held.push(j.name)
+        unproven.push(items.length === 0 ? `${j.name}: needs --item <E-id>, the client-question item persona:${j.name} the client approved by typing /ankur:inbox approve <E-id> <code>` : `${j.name}: ${why.join('; ')}`)
+      }
+    }
+    if (pending.length > 0 && held.length === pending.length) throw refuse({ error: `persona-install --dir installs nothing without the client's yes: ${unproven.join(' | ')}`, installed: [] })
+  }
   const installed: string[] = []
   const skipped: string[] = []
   const written: string[] = []
   for (const j of jobs) {
+    if (held.includes(j.name)) continue
     const to = path.join(target, `${j.name}.md`)
     if (existsSync(to)) {
       if (readFileSync(to).equals(readFileSync(path.join(from, `${j.name}.md`)))) continue
@@ -160,5 +251,5 @@ export function cmdPersonaInstall(f: Flags): Obj {
       commit = gitOrFail(repo, ['rev-parse', 'HEAD'])
     }
   }
-  return { installed, skipped, commit }
+  return { installed, skipped, commit, ...(held.length > 0 ? { held } : {}) }
 }

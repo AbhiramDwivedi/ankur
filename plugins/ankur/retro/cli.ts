@@ -1,6 +1,7 @@
 // The retro's command line: extract, findings, recur, scrub and state, plus
 // `counts <ankur dir>` (retro/counts.ts), which prints its JSON and its failures on stdout and stderr,
-// and `problems <ankur dir>`, which prints the counting step's JSON and writes <ankur dir>/retro/problems.json.
+// `problems <ankur dir>...`, which prints the counting step's JSON line and writes <ankur dir>/retro/problems.json for each dir,
+// and `due <repo>`, which says whether the full retro is due (retro/runs.ts).
 // `main` returns the text and exit code; running the file prints the text and sets the code. Exit 0 means OK, 1 means
 // the input failed a check (a scrub hit), 2 means a usage error or a file it cannot read. Evidence is checked against
 // the extract's files and line counts, never the transcripts (R-35). Erasable TypeScript only, Node standard library
@@ -9,19 +10,22 @@ import { execFileSync } from 'node:child_process'
 import { existsSync,mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, posix, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { commonDir } from '../bin/core.ts'
 import { readEnv } from '../bin/names.ts'
 import { fixShipped, loadCatalog, matchLine, recurrences } from './catalog.ts'
 import type { Catalog } from './catalog.ts'
 import { counts, problems } from './counts.ts'
 import type { Finding as Counted } from './counts.ts'
 import { extractSession, writeExtract } from './extract.ts'
+import { countedRuns, dueOf, FULL_RETRO_EVERY } from './runs.ts'
 import { scrub } from './scrub.ts'
 
 // argument counts after the command name
 export const COMMANDS = {
+  due: { min: 1, max: 1 },
   extract: { min: 2, max: 3 },
   findings: { min: 3, max: 3 },
-  problems: { min: 1, max: 1 },
+  problems: { min: 1, max: Infinity },
   recur: { min: 1, max: 2 },
   scrub: { min: 1, max: Infinity },
   state: { min: 3, max: 4 },
@@ -131,7 +135,7 @@ const isProductPath = (p: string, kind: unknown): boolean => {
 }
 
 /** Why a judge's block breaks the finding shape against the counted measures, or null when it holds. It cuts a long title and marks product code as a proposed goal in place (v is this call's own parsed JSON). */
-function judgedProblem(v: unknown, measures: Record<string, number>): string | null {
+function judgedProblem(v: unknown, measures: Record<string, number | number[]>): string | null {
   if (!isObj(v)) return 'block is not a JSON object'
   const extra = onlyKeys(v, ['category', 'title', 'evidence', 'cost', 'fix', 'target', 'signature'])
   if (extra) return extra
@@ -148,8 +152,10 @@ function judgedProblem(v: unknown, measures: Record<string, number>): string | n
     if (bad) return `evidence ${bad}`
     if (!nonEmpty(e.measure)) return 'evidence measure must be a non-empty string'
     if (!Object.hasOwn(measures, e.measure)) return `evidence measure ${e.measure} is not counted`
-    if (e.value !== measures[e.measure]) return `evidence measure ${e.measure} is ${JSON.stringify(e.value)}, counted ${measures[e.measure]}`
-    cited.push(measures[e.measure])
+    // a measure holds one value per counted run: the evidence may quote any of them
+    const counted = [measures[e.measure]].flat()
+    if (typeof e.value !== 'number' || !counted.includes(e.value)) return `evidence measure ${e.measure} is ${JSON.stringify(e.value)}, counted ${counted.join(' or ')}`
+    cited.push(e.value)
   }
   const c = v.cost
   if (!isObj(c) || onlyKeys(c, ['wallMs', 'tokens', 'usd'])) return 'cost must be {wallMs, tokens, usd}'
@@ -178,7 +184,7 @@ function judgedProblem(v: unknown, measures: Record<string, number>): string | n
 }
 
 /** The fenced `finding` blocks of a judge's report, in order: each is kept (a valid finding whose evidence matches `measures`, any category) or dropped with a reason. `n` is the block's 1-based position. */
-export function parseFindings(report: string, measures: Record<string, number>): { kept: { n: number; finding: Judged }[]; dropped: { n: number; reason: string }[] } {
+export function parseFindings(report: string, measures: Record<string, number | number[]>): { kept: { n: number; finding: Judged }[]; dropped: { n: number; reason: string }[] } {
   const kept: { n: number; finding: Judged }[] = []
   const dropped: { n: number; reason: string }[] = []
   const lines = report.split(/\r?\n/)
@@ -224,7 +230,29 @@ const loadProblemsFile = (ankurDir: string): Obj => {
 }
 
 /** The measures the counting step wrote to <ankur dir>/retro/problems.json, which findings check evidence against. */
-const loadMeasures = (ankurDir: string): Record<string, number> => loadProblemsFile(ankurDir).measures as Record<string, number>
+const loadMeasures = (ankurDir: string): Record<string, number | number[]> => {
+  const out: Record<string, number | number[]> = {}
+  const add = (m: Record<string, number>): void => {
+    for (const [k, v] of Object.entries(m)) out[k] = [...new Set([out[k] ?? [], v].flat())]
+  }
+  add(loadProblemsFile(ankurDir).measures as Record<string, number>)
+  // a full retro reads every counted run (R-194): the run dirs sit beside this one under <common>/<root>/, so a finding may cite what an earlier run counted
+  let runs: string[] = []
+  try {
+    runs = countedRuns(dirname(dirname(resolve(ankurDir))))
+  } catch {
+    // no readable run roots: only this run's measures count
+  }
+  for (const r of runs) {
+    try {
+      const x = JSON.parse(readFileSync(join(r, 'retro', 'problems.json'), 'utf8'))
+      if (isObj(x) && x.retro === 2 && isObj(x.measures)) add(x.measures as Record<string, number>)
+    } catch {
+      // a run without a readable problems.json contributes nothing
+    }
+  }
+  return out
+}
 
 type FindingsFile = { v: 1; findings: (Finding | Recurred)[] }
 
@@ -379,12 +407,17 @@ function structuredHits(ankurDir: string, catalog: Catalog): { id: string; file:
   return out
 }
 
-function runRecur(ankurDir: string, catalogPath: string | undefined): string[] {
+/** The catalog's fixed entries a run dir matches again, and the version the run ran; `recur` and `due` both read it, only `recur` writes. */
+function recurrenceHits(ankurDir: string, catalog: Catalog) {
   const x = loadExtract(ankurDir, true)
+  const hits = recurrences({ catalogHits: [...(x.catalogHits as never[]), ...structuredHits(ankurDir, catalog)] as never }, catalog)
+  return { hits, ran: ranVersion(ankurDir) }
+}
+
+function runRecur(ankurDir: string, catalogPath: string | undefined): string[] {
   const catalog = catalogAt(catalogPath)
   const fixed = catalog.entries.filter((e) => e.fixedBy !== null)
-  const hits = recurrences({ catalogHits: [...(x.catalogHits as never[]), ...structuredHits(ankurDir, catalog)] as never }, catalog)
-  const ran = ranVersion(ankurDir)
+  const { hits, ran } = recurrenceHits(ankurDir, catalog)
   const lines: string[] = []
   const byId = new Map<string, typeof hits>()
   for (const h of hits) {
@@ -428,6 +461,51 @@ function runRecur(ankurDir: string, catalogPath: string | undefined): string[] {
   if (added > 0) saveFindings(ankurDir, file)
   lines.push(`OK: ${byId.size} recurred of ${fixed.length} fixed`)
   return lines
+}
+
+// ---------- due (R-194) ----------
+
+/** The retro keys of <repo>/.claude/ankur.json: `runEndRetro` and `fullRetroEvery`. A missing file is every default; a malformed one or a bad value fails. */
+function retroConfig(repo: string): { mode: string | undefined; every: number } {
+  const path = join(repo, '.claude', 'ankur.json')
+  if (!existsSync(path)) return { mode: undefined, every: FULL_RETRO_EVERY }
+  let c: unknown
+  try {
+    c = JSON.parse(read(path))
+  } catch (e) {
+    if (e instanceof Fatal) throw e
+    throw new Fatal(`bad config ${path}: not JSON`)
+  }
+  if (!isObj(c)) throw new Fatal(`bad config ${path}: not an object`)
+  const every = c.fullRetroEvery ?? FULL_RETRO_EVERY
+  if (typeof every !== 'number' || !Number.isInteger(every) || every < 1) throw new Fatal(`bad config ${path}: fullRetroEvery must be an integer of at least 1`)
+  return { mode: typeof c.runEndRetro === 'string' ? c.runEndRetro : undefined, every }
+}
+
+/** Whether the full retro is due: prints one object, `{due, why, every, runs}`; `runs` is the list `problems` takes. */
+function runDue(repo: string): string[] {
+  try {
+    if (!statSync(repo).isDirectory()) throw new Error('not a directory')
+  } catch {
+    throw new Fatal(`cannot read repo ${repo}`)
+  }
+  const { mode, every } = retroConfig(repo)
+  let common: string
+  try {
+    common = commonDir(repo)
+  } catch {
+    throw new Fatal(`needs a git repo: ${repo}`)
+  }
+  // a run whose files cannot be read (a malformed extract) never makes the retro due
+  const recurred = (dir: string): boolean => {
+    try {
+      const { hits, ran } = recurrenceHits(dir, catalogAt(undefined))
+      return hits.some((h) => fixShipped(h.fixedBy, ran))
+    } catch {
+      return false
+    }
+  }
+  return [JSON.stringify(dueOf(common, mode, every, recurred))]
 }
 
 // ---------- state (Decision 8) ----------
@@ -567,7 +645,8 @@ function runScrub(paths: string[]): { code: number; lines: string[] } {
 const run = (cmd: string, a: string[]): { code: number; lines: string[] } => {
   if (cmd === 'extract') return { code: 0, lines: runExtract(a[0], a[1], a[2]) }
   if (cmd === 'findings') return { code: 0, lines: runFindings(a[0], a[1], a[2]) }
-  if (cmd === 'problems') return { code: 0, lines: runProblems(a[0]) }
+  if (cmd === 'due') return { code: 0, lines: runDue(a[0]) }
+  if (cmd === 'problems') return { code: 0, lines: a.flatMap(runProblems) }
   if (cmd === 'triage') return { code: 0, lines: runTriage(a[0], a[1]) }
   if (cmd === 'recur') return { code: 0, lines: runRecur(a[0], a[1]) }
   if (cmd === 'scrub') return runScrub(a)

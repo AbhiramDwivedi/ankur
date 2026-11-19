@@ -233,9 +233,15 @@
       }
     },
     "runEndRetro": {
-      "description": "Who decides at run end whether the retro judges and triage start. pm (the default when unset): the scripted counts always run and the PM decides from stated triggers. off: only the scripted counts run.",
+      "description": "Who decides when the full retro (judges, triage, fix goal) starts. Unset (the default): run end does the scripted counts only, and the full retro starts when fullRetroEvery runs have finished since the last full retro, when a counted run holds a RECURRED line, or when the client runs /ankur:retro. pm: the scripted counts always run and the PM decides from stated triggers. off: only the scripted counts run.",
       "type": "string",
       "enum": ["pm", "off"]
+    },
+    "fullRetroEvery": {
+      "description": "How many runs must have finished since the last full retro before the next full retro starts at run end. Used when runEndRetro is unset.",
+      "type": "integer",
+      "minimum": 1,
+      "default": 5
     }
   },
   "$defs": {

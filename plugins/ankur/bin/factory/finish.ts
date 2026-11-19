@@ -12,7 +12,7 @@ import { ltcCrewGate } from '../guard.ts'
 import { crewCost } from '../cost.ts'
 import { ledgerAppend } from '../ledger.ts'
 import { goalOf } from '../../hooks/intake.ts'
-import { logPassed, recordEscalations, recordRun, sessionAudit } from './audit.ts'
+import { logFallbacks, logPassed, recordEscalations, recordRun, sessionAudit } from './audit.ts'
 import type { Audit } from './audit.ts'
 import { cmdCheck } from './check.ts'
 import { concludeFrontmatterMerge } from '../fragments.ts'
@@ -340,6 +340,7 @@ function finishRun(f: Flags, held: Map<string, string>): Obj {
   const passed: Audit[] = []
   const audits = recordRun(dir, wfRun, factorySlugs, roles, passed)
   logPassed(dir, passed.splice(0))
+  logFallbacks(dir, results)
   for (const a of audits) out.audit.push({ label: a.label, why: a.why })
   recordEscalations(dir, wfRun, inRun, results, plan)
 

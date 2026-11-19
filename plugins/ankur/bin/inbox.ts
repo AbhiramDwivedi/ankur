@@ -11,7 +11,7 @@ import { readJsonl, withLock, writeJsonAtomic } from './lock.ts'
 import { proofTranscriptRoot, readProofFile } from './transcripts.ts'
 import type { Flags, Obj } from './core.ts'
 
-export type EscalateInput = { kind: string; title: string; detail?: string; crews?: string[]; ref?: string | null; blocking?: boolean }
+export type EscalateInput = { kind: string; title: string; detail?: string; crews?: string[]; ref?: string | null; blocking?: boolean; ownSession?: boolean }
 export type EscalateOut = { id: string; kind: string; deduped: boolean; code: string; notified: boolean | null; notifyError?: string }
 
 // kind -> who may resolve it, whether it always blocks, and whether a --by pm resolve needs --note (graded by risk).
@@ -208,11 +208,11 @@ const maskCode = (quote: unknown, id: string, codeHash: unknown): unknown =>
 
 // The typed line that proves a resolve of `open` (decision, raise, and the stored quote when the row has one): its newest candidate when
 // `last`, else its first. rest is what follows `<decision> <id> <code> [raise <usd>]`, whitespace normalised.
-function proof(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unknown; quote?: unknown }, cands: Cand[], last: boolean): { text: string; rest: string } | null {
+function proof(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unknown; quote?: unknown }, cands: Cand[], last: boolean): { text: string; rest: string; at: number } | null {
   if (typeof c.decision !== 'string' || !DECISIONS.includes(c.decision)) return null
   if (c.raiseUsd !== undefined && typeof c.raiseUsd !== 'number') return null
   const after = Date.parse(open.ts)
-  let found: { text: string; rest: string } | null = null
+  let found: { text: string; rest: string; at: number } | null = null
   for (const k of cands) {
     if (!k.chain || !Number.isFinite(k.at) || !(k.at > after)) continue
     if (c.quote !== undefined && !(typeof c.quote === 'string' && c.quote !== '' && k.text.startsWith(c.quote))) continue
@@ -224,11 +224,15 @@ function proof(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unkno
       from = 5
     } else if (t[3] === 'raise' && /^\d+(\.\d+)?$/.test(t[4] ?? '')) continue // a typed raise is never dropped: a row without raiseUsd cannot stand for it
     if (!ownsCwd(repo, k.row.cwd)) continue
-    found = { text: k.text, rest: t.slice(from).join(' ') }
+    found = { text: k.text, rest: t.slice(from).join(' '), at: k.at }
     if (!last) break
   }
   return found
 }
+
+// The time (ms) of the client's typed line behind a counted resolve row, keyed by the row object verifiedItems returns.
+const TYPED_AT = new WeakMap<object, number>()
+export const typedAtOf = (resolve: Obj): number | undefined => TYPED_AT.get(resolve)
 
 /**
  * The items of the shared inbox with their resolve rows verified at read time. A resolve row counts when its kind allows `by: any` and the
@@ -236,6 +240,7 @@ function proof(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unkno
  * proof). An unverified row counts as absent: the item is open, with `reopened` saying why. The first verified row wins.
  */
 export function verifiedItems(repo: string): Map<string, Item> {
+  // (the time of the typed line behind a counted resolve row is kept in typedAtOf, never in the row)
   const items = fold(readJsonl(`${sharedDir(repo)}/inbox.jsonl`).rows)
   const ask = new Map<string, Set<string>>() // session -> ids whose client rows need a transcript
   const needsProof = (_it: RawItem, r: Obj): boolean => r.by === 'client'
@@ -250,6 +255,7 @@ export function verifiedItems(repo: string): Map<string, Item> {
     for (const r of it.rows) {
       let why = ''
       let proven: string | null = null
+      let typedAt: number | null = null
       if (r.by !== 'client' && r.by !== 'pm') why = `the row says by ${JSON.stringify(r.by)}, not client or pm`
       else if (r.by === 'pm' && KINDS[kind]?.by !== 'any') why = `${kind} is resolved by the client, not by pm`
       else if (r.by === 'pm') why = ''
@@ -264,6 +270,7 @@ export function verifiedItems(repo: string): Map<string, Item> {
           if (p === null) why = `no line typed by the client in session ${r.session} backs this ${String(r.decision)}`
           else {
             proven = p.rest.slice(0, 4000)
+            typedAt = p.at
             if (norm(String(r.note ?? '')) !== '' && norm(String(r.note)).slice(0, 4000) !== proven) it.noteUnbound = true
           }
         }
@@ -275,6 +282,7 @@ export function verifiedItems(repo: string): Map<string, Item> {
       if (why === '') {
         // a row counted by proof carries the client's typed text as its note, never the stored one, for every reader of the fold
         it.resolve = proven === null ? r : { ...r, note: proven }
+        if (typedAt !== null) TYPED_AT.set(it.resolve, typedAt)
         it.reopened = undefined
         break
       }
@@ -320,7 +328,7 @@ export function escalate(repo: string, dir: string, input: EscalateInput): Escal
     const ts = new Date().toISOString()
     if (ref !== null) {
       for (const [id, it] of verifiedItems(repo)) {
-        if (it.resolve === null && it.open.kind === input.kind && it.open.ref === ref) {
+        if (it.resolve === null && it.open.kind === input.kind && it.open.ref === ref && (input.ownSession !== true || it.open.session === session)) {
           const link: Obj = { v: 1, op: 'link', id, ts, session, crews }
           if (blocking) link.blocking = true
           appendFileSync(file, JSON.stringify(link) + '\n')
@@ -483,6 +491,36 @@ export function approvalProof(repo: string, dir: string, item: string | undefine
   const wrote = [`${dir}/plan.md`, `${dir}/plan.json`].map((p) => { try { return statSync(p).mtimeMs } catch { return null } }).find((m) => m !== null)
   const at = Date.parse(String(r.ts))
   if (wrote === undefined || wrote === null || !(at >= Math.floor(wrote))) return `${item} was resolved before the current plan was written, so the client never approved this plan: open a new client-trigger item for it`
+  return null
+}
+
+/**
+ * The typed client proof a mid-run persona install needs: null when `item` is a client-question item of this session (`dir`) whose ref is
+ * `persona:<name>`, resolved approve by the client in this same session with a typed line that verifiedItems holds, opened by this session, not superseded by a later
+ * open row of the same kind and ref (any session), and resolved no earlier than the draft was written (`draftedMs`, its mtime: a yes for an older draft
+ * is not a yes for this one). Else the reason it does not count. Fails closed: a stored row alone proves nothing.
+ */
+export function personaInstallProof(repo: string, dir: string, item: string | undefined, name: string, draftedMs: number): string | null {
+  if (item === undefined || item === '') return `needs --item <E-id>: the client-question item persona:${name}`
+  const items = verifiedItems(repo)
+  const it = items.get(item)
+  if (it === undefined) return `no such item: ${item}`
+  const session = sessionOf(dir)
+  if (it.open.kind !== 'client-question') return `${item} is a ${String(it.open.kind)} item, not the client-question item that approves a persona`
+  // the item names this session's draft in its detail: another session's item shows the client another draft, so its yes is not a yes for this one
+  if (it.open.session !== session) return `${item} was opened for another ankur dir, not ${session}: its draft is not this session's draft`
+  if (it.open.ref !== `persona:${name}`) return `${item} is for ${JSON.stringify(it.open.ref ?? null)}, not persona:${name}`
+  let later = false
+  for (const [id, o] of items) {
+    if (id === item) later = true
+    else if (later && o.open.kind === it.open.kind && o.open.ref === it.open.ref) return `${item} is superseded by ${id}` // any session: the latest item for the draft holds the client's latest answer
+  }
+  const r = it.resolve
+  if (r === null) return `no prompt typed by the client approves ${item}: the client types /ankur:inbox approve ${item} <code>`
+  if (r.by !== 'client' || r.decision !== 'approve') return `${item} was resolved ${String(r.decision)}, not approve`
+  if (r.session !== session) return `${item} was approved in another session (${String(r.session)}), not ${session}: the client never saw this draft`
+  const at = typedAtOf(r) ?? Date.parse(String(r.ts)) // the typed line's time, not the time the row was stored: a stored row can come long after the typing
+  if (!(at >= Math.floor(draftedMs))) return `${item} was resolved before the draft ${name} was written, so the client never approved this draft: open a new client-question item for it`
   return null
 }
 

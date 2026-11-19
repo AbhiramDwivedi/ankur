@@ -14,6 +14,7 @@ import { acceptanceCommand, goalSections } from './goal-file.ts'
 import { guardedOf, isTestPath, mergeIn, operationInProgress } from './crew.ts'
 import { CREW_STATE, learnedOf, readQuiet, setCrewState } from './decisions.ts'
 import { redRecord } from './finish.ts'
+import { escalate, verifiedItems } from '../inbox.ts'
 import { buildPersonas } from './personas.ts'
 import { admission, heldOnBusy } from './admit.ts'
 import { excludeScratch } from './retire.ts'
@@ -193,13 +194,47 @@ export function acceptanceRefusal(goalFile: string): string | undefined {
   const r = acceptanceCommand(readFileSync(goalFile, 'utf8'))
   return typeof r === 'object' ? `goal file ${flat(goalFile)}: ${r.error}` : undefined
 }
+// A draft's `file` stays out of the stage args: QC's standardsLines hands QC every `file` of a used or read-only persona, and no Standards reach QC without the client's yes. The draft body is still inlined.
+function withoutDraftFiles(personas: Obj): Obj {
+  const out: Obj = {}
+  for (const [n, p] of Object.entries(personas)) {
+    if (isObj(p) && p.draft === true) { const { file: _file, ...rest } = p; out[n] = rest } else out[n] = p
+  }
+  return out
+}
+
+// Each persona draft the table lists gets one non-blocking client-question item `persona:<name>` (escalate dedupes a repeat, so a second start
+// or another crew opens none; blockingFor stays empty, so no crew waits). The client's yes is typed and the PM then runs persona-install --item <E-id>.
+// An item of this session for the ref that was resolved after the draft was written is the client's answer: it is not asked again. Returns the warnings of a failed open.
+function draftQuestions(c: StartCtx, personas: Obj, entries: Obj[]): string[] {
+  const out: string[] = []
+  const session = path.posix.basename(flat(c.dir).replace(/\/+$/, ''))
+  for (const [name, p] of Object.entries(personas)) {
+    if (!isObj(p) || p.draft !== true) continue
+    const ref = `persona:${name}`
+    try {
+      const wrote = statSync(String(p.file)).mtimeMs
+      // a later open row for the ref from any session supersedes the item (personaInstallProof), so its yes no longer answers: ask again
+      const rows = [...verifiedItems(c.repo).values()]
+      const answered = rows.some((it, i) => it.open.ref === ref && it.resolve !== null && it.resolve.session === session && Date.parse(String(it.resolve.ts)) >= Math.floor(wrote) && !rows.slice(i + 1).some((o) => o.open.kind === it.open.kind && o.open.ref === ref))
+      if (answered) continue
+      escalate(c.repo, c.dir, {
+        kind: 'client-question', title: `install persona ${name}`, ref, ownSession: true, crews: entries.map((e) => String(e.slug)),
+        detail: `The plan drafted the project persona ${name} (${flat(String(p.file))}). Until you approve it, its tasks run as general-purpose with the draft inlined, and no crew waits. Standards of a persona become checks on every later diff. To install it, type /ankur:inbox approve <this id> <code>; the PM then runs factory persona-install --from ${flat(path.dirname(String(p.file)))} --dir ${flat(c.dir)} --item <this id>.`,
+      })
+    } catch (e) {
+      out.push(`persona draft ${name}: the client-question item could not be opened (${(e as Error).message}); its tasks still run as general-purpose with the draft inlined`)
+    }
+  }
+  return out
+}
 function stageOut(c: StartCtx, entries: Obj[], projectManagers: Obj[], refused: Obj[], stale: Obj[], unfinished: Obj[], held: Obj[] = [], direct: Obj[] = []): Obj {
   const w = loadWarned(c.dir)
-  const found = buildPersonas(c.repo)
-  const warnings = [...stressWarnings(c, [...entries, ...projectManagers].map((e) => String(e.slug)), w), ...roleWarnings(c, entries, w, found.personas), ...memberWarnings(c, entries), ...found.warnings]
+  const found = buildPersonas(c.repo, c.dir)
+  const warnings = [...stressWarnings(c, [...entries, ...projectManagers].map((e) => String(e.slug)), w), ...roleWarnings(c, entries, w, found.personas), ...memberWarnings(c, entries), ...found.warnings, ...draftQuestions(c, found.personas, entries)]
   saveWarned(c.dir, w)
   return {
-    ankur: { kind: 'stage', platform: process.platform, dir: c.dir, repo: c.repo, plugin: PLUGIN, target: c.settings.target, reworkAllowance: intOr(c.plan.reworkAllowance, 1, 0), roles: c.roles, personas: found.personas, ...docKeysOf(c.repo), ...knowledgeArgsOf(c.repo, true), scriptPath: c.scriptPath, crews: entries, ...(typeof c.plan.approvedAt === 'string' ? { approvedAt: c.plan.approvedAt } : {}) },
+    ankur: { kind: 'stage', platform: process.platform, dir: c.dir, repo: c.repo, plugin: PLUGIN, target: c.settings.target, reworkAllowance: intOr(c.plan.reworkAllowance, 1, 0), roles: c.roles, personas: withoutDraftFiles(found.personas), ...docKeysOf(c.repo), ...knowledgeArgsOf(c.repo, true), scriptPath: c.scriptPath, crews: entries, ...(typeof c.plan.approvedAt === 'string' ? { approvedAt: c.plan.approvedAt } : {}) },
     held, projectManagers, ...(direct.length > 0 ? { direct } : {}), refused, stale, unfinished, warnings,
   }
 }
@@ -612,7 +647,7 @@ export function cmdStart(f: Flags): Obj {
     if (unapproved.has(goalOf(picked))) throw refuse({ error: `start --slug ${only}: its goal ${goalOf(picked)} is not approved (approvedAt is null)` })
     if (picked.status === 'running') {
       // a PM resuming a crew that is already running gets a clear no-op, not an error
-      return { noop: true, slug: only, note: `start --slug ${only}: the crew is already running; nothing started. To restart a dead run use start --slug ${only} --resume stale (or answers / merge-ready)`, entries: [], held: [], refused: [] }
+      return { noop: true, slug: only, note: `start --slug ${only}: the crew is already running; nothing started. To restart a dead run use start --slug ${only} --resume stale (or answers / merge-ready)`, entries: [], held: [], refused: [], ankur: { kind: 'noop', personas: withoutDraftFiles(buildPersonas(repo, dir).personas) } }
     }
     if (picked.status !== 'planned') throw refuse({ error:`start --slug ${only}: the crew is ${String(picked.status)}, not planned; a running crew restarts with --resume` })
   }
