@@ -1,6 +1,8 @@
 /* The Tailwind entry. Colours live in tokens.css as
    plain variables; this file maps them to utilities and holds the D2 type scale, radii, fonts and motion. */
 @import "tailwindcss";
+/* Test files name classes in strings; scanning them would ship keyframes no page uses. */
+@source not "../**/*.test.ts";
 @import "./tokens.css";
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
@@ -24,6 +26,24 @@
   --color-brand-strong: var(--brand-strong);
   --color-brand-soft: var(--brand-soft);
   --color-brand-line: var(--brand-line);
+  --color-brand-hover: var(--brand-hover);
+  --color-on-brand: var(--on-brand);
+  --color-sun: var(--sun);
+  --color-sun-soft: var(--sun-soft);
+  --color-sun-text: var(--sun-text);
+  --color-run: var(--run);
+  --color-run-soft: var(--run-soft);
+  --color-run-text: var(--run-text);
+  --color-ok-text: var(--ok-text);
+  --color-pressed: var(--pressed);
+  --color-disabled-bg: var(--disabled-bg);
+  --color-disabled-fg: var(--disabled-fg);
+  --color-focus: var(--focus);
+  --color-focus-on-move: var(--focus-on-move);
+  --color-scrim: var(--scrim);
+  --color-icon-tile: var(--icon-tile);
+  --color-icon-glyph: var(--icon-glyph);
+  --color-icon-glyph-on-light: var(--icon-glyph-on-light);
   --color-move: var(--move);
   --color-move-fg: var(--move-fg);
   --color-move-muted: var(--move-muted);
@@ -59,6 +79,7 @@
   --shadow-e1: var(--e1);
   --shadow-e2: var(--e2);
   --shadow-hero: var(--e-hero);
+  --shadow-e-hero: var(--e-hero);
 }
 
 /* Literal values, emitted whether or not a class uses them yet. */
@@ -70,65 +91,43 @@
   --radius-hero: 20px;
 
   --text-micro: 11px;
-  --text-micro--line-height: 14px;
+  --text-micro--line-height: var(--leading-micro);
   --text-meta: 12px;
-  --text-meta--line-height: 16px;
+  --text-meta--line-height: var(--leading-meta);
   --text-ui: 13px;
-  --text-ui--line-height: 18px;
+  --text-ui--line-height: var(--leading-ui);
   --text-body: 14px;
-  --text-body--line-height: 21px;
+  --text-body--line-height: var(--leading-body);
   --text-lead: 16px;
-  --text-lead--line-height: 24px;
+  --text-lead--line-height: var(--leading-lead);
   --text-lead--letter-spacing: -0.01em;
   --text-title: 18px;
-  --text-title--line-height: 24px;
+  --text-title--line-height: var(--leading-title);
   --text-title--letter-spacing: -0.015em;
   --text-h1: 22px;
-  --text-h1--line-height: 28px;
+  --text-h1--line-height: var(--leading-h1);
   --text-h1--letter-spacing: -0.02em;
   --text-ask: 24px;
-  --text-ask--line-height: 31px;
+  --text-ask--line-height: var(--leading-ask);
   --text-ask--letter-spacing: -0.022em;
 
   --font-sans: "Geist Variable", Geist, ui-sans-serif, system-ui;
   --font-mono: "Geist Mono Variable", "Geist Mono", ui-monospace, monospace;
 
-  --ease-out: cubic-bezier(.2, 0, 0, 1);
-  --duration-quick: 150ms;
-  --duration-base: 200ms;
+  --duration-quick: var(--motion-quick);
+  --duration-base: var(--motion-base);
+  --duration-max: var(--motion-max);
 
-  --animate-arrive: arrive 360ms cubic-bezier(.2, 0, 0, 1) both;
-  --animate-tick-up: tick-up 420ms cubic-bezier(.2, 0, 0, 1);
-  --animate-ping-dot: ping 1.6s cubic-bezier(0, 0, .2, 1) infinite;
-  --animate-dash: dash 0.9s linear infinite;
-  --animate-scan: scan 1.8s cubic-bezier(.4, 0, .2, 1) infinite;
-  --animate-sheen: sheen 1.6s linear infinite;
-  --animate-stuck-glow: glow 2.4s ease-in-out infinite;
+  --animate-confirm-in: confirm-in var(--duration-base) var(--ease-out) both;
+  --animate-tick-up: tick-up var(--duration-base) var(--ease-out);
 }
 
-/* D2's keyframes (direction-d2.html:57-64). `ping` replaces Tailwind's own, so animate-ping-dot is D2's halo. */
-@keyframes arrive {
-  from { transform: translateY(-10px); opacity: 0; }
+/* The inline Stop confirm: opacity plus a 4 px rise. */
+@keyframes confirm-in {
+  from { transform: translateY(4px); opacity: 0; }
 }
 @keyframes tick-up {
   from { transform: translateY(35%); opacity: .35; }
-}
-@keyframes ping {
-  75%, 100% { transform: scale(2.2); opacity: 0; }
-}
-@keyframes dash {
-  to { stroke-dashoffset: -11; }
-}
-@keyframes scan {
-  from { transform: translateX(-100%); }
-  to { transform: translateX(260%); }
-}
-@keyframes sheen {
-  from { background-position: 200% 0; }
-  to { background-position: -200% 0; }
-}
-@keyframes glow {
-  50% { box-shadow: 0 0 0 4px color-mix(in oklab, var(--fail) 18%, transparent); }
 }
 
 @layer base {
@@ -154,6 +153,17 @@
     outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
+  /* Tabs and any control marked data-focus="inset" (crew lines) sit flush in a clipped row, so the ring goes inside. */
+  [role="tab"]:focus-visible,
+  [data-focus="inset"]:focus-visible {
+    outline-offset: -2px;
+  }
+  /* A disabled button never looks pressable. A pending one is aria-disabled, not disabled, and styles itself. */
+  button:disabled {
+    background: var(--disabled-bg);
+    color: var(--disabled-fg);
+    cursor: not-allowed;
+  }
 }
 
 @utility no-scrollbar {
@@ -173,5 +183,8 @@
   *, *::before, *::after {
     animation: none !important;
     transition-duration: 0ms !important;
+  }
+  [role="log"] {
+    scroll-behavior: auto;
   }
 }

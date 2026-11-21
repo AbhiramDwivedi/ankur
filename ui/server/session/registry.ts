@@ -1,4 +1,4 @@
-// The pending-request registry (R-8): every request answered at most once.
+// The pending-request registry: every request answered at most once.
 import { isObj, questionAnswer, rawInputOf } from './cards.ts'
 import type { NewRequest, Request, QuestionRequest } from './cards.ts'
 

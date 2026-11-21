@@ -247,7 +247,16 @@ export interface RunInfo {
   crews: Crew[]
   /** The run's first goal as id run, then plan.json's goals in order. */
   goals?: RunGoal[]
+  /** The newest recorded message of each (from, to) pair of messages.jsonl, oldest first. */
+  messages?: RunMessage[]
   skipped: Skipped[]
+}
+
+export interface RunMessage {
+  ts: string
+  from: string
+  to: string
+  summary: string
 }
 
 export type Run = RunInfo | null
@@ -320,6 +329,15 @@ export interface RetroInfo {
 
 export type Retro = RetroInfo | null
 
+/** The server's cost block of a state (state.schema.json `cost`). */
+export interface CostSnapshot {
+  run: { since: string | null; tokens: number; usd: number | null }
+  session: { tokens: number; usd: number | null }
+  crews: { crew: string; tokens: number; usd: number | null; why?: string }[]
+  models: { model: string; tokens: number; usd: number | null }[]
+  unpriced: string[]
+}
+
 export interface RunState {
   v: 1
   repo: string
@@ -333,6 +351,8 @@ export interface RunState {
   design: Design
   notices: Notices
   retro?: Retro
+  /** Priced usage from the run dir's usage.jsonl; null when it has none. Absent from a server that predates workspaces. */
+  cost?: CostSnapshot | null
 }
 
 export interface Snapshot {
@@ -375,3 +395,31 @@ export interface PostResult {
 
 /** The link to /api/events: connecting until the first message, reconnecting after an error. */
 export type Connection = 'connecting' | 'live' | 'reconnecting'
+
+/** The wire values of a workspace status; the page owns the words. */
+export type WorkspaceStatus = 'stopping' | 'failed' | 'stopped' | 'finished' | 'waiting' | 'idle' | 'not-started' | 'working'
+
+/** One row of GET /api/workspaces. */
+export interface WorkspaceItem {
+  id: string
+  name: string
+  path: string
+  status: WorkspaceStatus
+  reason: string | null
+  openRequests: number
+  session?: boolean // absent in the open answer when no session process exists
+}
+
+export type OpenError = 'path' | 'relative' | 'missing' | 'notgit' | 'timeout' | 'network'
+
+/** The answer to opening a directory: the workspace, and whether it was already open; or the refusal. */
+export type OpenResult =
+  | { ok: true; workspace: WorkspaceItem; existed: boolean }
+  | { ok: false; error: OpenError | (string & {}); status: number }
+
+/** The answer to a workspace list request. expired is true on 401 or 403 (the page link is gone): no retry. */
+export type ListResult =
+  | { ok: true; workspaces: WorkspaceItem[] }
+  | { ok: false; status: number; expired: boolean }
+
+export type StopResult = { ok: true; workspace: WorkspaceItem } | { ok: false; status: number; error: string }

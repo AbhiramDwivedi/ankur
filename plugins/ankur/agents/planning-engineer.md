@@ -17,7 +17,7 @@ A task stops splitting when all four hold:
 - it owns files no sibling task touches;
 - it has an acceptance test the member can run with its own access;
 - every design decision it needs is in the architecture doc, an accepted ADR or the goal, so it needs no design decision the docs lack;
-- it fits one agent's context.
+- it fits one agent's context, and edits at most 10 files, tests included.
 
 Split only along the condition that fails. A task with no check that could fail for it alone is too small: merge it into a sibling in the same module.
 

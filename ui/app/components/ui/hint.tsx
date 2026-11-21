@@ -11,7 +11,7 @@ export interface HintProps {
 
 export function Hint({ id, className, children }: HintProps) {
   return (
-    <p id={id} className={cn('flex min-w-0 items-start gap-1.5 text-meta text-muted', className)}>
+    <p id={id} className={cn('flex min-w-0 items-start gap-2 text-meta text-muted', className)}>
       <Info aria-hidden="true" className="mt-px size-3.5 shrink-0" />
       <span className="min-w-0">{children}</span>
     </p>

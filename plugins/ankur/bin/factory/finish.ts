@@ -14,7 +14,7 @@ import { ledgerAppend } from '../ledger.ts'
 import { goalOf } from '../../hooks/intake.ts'
 import { logFallbacks, logPassed, recordEscalations, recordRun, sessionAudit } from './audit.ts'
 import type { Audit } from './audit.ts'
-import { cmdCheck } from './check.ts'
+import { acceptanceFor, bashRun, cmdCheck } from './check.ts'
 import { concludeFrontmatterMerge } from '../fragments.ts'
 import { cmdOwnsCheck } from './crew.ts'
 import { setCrewState } from './decisions.ts'
@@ -74,7 +74,40 @@ export function redRecord(dir: string, slug: string): Obj | undefined {
   return undefined
 }
 
-type Outcome ={ merged?: true; left?: { path: string; branch: string; why: string }[]; rework?: string; blocked?: string; refused?: string }
+type Outcome ={ merged?: true; left?: { path: string; branch: string; why: string }[]; rework?: string; blocked?: string; refused?: string; acceptanceAfterLanding?: AfterLanding }
+
+// What the acceptance test did once, on the landed head: ok and exit are null when it was not run (the whole suite is the heavy
+// slot's), exit is null too when the run itself failed to start.
+type AfterLanding = { ok: boolean | null; exit: number | null; tail: string }
+
+// One crew: its own result. Several: ok only if every run passed (null if none failed but one did not run), exit the first one that
+// is not 0, and the tails side by side, each under its crew.
+function afterLandingOf(all: { slug: string; r: AfterLanding }[]): AfterLanding {
+  if (all.length === 1) return (all[0] as { r: AfterLanding }).r
+  const rs = all.map((a) => a.r)
+  return {
+    ok: rs.some((r) => r.ok === false) ? false : rs.some((r) => r.ok === null) ? null : true,
+    exit: rs.find((r) => r.exit !== null && r.exit !== 0)?.exit ?? (rs.every((r) => r.exit === 0) ? 0 : null),
+    tail: all.map((a) => `[${a.slug}] ${a.r.tail}`).join('\n'),
+  }
+}
+
+// The crew's acceptance test, run once in the crew worktree after the target moved: the worktree sits on the landed head, so a
+// test that reads merge-base state sees the landing. Through bashRun, never cmdCheck, so it writes no check record that lastGreenHead
+// could read as green. It reports only: any error becomes the result, and the landing outcome never changes.
+function acceptanceAfterLanding(dir: string, wt: string, slug: string, crew: Obj): AfterLanding {
+  try {
+    const { command, suiteOnly } = acceptanceFor(dir, slug, crew)
+    if (suiteOnly) return { ok: null, exit: null, tail: 'not run: the acceptance test is the whole suite, which only the heavy slot runs' }
+    const r = bashRun(wt, command)
+    const lines = r.text.split('\n')
+    if (lines[lines.length - 1] === '') lines.pop()
+    return { ok: r.exit === 0, exit: r.exit, tail: lines.slice(-40).join('\n').slice(-4000) }
+  } catch (e) {
+    const why = e instanceof CliError ? String(e.body.why ?? e.body.error ?? e.message) : e instanceof Error ? e.message : String(e)
+    return { ok: false, exit: null, tail: `not run: ${why}`.slice(0, 1000) }
+  }
+}
 
 // Merge step for one crew whose newest QC is a clean PASS. Fails closed: any doubt is a refusal.
 // `gates` (land) switches the red and QC gates by the crew's booleans; absent, both are on (finish, a full crew).
@@ -143,7 +176,7 @@ function mergeCrew(f: Flags, dir: string, repo: string, target: string, crew: Ob
       return { rework: 'reqc' }
     }
   }
-  // R-89: the acceptance test above can outlast LEASE_STALE_MS, and a blocked thread refreshes nothing, so a second finisher may have
+  // the acceptance test above can outlast LEASE_STALE_MS, and a blocked thread refreshes nothing, so a second finisher may have
   // taken the lease and merged. A finisher that no longer holds its lease never moves the target.
   if (leaseToken !== undefined && !refreshLease(dir, `finisher-${slug}`, leaseToken)) return { refused: 'finisher lease lost' }
   // step 4: fast-forward the target
@@ -168,6 +201,8 @@ function mergeCrew(f: Flags, dir: string, repo: string, target: string, crew: Ob
   } catch (e) {
     appendDecision(dir, `ledger row for crew ${slug} not written | ${(e instanceof Error ? e.message : String(e)).slice(0, 200)}`)
   }
+  // once, on the landed head and before the crew's worktree is retired; a report, never a gate
+  const acceptanceAfter = acceptanceAfterLanding(dir, wt, slug, crew)
   const own = new Set(fresh.crews.filter(isObj).flatMap((c: Obj) => CREW_NAME_PREFIXES.map((p) => `${p}${c.slug}`)))
   for (const w of worktreesOf(repo)) {
     if (w.path === wt || w.branch === undefined || own.has(w.branch) || !w.branch.startsWith(`${crewBr}-`)) continue
@@ -178,7 +213,7 @@ function mergeCrew(f: Flags, dir: string, repo: string, target: string, crew: Ob
   const crewWt = worktreesOf(repo).find((w) => w.branch === crewBr)
   const kept = crewWt !== undefined ? retireWorktree(x, crewWt, { crew: slug, run: runId, why: 'merged' }) : retireBranch(x, crewBr, { crew: slug, run: runId, why: 'merged', worktree: null })
   // The run's member worktrees are retired by sweepMembers once every crew has had its turn
-  return kept !== undefined && crewWt !== undefined ? { merged: true, left: [{ path: crewWt.path, branch: crewBr, why: kept }] } : { merged: true }
+  return kept !== undefined && crewWt !== undefined ? { merged: true, left: [{ path: crewWt.path, branch: crewBr, why: kept }], acceptanceAfterLanding: acceptanceAfter } : { merged: true, acceptanceAfterLanding: acceptanceAfter }
 }
 
 // When the repo finish merged into is the plugin's own repo, one warning per plugin agents/*.md the merges
@@ -249,11 +284,11 @@ export function cmdLand(f: Flags): Obj {
     fails = qcFails(slug, countedQc(dir, slug, files), since)
   }
   const r = mergeCrew(f, dir, repo, settings.target, crew, ruling, [], fails, { process, qc, red })
-  if (r.merged) return { merged: true, slug, process, qc, red, head: run(repo, ['rev-parse', '--verify', `refs/heads/${settings.target}`]).out, ...(r.left !== undefined && r.left.length > 0 ? { leftWorktrees: r.left } : {}) }
+  if (r.merged) return { merged: true, slug, process, qc, red, head: run(repo, ['rev-parse', '--verify', `refs/heads/${settings.target}`]).out, ...(r.left !== undefined && r.left.length > 0 ? { leftWorktrees: r.left } : {}), ...(r.acceptanceAfterLanding !== undefined ? { acceptanceAfterLanding: r.acceptanceAfterLanding } : {}) }
   throw no(r.rework ?? r.blocked ?? r.refused ?? 'refused')
 }
 
-// R-89: one finisher per crew. Leases (finisher-<slug>) are taken before a crew is written, refreshed between crews and before each merge,
+// one finisher per crew. Leases (finisher-<slug>) are taken before a crew is written, refreshed between crews and before each merge,
 // and released on every return and throw.
 export function cmdFinish(f: Flags): Obj {
   const held = new Map<string, string>()
@@ -293,12 +328,13 @@ function finishRun(f: Flags, held: Map<string, string>): Obj {
   const factoryCrews = allCrews.filter((c) => !liveFinisher.some((l) => l.slug === c.slug))
   const factorySlugs = new Set(factoryCrews.map((c) => c.slug as string))
   const inRun = factoryCrews.filter((c) => wfRun.agents.some((a) => parseLabel(a.label)?.slug === c.slug))
-  const out = { merged: [] as string[], rework: [] as Obj[], blocked: [] as Obj[], refused: [] as Obj[], audit: [] as Obj[], incomplete: [] as string[], stopped: [] as Obj[], leftWorktrees: [] as Obj[], warnings: [] as string[] }
+  const out = { merged: [] as string[], rework: [] as Obj[], blocked: [] as Obj[], refused: [] as Obj[], audit: [] as Obj[], incomplete: [] as string[], stopped: [] as Obj[], leftWorktrees: [] as Obj[], warnings: [] as string[], after: [] as { slug: string; r: AfterLanding }[] }
   out.refused.push(...liveFinisher)
   const finishWith = (): Obj => {
     const body = {
       merged: out.merged, rework: out.rework, blocked: out.blocked, refused: out.refused, audit: out.audit, incomplete: out.incomplete, stopped: out.stopped,
       ...(out.leftWorktrees.length > 0 ? { leftWorktrees: out.leftWorktrees } : {}), ...(out.warnings.length > 0 ? { warnings: out.warnings } : {}),
+      ...(out.after.length > 0 ? { acceptanceAfterLanding: afterLandingOf(out.after) } : {}),
     }
     if (out.refused.length > 0 || out.rework.length > 0 || out.blocked.length > 0 || out.audit.length > 0) throw refuse(body)
     return body
@@ -380,6 +416,7 @@ function finishRun(f: Flags, held: Map<string, string>): Obj {
     const r = mergeCrew(f, dir, repo, settings.target, c, ruling, audits, qcFails(c.slug, countedQc(dir, c.slug, files), since), undefined, wfRun.id, held.get(String(c.slug)))
     if (r.merged) {
       out.merged.push(c.slug)
+      if (r.acceptanceAfterLanding !== undefined) out.after.push({ slug: c.slug, r: r.acceptanceAfterLanding })
       out.leftWorktrees.push(...(r.left ?? []))
     }
     else if (r.rework !== undefined) out.rework.push({ slug: c.slug, why: r.rework })

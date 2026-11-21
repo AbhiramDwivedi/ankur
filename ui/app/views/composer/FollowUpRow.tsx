@@ -37,7 +37,7 @@ export function FollowUpRow({ text, intent, at, queued }: FollowUpRowProps) {
       </div>
       {queued ? (
         <>
-          <span className="inline-flex h-6 shrink-0 items-center rounded-chip bg-signal-soft px-2.5 text-meta font-medium text-signal-text">
+          <span className="inline-flex h-6 shrink-0 items-center rounded-chip bg-signal-soft px-3 text-meta font-medium text-signal-text">
             Queued
           </span>
           {time && <span className="shrink-0 font-mono text-meta text-muted tabular-nums">{time}</span>}

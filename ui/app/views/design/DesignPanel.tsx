@@ -1,16 +1,17 @@
-// The Design tab's body (R-6): plan.md and the architecture doc as markdown, the images
+// The Design tab's body: plan.md and the architecture doc as markdown, the images
 // the run's crew branches built (through /api/image), and mermaid blocks as labelled source. App loads this
 // file with React.lazy, so marked is fetched only when the tab opens. Raw HTML in the markdown is escaped,
 // never passed through; links keep only web, mail and relative targets; markdown images show as words, since
-// the page may load only its own files. Mermaid blocks are drawn as diagrams (R-38): the
+// the page may load only its own files. Mermaid blocks are drawn as diagrams: the
 // mermaid chunk is imported here and nowhere else, on the first render of a block, and a block that can't be
-// drawn shows its source. Only the latest architecture shows (R-39): change log, history and versions
+// drawn shows its source. Only the latest architecture shows: change log, history and versions
 // sections are dropped before the markdown is rendered.
 import { useCallback, useMemo, useState } from 'react'
 import { Marked, type Tokens } from 'marked'
 import { ImageOff, RotateCw } from 'lucide-react'
 import { Button } from '../../components/ui/button.tsx'
 import type { DesignImage, RunState } from '../../store/types.ts'
+import { pageWorkspaces } from '../../store/workspaces.ts'
 import { imageUrl } from '../rail/format.ts'
 import { MERMAID_CONFIG, MermaidBlock, type MermaidApi } from './MermaidBlock.tsx'
 import './mermaid.css'
@@ -113,9 +114,9 @@ const prose =
   'min-w-0 text-body break-words text-fg ' +
   '[&_h1]:mt-4 [&_h1]:mb-2 [&_h1]:text-title [&_h1]:font-semibold first:[&_h1]:mt-0 ' +
   '[&_h2]:mt-4 [&_h2]:mb-2 [&_h2]:text-lead [&_h2]:font-semibold ' +
-  '[&_h3]:mt-3 [&_h3]:mb-1.5 [&_h3]:text-body [&_h3]:font-semibold ' +
+  '[&_h3]:mt-3 [&_h3]:mb-2 [&_h3]:text-body [&_h3]:font-semibold ' +
   '[&_h4]:mt-3 [&_h4]:mb-1 [&_h4]:text-ui [&_h4]:font-semibold ' +
-  '[&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-0.5 ' +
+  '[&_p]:my-2 [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_li]:my-1 ' +
   '[&_a]:text-brand-strong [&_a]:underline [&_strong]:font-semibold [&_em]:italic ' +
   '[&_blockquote]:border-l-2 [&_blockquote]:border-border-strong [&_blockquote]:pl-3 [&_blockquote]:text-muted ' +
   '[&_code]:font-mono [&_code]:text-ui [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre]:rounded-ctl [&_pre]:bg-secondary [&_pre]:p-3 ' +
@@ -159,7 +160,7 @@ export function firstCount(parts: string[], budget = FIRST_LINES): number {
 
 const HEADING_DROPPED = /\b(change ?log|history|versions?)\b/i
 
-/** The markdown without its change log, history and versions sections (R-39): each such heading goes, with
+/** The markdown without its change log, history and versions sections: each such heading goes, with
  *  everything up to the next heading of the same or a higher level. Lines in code fences are never headings. */
 export function latestOnly(markdown: string): string {
   const out: string[] = []
@@ -235,7 +236,7 @@ function Figure({ img }: { img: DesignImage }) {
   const [failed, setFailed] = useState(false)
   const [attempt, setAttempt] = useState(0)
   // An absolute URL on the page's own origin, so the src works wherever it is read back.
-  const src = new URL(imageUrl(img) + (attempt ? `&retry=${attempt}` : ''), window.location.href).href
+  const src = new URL(imageUrl(img, pageWorkspaces().getView().id) + (attempt ? `&retry=${attempt}` : ''), window.location.href).href
   return (
     <li className="min-w-0">
       <figure className="min-w-0 overflow-hidden rounded-card border border-border bg-surface shadow-e1">

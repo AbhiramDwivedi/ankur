@@ -1,4 +1,4 @@
-// The retro's commit gate (R-32): reports the lines of a text that hold an email address,
+// The retro's commit gate: reports the lines of a text that hold an email address,
 // a home path or a token. One hit per kind per line, in line order. Every scan walks the line with indexOf and
 // bounded character runs, never a backtracking pattern, so it stays linear on large inputs.
 // Erasable TypeScript only, Node standard library only (P19).

@@ -384,7 +384,7 @@ export function cmdPlanCheck(f: Flags): Obj {
   // 0.31.0 item 1: the green check runs the tests the diff reaches and the full suite runs before merge, so a trailing whole-suite
   // step only slows every check; factory check cuts it (stripBlanketSuite), and the plan should drop it
   for (const c of crews) if (typeof c.acceptanceTest === 'string' && stripBlanketSuite(c.acceptanceTest).blanket) warnings.push(`crew ${name(c)}: the acceptance test ends with the whole test suite (npm test); the green check runs the tests the diff reaches and the full suite runs before merge, so drop that step`)
-  // R-132: a file owned (by exact path, not glob) by more than half of a goal's crews, in a goal of 3 crews or more, is a hotspot
+  // a file owned (by exact path, not glob) by more than half of a goal's crews, in a goal of 3 crews or more, is a hotspot
   const byGoal = new Map<string, any[]>()
   for (const c of crews) byGoal.set(goalOf(c), [...(byGoal.get(goalOf(c)) ?? []), c])
   for (const [g, gc] of byGoal) {

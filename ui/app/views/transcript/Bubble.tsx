@@ -1,4 +1,4 @@
-// One chat message (R-45): the client on the right, the PM on the left, errors on fail-soft. The corner nearest
+// One chat message: the client on the right, the PM on the left, errors on fail-soft. The corner nearest
 // the sender is the small one, so who is talking never rests on colour alone. Consecutive messages from one
 // sender drop the avatar and name but keep the time, and say who spoke in hidden text.
 import type { ReactNode } from "react";
@@ -78,7 +78,7 @@ export function Bubble({
       id={id}
       tabIndex={-1}
       className={cn(
-        "min-w-0 outline-offset-2 transition-[outline-color,opacity] duration-(--duration-quick) ease-out [content-visibility:auto] [contain-intrinsic-size:auto_3rem] motion-reduce:transition-none starting:opacity-0",
+        "min-w-0 outline-offset-2 transition-[outline-color] duration-(--duration-quick) ease-out [content-visibility:auto] [contain-intrinsic-size:auto_3rem] motion-reduce:transition-none",
         grouped ? "mt-2" : "mt-4 first:mt-0",
         lit ? "outline-2 outline-(--focus)" : "outline-0 outline-transparent",
       )}
@@ -94,7 +94,7 @@ export function Bubble({
         <div
           className={cn(
             "min-w-0 max-w-[85%] rounded-card border px-3 py-2 text-ui leading-normal text-fg whitespace-pre-wrap [overflow-wrap:anywhere] max-[30rem]:max-w-[90%]",
-            mine && "rounded-br-chip border-brand-line bg-brand-soft",
+            mine && "rounded-br-chip border-border-strong bg-surface",
             who === "pm" &&
               "max-w-[92%] rounded-bl-chip border-border bg-surface max-[30rem]:max-w-[90%]",
             who === "error" &&

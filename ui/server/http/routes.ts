@@ -1,6 +1,6 @@
 // Routing and POST bodies.
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { SessionControl, StateSource } from './index.ts';
+import type { SessionControl, StateSource, WorkspaceSource } from './index.ts';
 import type { SseHub } from './sse.ts';
 import { serveImage, serveMarked, serveStatic } from './static.ts';
 
@@ -65,9 +65,88 @@ async function readJson(req: IncomingMessage, res: ServerResponse): Promise<{ va
 
 const ANSWER_STATUS: Record<string, number> = { unknown: 404, answered: 409, cancelled: 409, answer: 400 };
 
+// What the routes act on: one workspace's state and session, or the single pair the server was given.
+interface Target { state: StateSource; session: SessionControl; sse: SseHub }
+
+async function postMessage(t: Target, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJson(req, res);
+  if (!body) return;
+  const r = t.session.send(body.value?.text, body.value?.intent);
+  if (r.ok) return sendJson(res, 202, { ok: true, id: r.id });
+  return sendJson(res, r.error === 'ended' ? 409 : 400, { error: r.error });
+}
+
+async function postAnswer(t: Target, rawId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJson(req, res);
+  if (!body) return;
+  let id: string;
+  try { id = decodeURIComponent(rawId); } catch { return sendJson(res, 404, { error: 'unknown' }); }
+  const r = t.session.answer(id, body.value);
+  if (r.ok) return sendJson(res, 200, { ok: true, request: r.request });
+  return sendJson(res, ANSWER_STATUS[r.error] ?? 400, r.request ? { error: r.error, request: r.request } : { error: r.error });
+}
+
+// POST /api/workspaces: 201 for a new workspace, 200 for one that was already open, 400 or 504 with the named error.
+async function openWorkspace(ws: WorkspaceSource, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJson(req, res);
+  if (!body) return;
+  const r = await ws.open(body.value?.path);
+  if (r.ok) {
+    // The open answer always names `session` (false when no process exists): the page says "No session yet" from `session === false`, so an absent flag would show the recorded run's word until the 2 s list poll.
+    const workspace = { ...(r.workspace as object), session: (r.workspace as { session?: boolean }).session === true };
+    return sendJson(res, r.existed ? 200 : 201, { ok: true, workspace, existed: r.existed });
+  }
+  return sendJson(res, r.error === 'timeout' ? 504 : 400, { error: r.error });
+}
+
+// The /api/workspaces routes. A known sub-route on an unknown workspace is 404 `workspace`.
+async function workspaceRoute(
+  opts: RouteOpts & { workspaces: WorkspaceSource; hubFor: (state: StateSource) => SseHub },
+  path: string,
+  params: URLSearchParams,
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const method = req.method ?? 'GET';
+  const ws = opts.workspaces;
+  if (path === '/api/workspaces') {
+    if (method === 'GET') return sendJson(res, 200, { workspaces: ws.list() });
+    if (method === 'POST') return openWorkspace(ws, req, res);
+    return sendJson(res, 405, { error: 'method' });
+  }
+  const m = /^\/api\/workspaces\/([^/]+)\/(stop|events|message|image|requests\/([^/]+)\/answer)$/.exec(path);
+  if (!m) return sendJson(res, 404, { error: 'notfound' });
+  const sub = m[2]!;
+  const wanted = sub === 'events' || sub === 'image' ? 'GET' : 'POST';
+  if (method !== wanted) return sendJson(res, 405, { error: 'method' });
+  let id = '';
+  try { id = decodeURIComponent(m[1]!); } catch { /* no such workspace */ }
+  if (sub === 'stop') {
+    const stopped = await readBody(req, res); // drained, and 413 when it is too big; the body itself means nothing
+    if (stopped === null) return;
+    const r = await ws.stop(id);
+    return r.ok ? sendJson(res, 200, { ok: true, workspace: r.workspace }) : sendJson(res, 404, { error: 'workspace' });
+  }
+  const w = ws.get(id);
+  if (!w) return sendJson(res, 404, { error: 'workspace' });
+  const t: Target = { state: w.state, session: w.control, sse: opts.hubFor(w.state) };
+  if (sub === 'events') return t.sse.handle(req, res);
+  if (sub === 'message') return postMessage(t, req, res);
+  if (sub === 'image') return serveImage(t.state, params, res);
+  return postAnswer(t, m[3]!, req, res);
+}
+
+export interface RouteOpts {
+  state?: StateSource;
+  session?: SessionControl;
+  webDir: string;
+  workspaces?: WorkspaceSource;
+  hubFor?: (state: StateSource) => SseHub; // the SSE hub of one workspace's state; createServer makes it
+}
+
 export async function route(
-  opts: { state: StateSource; session: SessionControl; webDir: string },
-  sse: SseHub,
+  opts: RouteOpts,
+  sse: SseHub | null,
   req: IncomingMessage,
   res: ServerResponse,
 ): Promise<void> {
@@ -77,34 +156,42 @@ export async function route(
   const path = q < 0 ? raw : raw.slice(0, q);
   const params = new URLSearchParams(q < 0 ? '' : raw.slice(q + 1));
 
+  const isApi = path === '/api' || path.startsWith('/api/');
+  if (opts.workspaces && opts.hubFor && (path === '/api/workspaces' || path.startsWith('/api/workspaces/'))) {
+    return workspaceRoute({ ...opts, workspaces: opts.workspaces, hubFor: opts.hubFor }, path, params, req, res);
+  }
+  // The single-repo server (no registry) says so, so the page takes it as one repository without a failed request.
+  if (!opts.workspaces && opts.state && path === '/api/workspaces' && method === 'GET') {
+    return sendJson(res, 200, { workspaces: null, single: true });
+  }
+  // The un-scoped routes act on the --repo workspace when the server has a registry, else on the pair it was given.
+  let target: Target | null = null;
+  if (opts.workspaces && opts.hubFor) {
+    const p = opts.workspaces.primary();
+    if (p) target = { state: p.state, session: p.control, sse: opts.hubFor(p.state) };
+  } else if (opts.state && opts.session && sse) {
+    target = { state: opts.state, session: opts.session, sse };
+  }
+  const noWorkspace = () => sendJson(res, 404, { error: 'workspace' });
+
   if (path === '/api/events') {
     if (method !== 'GET') return sendJson(res, 405, { error: 'method' });
-    return sse.handle(req, res);
+    return target ? target.sse.handle(req, res) : noWorkspace();
   }
   if (path === '/api/message') {
     if (method !== 'POST') return sendJson(res, 405, { error: 'method' });
-    const body = await readJson(req, res);
-    if (!body) return;
-    const r = opts.session.send(body.value?.text, body.value?.intent);
-    if (r.ok) return sendJson(res, 202, { ok: true, id: r.id });
-    return sendJson(res, r.error === 'ended' ? 409 : 400, { error: r.error });
+    return target ? postMessage(target, req, res) : noWorkspace();
   }
   const m = /^\/api\/requests\/([^/]+)\/answer$/.exec(path);
   if (m) {
     if (method !== 'POST') return sendJson(res, 405, { error: 'method' });
-    const body = await readJson(req, res);
-    if (!body) return;
-    let id: string;
-    try { id = decodeURIComponent(m[1]!); } catch { return sendJson(res, 404, { error: 'unknown' }); }
-    const r = opts.session.answer(id, body.value);
-    if (r.ok) return sendJson(res, 200, { ok: true, request: r.request });
-    return sendJson(res, ANSWER_STATUS[r.error] ?? 400, r.request ? { error: r.error, request: r.request } : { error: r.error });
+    return target ? postAnswer(target, m[1]!, req, res) : noWorkspace();
   }
   if (path === '/api/image') {
     if (method !== 'GET') return sendJson(res, 405, { error: 'method' });
-    return serveImage(opts.state, params, res);
+    return target ? serveImage(target.state, params, res) : noWorkspace();
   }
-  if (path === '/api' || path.startsWith('/api/')) return sendJson(res, 404, { error: 'notfound' });
+  if (isApi) return sendJson(res, 404, { error: 'notfound' });
   if (method !== 'GET' && method !== 'HEAD') return sendJson(res, 405, { error: 'method' });
   if (path === '/vendor/marked.js') return serveMarked(res);
   return serveStatic(opts.webDir, path, res);

@@ -4,11 +4,11 @@
   "title": "ankur shared state rows",
   "description": "The row shapes of the inbox, ledger, queue and usage files and of the unattended and ltc-plan files (contract-025 sections 2, 3, 4 and 6), as $defs. Stored rows are append-only: a field is added, never renamed or retyped, and v goes up if one must be. Read a row by $ref into $defs; the root validates nothing on its own.",
   "$defs": {
-    "inboxId": { "type": "string", "pattern": "^E-[0-9]{8}-[0-9a-f]{6}$" },
+    "inboxId": { "type": "string", "pattern": "^(?:E-[0-9]{8}-[0-9a-f]{6}|[a-z0-9]+(?:-[a-z0-9]+)*)$", "maxLength": 60 },
     "slug": { "type": "string", "minLength": 1 },
     "inboxKind": { "enum": ["client-question", "scope-change", "client-trigger", "long-term-cost", "budget", "allowance-spent", "doctor-bundle", "blocked", "stall-unrecovered", "push-pr", "prod-deploy", "intake-triage", "pm-question"] },
     "inboxOpen": {
-      "description": "S/inbox.jsonl, op open. codeHash is sha256(id + code); the code is 6 characters from ABCDEFGHJKMNPQRSTUVWXYZ23456789.",
+      "description": "S/inbox.jsonl, op open. codeHash is sha256(id + code); the code is three hyphenated words (an older item: 6 characters from ABCDEFGHJKMNPQRSTUVWXYZ23456789). risk, onYes and onNo are the plain summary the client read; an older item has none.",
       "type": "object",
       "additionalProperties": false,
       "required": ["v", "op", "id", "ts", "kind", "session", "crews", "ref", "blocking", "title", "detail", "codeHash"],
@@ -24,6 +24,9 @@
         "blocking": { "type": "boolean" },
         "title": { "type": "string", "maxLength": 200 },
         "detail": { "type": "string", "maxLength": 4000 },
+        "risk": { "type": "string", "maxLength": 300 },
+        "onYes": { "type": "string", "maxLength": 300 },
+        "onNo": { "type": "string", "maxLength": 300 },
         "codeHash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },

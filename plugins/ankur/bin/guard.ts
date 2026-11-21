@@ -135,7 +135,7 @@ function raise(repo: string, dir: string, ref: string, line: LtcLine, crews: str
   const rejected = same.find((i) => i.decision === 'reject')
   if (rejected !== undefined) return rejected.id
   // an open item falls through: escalate dedupes on the ref and returns it
-  return escalate(repo, dir, { kind: KIND, title: `long-term cost: ${line.what}`, detail: `later: ${line.later}\nreversal: ${line.reversal}`, crews, ref, blocking: true }).id
+  return escalate(repo, dir, { kind: KIND, title: `long-term cost: ${line.what}`, detail: `later: ${line.later}\nreversal: ${line.reversal}`, crews, ref, blocking: true, risk: `${line.later}; to undo it: ${line.reversal}` }).id
 }
 
 function decisionLine(dir: string, text: string): void {

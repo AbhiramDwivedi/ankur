@@ -234,7 +234,7 @@ function testsPart(ctx: Ctx): Part {
       }
     }
   }
-  // 0.33.0 item 4 (R-162): a test file the full suite failed on and a re-run passed (a `flake` event, bin/factory/flake.ts) twice in one
+  // 0.33.0 item 4: a test file the full suite failed on and a re-run passed (a `flake` event, bin/factory/flake.ts) twice in one
   // run by one crew is a finding for that crew; a single flake is only listed in problems().flakes
   const flaked = new Map<string, { crew: string; file: string; n: number; ms: number }>()
   for (const e of ctx.events) {

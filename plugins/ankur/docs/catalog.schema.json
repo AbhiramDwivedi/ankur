@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "ankur known-problems catalog, version 1",
-  "description": "retro/catalog.json, committed in the plugin: problems ankur has met before, each with how to recognise it and its known fix. The extractor, factory.ts check, factory.ts doctor and workflows/stage.js report a hit by the entry's id and fix instead of as a new problem (R-25). retro/catalog.ts loadCatalog refuses a file that breaks this schema or has a pattern that does not compile. See adr/0012-self-improving-retro.md, Decision 3.",
+  "description": "retro/catalog.json, committed in the plugin: problems ankur has met before, each with how to recognise it and its known fix. The extractor, factory.ts check, factory.ts doctor and workflows/stage.js report a hit by the entry's id and fix instead of as a new problem. retro/catalog.ts loadCatalog refuses a file that breaks this schema or has a pattern that does not compile. See adr/0012-self-improving-retro.md, Decision 3.",
   "type": "object",
   "additionalProperties": false,
   "required": ["v", "entries"],
@@ -29,7 +29,7 @@
           "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
         },
         "kind": {
-          "description": "The R-27 kind a recurrence of this entry is reported as.",
+          "description": "The kind a recurrence of this entry is reported as.",
           "enum": [
             "mechanical bug",
             "friction",
@@ -62,7 +62,7 @@
           "$ref": "#/$defs/probe"
         },
         "fixedBy": {
-          "description": "null for a problem no retro has fixed. Otherwise the finding whose fix merged and the date it merged; retro/cli.ts recur then reports each hit of this entry as a recurrence citing it (R-31).",
+          "description": "null for a problem no retro has fixed. Otherwise the finding whose fix merged and the date it merged; retro/cli.ts recur then reports each hit of this entry as a recurrence citing it.",
           "oneOf": [
             { "type": "null" },
             {

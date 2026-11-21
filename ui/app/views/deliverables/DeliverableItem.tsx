@@ -76,14 +76,14 @@ export function DeliverableItem({ item, selected, onOpen }: DeliverableItemProps
   )
   if (item.pending) {
     return (
-      <li className="flex min-w-0 items-start gap-3 rounded-ctl px-2.5 py-2">
+      <li className="flex min-w-0 items-start gap-3 rounded-ctl px-3 py-2">
         {tile}
         <div className="min-w-0 flex-1">
           <p className="truncate text-ui font-semibold text-muted" title={item.title}>
             {item.title}
           </p>
           {meta}
-          <p className="mt-0.5 text-meta break-words text-muted">
+          <p className="mt-1 text-meta break-words text-muted">
             Arrives when {item.crew ?? 'its crew'} merges. Nothing to open yet.
           </p>
         </div>
@@ -93,7 +93,7 @@ export function DeliverableItem({ item, selected, onOpen }: DeliverableItemProps
   return (
     <li
       className={cn(
-        'relative flex min-w-0 items-center gap-3 rounded-ctl px-2.5 py-2 transition-colors duration-(--duration-quick) ease-out',
+        'relative flex min-w-0 items-center gap-3 rounded-ctl px-3 py-2 transition-colors duration-(--duration-quick) ease-out',
         selected ? 'bg-brand-soft ring-1 ring-brand-line' : 'hover:bg-secondary',
       )}
     >

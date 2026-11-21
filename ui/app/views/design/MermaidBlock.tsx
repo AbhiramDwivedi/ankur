@@ -1,4 +1,4 @@
-// One mermaid block of the architecture document (R-38). It shows a placeholder while the
+// One mermaid block of the architecture document. It shows a placeholder while the
 // mermaid chunk loads, then the drawn SVG in a focusable figure, or the source with the reason when it can't draw.
 // mermaid is loaded by DesignPanel.tsx only; this file gets it through the `load` prop. The page CSP has no
 // style-src, so while mermaid renders its <style> elements are kept out and its style attributes become

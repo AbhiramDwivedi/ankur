@@ -3,8 +3,8 @@ import { Slot } from '@radix-ui/react-slot'
 import { cva } from 'class-variance-authority'
 import { cn } from '../../lib/utils.ts'
 
-// Surfaces by hierarchy. Only `hero` (Your move) carries shadow-hero, and it marks
-// itself data-surface="move" so --focus turns move-fg inside it.
+// Surfaces by hierarchy. Only `hero` (Your move) carries shadow-e-hero, and it marks
+// itself data-surface="move" so --focus turns focus-on-move inside it.
 const cardVariants = cva('min-w-0', {
   variants: {
     variant: {
@@ -13,7 +13,7 @@ const cardVariants = cva('min-w-0', {
       sunken: 'rounded-card bg-secondary text-fg',
       'alert-fail': 'rounded-card border border-fail/40 bg-fail-soft text-fg',
       'alert-signal': 'rounded-card border border-signal/40 bg-signal-soft text-fg',
-      hero: 'rounded-hero bg-move text-move-fg shadow-hero',
+      hero: 'rounded-panel bg-move text-move-fg shadow-e-hero',
     },
     density: {
       default: 'p-4',

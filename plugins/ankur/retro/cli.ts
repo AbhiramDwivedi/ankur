@@ -4,7 +4,7 @@
 // and `due <repo>`, which says whether the full retro is due (retro/runs.ts).
 // `main` returns the text and exit code; running the file prints the text and sets the code. Exit 0 means OK, 1 means
 // the input failed a check (a scrub hit), 2 means a usage error or a file it cannot read. Evidence is checked against
-// the extract's files and line counts, never the transcripts (R-35). Erasable TypeScript only, Node standard library
+// the extract's files and line counts, never the transcripts. Erasable TypeScript only, Node standard library
 // only (P19).
 import { execFileSync } from 'node:child_process'
 import { existsSync,mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
@@ -130,7 +130,7 @@ const isProductPath = (p: string, kind: unknown): boolean => {
   // normalize first, so `.claude/../src/app.ts` is judged as the `src/app.ts` it names
   const s = posix.normalize(p.replace(/\\/g, '/')).replace(/^\.\//, '')
   if (s === 'CLAUDE.md' || s.startsWith('.claude/') || s.startsWith('plugins/ankur/')) return false
-  // a bare top-level bin/, hooks/ ... is the plugin only when the judge says kind plugin; in any other project it is product code (R-128)
+  // a bare top-level bin/, hooks/ ... is the plugin only when the judge says kind plugin; in any other project it is product code
   return !(kind === 'plugin' && PLUGIN_DIRS.includes(s.split('/')[0]))
 }
 
@@ -236,7 +236,7 @@ const loadMeasures = (ankurDir: string): Record<string, number | number[]> => {
     for (const [k, v] of Object.entries(m)) out[k] = [...new Set([out[k] ?? [], v].flat())]
   }
   add(loadProblemsFile(ankurDir).measures as Record<string, number>)
-  // a full retro reads every counted run (R-194): the run dirs sit beside this one under <common>/<root>/, so a finding may cite what an earlier run counted
+  // a full retro reads every counted run: the run dirs sit beside this one under <common>/<root>/, so a finding may cite what an earlier run counted
   let runs: string[] = []
   try {
     runs = countedRuns(dirname(dirname(resolve(ankurDir))))
@@ -369,7 +369,7 @@ function runProblems(ankurDir: string): string[] {
 
 // ---------- recur (Decision 7) ----------
 
-/** The plugin version the session ran: the extract's pluginVersion, else null (R-35: the extract alone, no transcript rescan). */
+/** The plugin version the session ran: the extract's pluginVersion, else null (the extract alone, no transcript rescan). */
 function ranVersion(ankurDir: string): string | null {
   try {
     const x = JSON.parse(read(join(ankurDir, 'retro', 'extract.json')))
@@ -378,7 +378,7 @@ function ranVersion(ankurDir: string): string | null {
   return null
 }
 
-/** Catalog hits in the structured files the counting step reads (R-31, never a transcript): problems.json titles and measure keys, decisions.md lines, events*.jsonl lines. */
+/** Catalog hits in the structured files the counting step reads (never a transcript): problems.json titles and measure keys, decisions.md lines, events*.jsonl lines. */
 function structuredHits(ankurDir: string, catalog: Catalog): { id: string; file: string; line: number }[] {
   const out: { id: string; file: string; line: number }[] = []
   const lineHits = (file: string, text: string) => {
@@ -463,7 +463,7 @@ function runRecur(ankurDir: string, catalogPath: string | undefined): string[] {
   return lines
 }
 
-// ---------- due (R-194) ----------
+// ---------- due ----------
 
 /** The retro keys of <repo>/.claude/ankur.json: `runEndRetro` and `fullRetroEvery`. A missing file is every default; a malformed one or a bad value fails. */
 function retroConfig(repo: string): { mode: string | undefined; every: number } {

@@ -3,7 +3,7 @@
 // ({"error": "..."}). Node built-ins and relative paths only.
 // 0.31.0 item 5: this file is the thin dispatcher: the command table, main and the CLI around it. Each command group lives in
 // bin/factory/<group>.ts; no module there imports this file.
-// 0.33.0 R-154: every command entry loads its module with a lazy import(), so a run loads only the module of the command it runs.
+// 0.33.0: every command entry loads its module with a lazy import(), so a run loads only the module of the command it runs.
 // This file exports only main and gatesMain; the other names it exported before (0.32.0) are exported by bin/factory/exports.ts.
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -27,6 +27,7 @@ const CORE_COMMANDS: Record<string, Cmd> = {
   'gated-merge': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdGatedMerge(f),
   'knowledge-migrate': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdKnowledgeMigrate(f),
   'migrate-names': async (f) => (await import('./factory/runs.ts')).cmdMigrateNames(f),
+  'rule-quote': async (f) => (await import('./factory/rule-quote.ts')).cmdRuleQuote(f),
   'rules-index': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdRulesIndex(f),
   stitch: async (f) => (await import('./factory/knowledge-cmds.ts')).cmdStitch(f),
   consolidate: async (f) => (await import('./factory/consolidate.ts')).cmdConsolidate(f),
@@ -175,7 +176,7 @@ if (isMain) {
   const attach = argv[0] === 'heavy' && (await import('./factory/heavy.ts')).heavyAttaches(argv.slice(1))
   const first = reapSlug === null || attach ? null : await reapFirst(argv, reapSlug)
   const admitted = admitArgs === null || attach ? null : await admitFirst(argv, admitArgs)
-  // 0.34.0 R-170: the fold riders (flags.ts takeRiderFlags); an attach runs none
+  // 0.34.0: the fold riders (flags.ts takeRiderFlags); an attach runs none
   const riderFirst = attach ? {} : await runRidersFirst(riders, argv, main)
   const { body, code } = argv[0] === 'heavy' ? await heavyCmd(argv.slice(1)) : argv[0] === 'heavy-job' ? await heavyJobCmd(argv.slice(1)) : argv[0] === 'gates' ? await gatesMain(argv.slice(1)) : argv[0] === 'goal-check' ? await goalCheckCmd(argv.slice(1)) : argv[0] === 'goal-check-job' ? await goalCheckJobCmd(argv.slice(1)) : await main(argv)
   Object.assign(body, riderFirst)

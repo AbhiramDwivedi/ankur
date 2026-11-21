@@ -357,7 +357,7 @@ export function takeLease(dir: string, name: string, opts: LeaseOpts = {}): { to
     if (o) {
       const seen = typeof o.refreshed === 'number' ? o.refreshed : o.since
       // on this host a live pid holds its lease whatever its age: the finisher blocks its own event loop in spawnSync while the
-      // acceptance test runs, so it cannot refresh (R-89); another host's lease is judged by age only
+      // acceptance test runs, so it cannot refresh; another host's lease is judged by age only
       stale = o.host === host ? pidDead(o.pid) : typeof seen !== 'number' || now() - seen > LEASE_STALE_MS
     } else {
       // createExclusive links a complete file, so an unreadable lease is damaged: judge it by the age of the file

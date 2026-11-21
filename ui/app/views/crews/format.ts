@@ -1,6 +1,9 @@
 // Pure helpers the floor views share: times in the viewer's zone, durations, token counts, and the crew
 // wording the page pins. No React, no window, no document.
-import type { Crew, CrewStuck, Member } from '../../store/types.ts'
+import type { Crew, CrewStuck, Member, RetroInfo } from '../../store/types.ts'
+import type { Glyph } from '../../components/ui/dot.tsx'
+import type { SegmentTone } from '../metrics/SegmentBar.tsx'
+import { agentStatus, crewStatus, type Status } from '../status/status.ts'
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -273,4 +276,110 @@ export function flaggedAt(s: CrewStuck): number | null {
 export function detailMinutes(detail: string | null): number | null {
   const m = /(\d+)/.exec(detail ?? '')
   return m ? Number(m[1]) : null
+}
+
+// ---- the Crews card: one line per crew, members and the retro --------------------------------------------
+
+export const NO_CREWS = 'No crews yet. They appear once the plan is approved.'
+
+type Goals = readonly { id: string; goal: string | null }[]
+
+const ASK_WORDS: Record<string, string> = { QUESTION: 'question', BLOCKED: 'blocked', PROPOSAL: 'proposal' }
+
+export interface CrewLineView {
+  glyph: Glyph
+  /** The one status line, always words: the glyph and the colour never carry the state alone. */
+  words: string
+  merged: boolean
+}
+
+/** A crew's glyph and status words. Dropped and merged read as themselves; stuck and failed give their reason. */
+export function crewLineView(c: Crew): CrewLineView {
+  if (c.status === 'dropped') return { glyph: 'plan', words: 'Dropped', merged: false }
+  if (c.status === 'merged') return { glyph: 'done', words: 'Merged', merged: true }
+  const status = crewStatus(c)
+  if (status === 'stuck' && c.stuck) {
+    const why = c.stuck.kind === 'idle-project-manager' ? `project manager idle ${c.stuck.minutes} min` : `${stalledRole(c)} stalled ${c.stuck.minutes} min`
+    return { glyph: 'ask', words: `Stuck: ${why}`, merged: false }
+  }
+  // A stall line with no kind makes a stalled member but no stuck record: the line still says Stuck, not the member's activity text.
+  const stalled = c.status === 'running' ? c.members.find((m) => m.state === 'stalled') : undefined
+  if (stalled) {
+    const min = detailMinutes(stalled.detail)
+    return { glyph: 'ask', words: `Stuck: ${stalledRole(c)} stalled${min === null ? '' : ` ${min} min`}`, merged: false }
+  }
+  // A QC report that says FAIL is on disk whatever the plan's status says (the crew may not have spawned a member yet): the line says it.
+  if (c.qc?.verdict === 'FAIL') return { glyph: 'fail', words: 'Failed: QC engineer said FAIL', merged: false }
+  if (status === 'waiting') {
+    const key = /^\s*(QUESTION|BLOCKED|PROPOSAL)\b/.exec(c.projectManager?.detail ?? '')?.[1] ?? ''
+    return { glyph: 'ask', words: `Waiting on you: ${ASK_WORDS[key] ?? 'a reply'}`, merged: false }
+  }
+  if (status === 'planned') return { glyph: 'plan', words: c.stage !== null && c.stage > 0 ? `Starts after stage ${c.stage - 1}` : 'Not started yet', merged: false }
+  return { glyph: 'run', words: c.latest?.text?.trim() || 'Working', merged: false }
+}
+
+const SEGMENT_OF: Record<Status, SegmentTone> = { done: 'ok', active: 'run', waiting: 'signal', stuck: 'signal', planned: 'border' }
+
+/** The crew's agents in display order: the project manager, then the rest as orderAgents sorts them. */
+export function crewAgents(c: Crew): Member[] {
+  const agents: Member[] = []
+  if (c.projectManager) agents.push(c.projectManager)
+  for (const m of c.members) if (!c.projectManager || m.name !== c.projectManager.name) agents.push(m)
+  return orderAgents(agents, c.projectManager)
+}
+
+/** One segment per step (agent), padded with planned ones up to the plan's estimate; `done` counts the finished ones. */
+export function crewSteps(c: Crew): { tones: SegmentTone[]; done: number; label: string } {
+  const agents = crewAgents(c)
+  const tones = agents.map((m): SegmentTone => (c.status === 'dropped' ? 'border' : SEGMENT_OF[agentStatus(m, c)]))
+  const finished = c.status === 'merged' || c.status === 'dropped'
+  const total = Math.max(agents.length, finished ? 0 : (c.estAgents ?? 0), 1)
+  while (tones.length < total) tones.push(c.status === 'merged' ? 'ok' : 'border')
+  const done = tones.filter((t) => t === 'ok').length
+  return { tones, done, label: `${done} of ${total} steps done` }
+}
+
+/** A member's one state word. A merged or dropped crew's members are all done, stalled ones included. */
+export function memberState(m: Member, c: Pick<Crew, 'status' | 'stuck'>): string {
+  if (c.status === 'merged') return 'Done'
+  if (c.status === 'dropped') return 'Dropped'
+  if (m.state === 'reported') return 'Done'
+  if (m.state === 'stalled') {
+    const min = detailMinutes(m.detail) ?? c.stuck?.minutes ?? null
+    return min !== null ? `Stalled ${min} min` : 'Stalled'
+  }
+  if (m.state === 'allowance-spent') return 'Allowance spent'
+  if (agentStatus(m, c) === 'waiting') return 'Waiting on you'
+  return m.state === 'spawned' && !m.detail && !m.task ? 'Starting' : 'Working'
+}
+
+/** A member's task line; a merged or dropped crew's stall minutes are not a task. */
+export function memberTask(m: Member, c: Pick<Crew, 'status' | 'goal' | 'projectManager'>, goals: Goals): string | null {
+  const done = c.status === 'merged' || c.status === 'dropped'
+  return taskLine(done && FAILED_STATES.has(m.state) ? { ...m, detail: null } : m, c, goals)
+}
+
+/** The model pip's token class: opus and sonnet have their own, any other model the neutral one. */
+export const pipClass = (model: string | null): string => (model && /opus/i.test(model) ? 'bg-opus' : model && /sonnet/i.test(model) ? 'bg-sonnet' : 'bg-border-strong')
+
+export const RETRO_STEPS: { key: keyof RetroInfo['steps']; label: string }[] = [
+  { key: 'extract', label: 'Extract' },
+  { key: 'judges', label: 'Judges' },
+  { key: 'triage', label: 'Triage' },
+  { key: 'fixGoal', label: 'Fix goal' },
+  { key: 'applied', label: 'Fixes applied' },
+]
+
+/** The retro's one line: failed first, then running, then done once every step is done or skipped. */
+export function retroLineView(r: RetroInfo): { glyph: Glyph; words: string; tones: SegmentTone[]; label: string } {
+  const steps = RETRO_STEPS.map((s) => ({ ...s, step: r.steps[s.key] }))
+  const failed = steps.find((s) => s.step.status === 'failed')
+  const running = steps.find((s) => s.step.status === 'running')
+  const done = steps.filter((s) => s.step.status === 'done' || s.step.status === 'skipped').length
+  const tones = steps.map((s): SegmentTone => (s.step.status === 'done' || s.step.status === 'skipped' ? 'ok' : s.step.status === 'running' ? 'run' : s.step.status === 'failed' ? 'fail' : 'border'))
+  const label = `${done} of ${steps.length} steps done`
+  if (failed) return { glyph: 'fail', words: `Failed: ${failed.label}`, tones, label }
+  if (running) return { glyph: 'run', words: `${running.label} running`, tones, label }
+  if (done === steps.length) return { glyph: 'done', words: 'Done', tones, label }
+  return { glyph: 'plan', words: 'Not started yet', tones, label }
 }

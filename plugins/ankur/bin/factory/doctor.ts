@@ -21,7 +21,7 @@ export function cmdDoctor(f: Flags): Obj {
     throw usage((e as Error).message)
   }
   const plan = loadPlan(dir)
-  const probes: { name: string; kind: string; pass: boolean; detail: string }[] = []
+  const probes: { name: string; kind: string; pass: boolean; detail: string; broken?: boolean }[] = []
   const allow: string[] = []
   const downloads: string[] = []
   const addOnce = (list: string[], v: unknown): void => {
@@ -32,9 +32,9 @@ export function cmdDoctor(f: Flags): Obj {
     for (const nd of c.needs) {
       if (!isObj(nd) || !isObj(nd.probe)) continue
       const r = runProbe(nd.probe, repo)
-      probes.push({ name: `${String(c.slug)}/${String(nd.id)}`, kind: String(nd.probe.kind), pass: r.pass, detail: r.detail })
+      probes.push({ name: `${String(c.slug)}/${String(nd.id)}`, kind: String(nd.probe.kind), pass: r.pass, detail: r.detail, ...(r.broken === true ? { broken: true } : {}) })
       if (Array.isArray(nd.allow)) for (const a of nd.allow) addOnce(allow, a)
-      if (!r.pass) addOnce(downloads, nd.download)
+      if (!r.pass && r.broken !== true) addOnce(downloads, nd.download)
     }
   }
   const known: { id: string; pass: boolean }[] = []
@@ -52,7 +52,9 @@ export function cmdDoctor(f: Flags): Obj {
   } catch (e) {
     probes.push({ name: 'config', kind: 'config', pass: false, detail: e instanceof CliError && typeof e.body.error === 'string' ? e.body.error : (e as Error).message })
   }
-  const failed = probes.filter((p) => !p.pass).map((p) => p.name)
+  // a probe whose command cannot start is broken, not a failed need: its own list, never a download
+  const broken = probes.filter((p) => p.broken === true).map((p) => p.name)
+  const failed = probes.filter((p) => !p.pass && p.broken !== true).map((p) => p.name)
   // contract-025 section 4: with a budget set, a model the roles use that no pricing key covers can't be priced, so every spend would hold
   const warnings: string[] = []
   if (isObj(cfg.budget)) {
@@ -61,7 +63,7 @@ export function cmdDoctor(f: Flags): Obj {
     // a pricing key is a model-id prefix; a role names its model by alias (opus, sonnet), so a key that holds the alias covers it
     for (const m of models) if (!keys.some((k) => m.startsWith(k) || k.includes(m))) warnings.push(`budget is set but pricing has no entry for the ${m} model (a key that is a prefix of its id); its spend can't be priced, so the budget holds`)
   }
-  const body = { ok: failed.length === 0, probes, passed: probes.filter((p) => p.pass).map((p) => p.name), failed, known, bundle: { allow, downloads, rulings }, ...(warnings.length > 0 ? { warnings } : {}) }
+  const body = { ok: failed.length === 0 && broken.length === 0, probes, passed: probes.filter((p) => p.pass).map((p) => p.name), failed, broken, known, bundle: { allow, downloads, rulings }, ...(warnings.length > 0 ? { warnings } : {}) }
   if (!body.ok) throw refuse(body)
   return body
 }

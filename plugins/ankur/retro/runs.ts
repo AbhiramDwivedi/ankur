@@ -1,4 +1,4 @@
-// The run-counting retro trigger (R-194): run end does the scripted counts only, and the full retro (judges, triage, fix
+// The run-counting retro trigger: run end does the scripted counts only, and the full retro (judges, triage, fix
 // goal) starts once FULL_RETRO_EVERY runs have finished since the last full retro, or when a counted run holds a RECURRED
 // line. `due` reads the run dirs under <git common dir>/truss/*/ and <git common dir>/ankur/*/ and prints no text of its // ankur-allow-truss
 // own: retro/cli.ts `due` wraps `dueOf`. Erasable TypeScript, Node standard library only (P19).

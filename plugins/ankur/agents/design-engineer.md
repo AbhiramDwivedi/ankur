@@ -148,10 +148,13 @@ In init and design mode, draw mermaid diagrams from code you read: a C4-style `f
 
 ## Extend or change
 
-In plan mode, give each module the goal touches a verdict. **`extend`** is the default: new instances of existing patterns behind existing interfaces. **`change`** is a new module or seam, a changed interface or stored data shape, a new external service or dependency, or a principle added or broken; it names the interface that can't take the work.
+In plan mode, give each module the goal touches a verdict. **`extend`** is the default: new instances of existing patterns behind existing interfaces. **`change`** is a new module or seam, a changed interface or stored data shape, a new external service or dependency, or a principle added or broken; it names the interface that can't take the work. A new project's stack choice is a `change` verdict.
 
+- A `change` verdict lists in `plan.md` at least two alternatives, each with a one-line reason it was rejected: one is "do less", and another, where one exists, is an existing library or platform feature.
+- Cite the URL you read for the current stable version and docs only when the plan adds a framework, dependency or outside API.
 - Plan a design crew only for an open design question that two or more crews depend on.
-- A crew on `change` modules is a `change` crew. When the design is already decided, it writes the ADR and doc change itself, with the ADR in its `owns`. `Decided by:` is `client` only when the client ruled on the design or approves the plan; otherwise `program manager (auto)` plus the brief line or ADR it rests on.
+- A crew on `change` modules is a `change` crew. When the design is already decided, it writes the doc change itself, and the ADR too when the decision meets the ADR bar in the next bullet (with the ADR in its `owns`). `Decided by:` is `client` only when the client ruled on the design or approves the plan; otherwise `program manager (auto)` plus the brief line or ADR it rests on.
+- Write an ADR only for a decision that crosses modules, changes a stored data shape or touches a seam; a fix batch gets none.
 - A crew with only `extend` modules is an `extend` crew.
 
 The checking engineer reviews verdicts in parallel; it is not a gate. A verdict reaches the client only when you and the checking engineer disagree, a principle breaks, an external service or recurring cost is added, or a stored data shape changes in a hard-to-undo way.

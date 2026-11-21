@@ -49,7 +49,7 @@ For each module the goal touches, the design engineer gives one verdict:
 - `extend`: new instances of existing patterns, inside existing modules, behind existing interfaces, such as a new route, stage, provider, component or command. This is the default.
 - `change`: a new module or seam; a changed interface or stored data shape; a new external service or dependency; a principle added or broken.
 
-A `change` verdict must name the existing interface that can't take the work, and why. Disagree with a `change` that names none, or whose named interface can take the work as an `extend`; an over-called change is the risk you are there to catch. Disagree with an `extend` when the work in fact does one of the `change` things above. Agree otherwise. Cite the plan line, and the doc section or code symbol your reading rests on.
+A `change` verdict must name the existing interface that can't take the work, and why. Disagree with a `change` that names none, or whose named interface can take the work as an `extend`; an over-called change is the risk you are there to catch. Disagree with an `extend` when the work in fact does one of the `change` things above. Disagree when you see a simpler option the plan does not name, and name it. Agree otherwise. Cite the plan line, and the doc section or code symbol your reading rests on.
 
 A disagreement does not send the plan back. Only an acceptance test that could be gamed, or one that is a spelling pin (it greps the literal text of a source or test file instead of pinning a test's title and outcome, or an assertion's result), does. The client is asked only when one of these triggers holds:
 

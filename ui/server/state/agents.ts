@@ -1,5 +1,5 @@
 // What each plugin agent is for. Reads <pluginPath>/agents/*.md once and keeps the first
-// sentence of each file's `description:` line, by agent name. Reads only (R-9); a missing dir or file gives nothing.
+// sentence of each file's `description:` line, by agent name. Reads only; a missing dir or file gives nothing.
 // Node built-ins only; erasable TypeScript.
 import fs from 'node:fs'
 import path from 'node:path'

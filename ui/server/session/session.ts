@@ -1,5 +1,5 @@
 // One Claude Code session. The only file that touches the Agent SDK.
-// Stores nothing: all state is in memory (R-13). No timeout anywhere.
+// Stores nothing: all state is in memory. No timeout anywhere.
 import { isObj, permissionCard, questionCard } from './cards.ts'
 import { createRegistry } from './registry.ts'
 import type { AnswerResult, Registry } from './registry.ts'
@@ -8,6 +8,7 @@ import type { Intent, QueueItem, SessionView } from './fold.ts'
 import { replyStep } from './reply.ts'
 import type { ReplyState } from './reply.ts'
 import { resolvePlugins } from './plugins.ts'
+import { spawn } from 'node:child_process'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -42,6 +43,8 @@ export interface Session extends SessionControl {
   view(): SessionView
   subscribe(fn: (v: SessionView) => void): () => void
   close(): Promise<void>
+  // The pid of the Claude Code process while it runs, else null. On POSIX it leads its own process group.
+  pid(): number | null
 }
 
 export function createSession(opts: {
@@ -86,6 +89,26 @@ export function createSession(opts: {
   let wake: (() => void) | undefined
   let query: { interrupt(): Promise<unknown> } | undefined
   let loop: Promise<void> = Promise.resolve()
+  let childPid: number | null = null
+
+  // The SDK's own spawn, with the child leading its own process group on POSIX (so a stop can end its whole tree)
+  // and no console window on Windows. Stderr is dropped, so an SDK exit error carries no stderr tail.
+  function spawnClaudeCode(o: { command: string; args: string[]; cwd?: string; env: NodeJS.ProcessEnv; signal: AbortSignal }) {
+    const child = spawn(o.command, o.args, {
+      cwd: o.cwd,
+      env: o.env,
+      signal: o.signal,
+      stdio: ['pipe', 'pipe', 'ignore'],
+      detached: process.platform !== 'win32',
+      windowsHide: true,
+    })
+    const pid = child.pid ?? null
+    childPid = pid
+    child.once('exit', () => {
+      if (childPid === pid) childPid = null
+    })
+    return child
+  }
 
   async function* input() {
     while (true) {
@@ -178,6 +201,7 @@ export function createSession(opts: {
           canUseTool: (toolName: string, toolInput: Record<string, unknown>, o: unknown) =>
             canUseTool(toolName, toolInput, o),
           hooks: { PreToolUse: [{ hooks: [async () => ({})] }] },
+          spawnClaudeCodeProcess: spawnClaudeCode,
         },
       } as any)
       query = q as any
@@ -223,6 +247,7 @@ export function createSession(opts: {
       }
       return res
     },
+    pid: () => childPid,
     async close() {
       if (closed) {
         await loop

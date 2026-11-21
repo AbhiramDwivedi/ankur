@@ -1,6 +1,6 @@
-// The shared status vocabulary (R-44). Pure rules, no React: every view that shows
+// The shared status vocabulary. Pure rules, no React: every view that shows
 // a status word reads it from here, so one state never carries two names.
-import type { Crew, Member, RunState } from '../../store/types.ts'
+import type { Crew, Member, RunState, WorkspaceStatus } from '../../store/types.ts'
 
 export type Status = 'active' | 'done' | 'waiting' | 'stuck' | 'planned'
 export type RunStatus = 'not-started' | 'working' | 'waiting' | 'finished'
@@ -18,6 +18,47 @@ export const RUN_STATUS_WORD: Record<RunStatus, string> = {
   working: 'Working',
   waiting: 'Waiting on you',
   finished: 'Finished',
+}
+
+/** The words of a workspace row in the rail. Working, waiting and finished are the banner's words. */
+export const WORKSPACE_STATUS_WORD: Record<WorkspaceStatus, string> = {
+  'not-started': 'No session yet',
+  idle: 'No session yet',
+  working: RUN_STATUS_WORD.working,
+  waiting: RUN_STATUS_WORD.waiting,
+  finished: RUN_STATUS_WORD.finished,
+  stopping: 'Stopping…',
+  stopped: 'Stopped, no session',
+  failed: 'Failed',
+}
+
+export const FAILED_REASON_WORDS = 6
+
+export interface WorkspaceLabelOpts {
+  /** The current stage of the run and how many there are; only Working shows it. */
+  stage?: { i: number; n: number } | null
+  /** Why the session ended on its own; only Failed shows it, cut to six words. */
+  reason?: string | null
+  /** The item's session flag: false makes waiting, idle and not-started all say "No session yet". */
+  session?: boolean
+  /** The link is lost: the word is the last one seen. */
+  stale?: boolean
+}
+
+/** True when the workspace has no session and its status is waiting, idle or not-started: the rail and the banner then say "No session yet". */
+export function noSessionWord(status: WorkspaceStatus, session: boolean | undefined): boolean {
+  return session === false && (status === 'waiting' || status === 'idle' || status === 'not-started')
+}
+
+/** The status text of a workspace row: its word, with the stage on Working, the reason on Failed, " (last seen)" when stale. */
+export function workspaceStatusLabel(status: WorkspaceStatus, opts: WorkspaceLabelOpts = {}): string {
+  let text = noSessionWord(status, opts.session) ? WORKSPACE_STATUS_WORD['not-started'] : WORKSPACE_STATUS_WORD[status]
+  if (status === 'working' && opts.stage) text += `, stage ${opts.stage.i} of ${opts.stage.n}`
+  if (status === 'failed') {
+    const words = (opts.reason ?? '').trim().split(/\s+/).filter(Boolean)
+    if (words.length > 0) text += `: ${words.slice(0, FAILED_REASON_WORDS).join(' ')}${words.length > FAILED_REASON_WORDS ? '…' : ''}`
+  }
+  return opts.stale ? `${text} (last seen)` : text
 }
 
 const ASKS = /^\s*(QUESTION|BLOCKED|PROPOSAL)\b/

@@ -20,7 +20,7 @@ export function RadioGroup({ className, look = 'dot', ...props }: RadioGroupProp
       <RadioGroupPrimitive.Root
         className={cn(
           look === 'segment'
-            ? 'inline-flex max-w-full items-center gap-0.5 self-start overflow-x-auto rounded-ctl bg-secondary p-0.5 no-scrollbar'
+            ? 'inline-flex max-w-full items-center gap-1 self-start overflow-x-auto rounded-ctl bg-secondary p-1 no-scrollbar'
             : 'grid min-w-0 gap-2',
           className,
         )}

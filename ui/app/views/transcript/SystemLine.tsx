@@ -1,4 +1,4 @@
-// A hand-off from the PM to a crew (R-40): a quiet centred line, not a bubble. The summary is never truncated.
+// A hand-off from the PM to a crew: a quiet centred line, not a bubble. The summary is never truncated.
 import { Workflow } from 'lucide-react'
 import type { FlowEntry } from '../../store/types.ts'
 import { hhmm } from '../rail/format.ts'

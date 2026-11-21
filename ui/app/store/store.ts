@@ -27,6 +27,8 @@ export interface StoreDeps {
   now?: () => number
   /** Schedules the re-open of a CLOSED source; defaults to setTimeout. */
   setTimer?: (fn: () => void, ms: number) => unknown
+  /** The stream to open; defaults to /api/events. A workspace store passes /api/workspaces/<id>/events. */
+  eventsUrl?: string
 }
 
 export interface Store {
@@ -119,7 +121,7 @@ export function createStore(deps: StoreDeps): Store {
   function connect(): void {
     // A re-open pending for the previous source is moot once a new source opens.
     cancelReopen()
-    const src = deps.open(EVENTS_URL)
+    const src = deps.open(deps.eventsUrl ?? EVENTS_URL)
     current = src
     const onMessage = (ev: { data: string }): void => {
       if (current !== src) return

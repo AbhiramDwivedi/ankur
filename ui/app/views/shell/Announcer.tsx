@@ -1,4 +1,4 @@
-// The one polite region that reads crew status changes (R-44). Always in the DOM, so the first message is heard.
+// The one polite region that reads crew status changes. Always in the DOM, so the first message is heard.
 // Silent on the first snapshot and on the first one after a reconnect.
 import { useEffect, useRef, useState } from 'react'
 import type { Connection, RunState } from '../../store/types.ts'

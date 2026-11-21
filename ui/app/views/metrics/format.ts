@@ -1,6 +1,7 @@
 // Formatters for Run metrics. Pure, no React.
-import type { RunState } from '../../store/types.ts'
-import { runStatus } from '../status/status.ts'
+import type { CostSnapshot, Member, RunState } from '../../store/types.ts'
+import { agentStatus, runStatus } from '../status/status.ts'
+import { crewAgents, modelKey } from '../crews/format.ts'
 import { goalGroups, goalLastMs, goalStartMs } from '../crews/goals.ts'
 
 const MIN = 60_000
@@ -95,9 +96,76 @@ export function costState(state: RunState): 'usage' | 'not-recorded' | 'none' {
   return 'none'
 }
 
-export const formatUsd = (n: number): string => USD.format(n)
+/** Dollars; null (an unpriced model, or a run with no approved plan) is an en dash, never $0.00. */
+export const formatUsd = (n: number | null): string => (n === null ? '–' : USD.format(n))
+
+/** A cost cell: the text, and the screen-reader note that says why a dash is there. */
+export function costCell(n: number | null): { text: string; sr: string | null } {
+  return n === null ? { text: formatUsd(null), sr: 'not priced' } : { text: formatUsd(n), sr: null }
+}
 
 export const formatCount = (n: number | null | undefined): string => (n == null ? '—' : NUM.format(n))
+
+/** Elapsed time in words for the header badge and the Usage cell: `53 min`, `3 h 05 min`, `2 d 4 h`. */
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / MIN))
+  if (total < 60) return `${total} min`
+  const hours = Math.floor(total / 60)
+  if (hours < 24) return `${hours} h ${String(total % 60).padStart(2, '0')} min`
+  return `${Math.floor(hours / 24)} d ${hours % 24} h`
+}
+
+export type { CostSnapshot }
+
+/** The state's cost block. With none (the run dir has no usage.jsonl), the session's own usage stands in: its dollars,
+ *  and its tokens per model with no per-model dollars. Null before the first answer or with neither. */
+export function costOf(state: RunState | null): CostSnapshot | null {
+  const block = state?.cost
+  if (block) return block
+  const usage = state?.session.usage
+  if (!usage) return null
+  const models = Object.entries(usage.models).map(([model, m]) => ({
+    model,
+    tokens: m.inputTokens + m.outputTokens + m.cacheReadInputTokens + m.cacheCreationInputTokens,
+    usd: null,
+  }))
+  const tokens = models.reduce((n, m) => n + m.tokens, 0)
+  return { run: { since: null, tokens, usd: usage.costUsd }, session: { tokens, usd: usage.costUsd }, crews: [], models, unpriced: [] }
+}
+
+/** Tokens in words: `1.92M` from 100,000 up, `12.3k` from 1,000, else the count. Null and 0 (nothing recorded) are a dash. */
+export function formatTokens(n: number | null | undefined): string {
+  if (n == null || n <= 0) return '—'
+  if (n >= 100_000) return `${(n / 1_000_000).toFixed(2)}M`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+/** Dollars for the Usage cell and the Spend table: a dash for null (an unpriced model, or no cost block), never $0.00. */
+export const formatDollars = (n: number | null | undefined): string => (n == null ? '—' : USD.format(n))
+
+/** Every agent of the run's crews: each crew's project manager, then its members. */
+export const runAgents = (state: RunState): Member[] => (state.run?.crews ?? []).flatMap((c) => crewAgents(c))
+
+export interface SpendRow {
+  model: string
+  agents: number
+  running: number
+  tokens: number
+  usd: number | null
+}
+
+/** One row per model of the cost block, with how many of the run's agents use that model and how many of them work now. */
+export function spendRows(state: RunState): SpendRow[] {
+  const cost = costOf(state)
+  if (cost === null) return []
+  // An agent waiting on the client is still running.
+  const pairs = (state.run?.crews ?? []).flatMap((c) => crewAgents(c).map((m) => ({ m, active: ['active', 'waiting'].includes(agentStatus(m, c)) })))
+  return cost.models.map((row) => {
+    const mine = pairs.filter((p) => modelKey(p.m.model) === modelKey(row.model))
+    return { model: row.model, agents: mine.length, running: mine.filter((p) => p.active).length, tokens: row.tokens, usd: row.usd }
+  })
+}
 
 /** hh:mm in the viewer's zone, or null for a stamp that does not parse. */
 export function clockOf(iso: string | null | undefined): string | null {

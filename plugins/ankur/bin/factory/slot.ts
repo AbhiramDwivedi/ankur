@@ -54,7 +54,7 @@ export function recordHeavyTime(dir: string, row: { label: string; slug: string;
     // a lost row only makes the next wait shorter
   }
 }
-// How long a command that holds a heavy slot may run (R-145): ANKUR_HEAVY_RUN_MS, else slotWaitMs(dir). Past it the heavy job stops the
+// How long a command that holds a heavy slot may run: ANKUR_HEAVY_RUN_MS, else slotWaitMs(dir). Past it the heavy job stops the
 // command's group; HEAVY_GRACE_MS later the slot's `until` deadline lets a waiter take the slot from a holder that never got that far.
 export const HEAVY_GRACE_MS = 15000
 export function runMsOf(dir: string, env: Record<string, string | undefined> = process.env): number {
@@ -66,7 +66,7 @@ export function runMsOf(dir: string, env: Record<string, string | undefined> = p
   const stopped = recentRows(dir).filter((r) => r.timedOut).map((r) => r.ms)
   return stopped.length === 0 ? slotWaitMs(dir) : Math.min(HEAVY_WAIT_MAX_MS, Math.max(slotWaitMs(dir), 2 * Math.max(...stopped)))
 }
-// The one sentence every report of a run-limit stop carries: the limit in force, the variable, and how to raise it (client condition on R-145).
+// The one sentence every report of a run-limit stop carries: the limit in force, the variable, and how to raise it (a client condition on the run limit).
 export function limitNote(ms: number): string {
   return `stopped after the run limit of ${ms} ms; set ANKUR_HEAVY_RUN_MS to a larger number of milliseconds to raise it`
 }

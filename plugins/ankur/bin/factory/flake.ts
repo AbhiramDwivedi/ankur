@@ -1,4 +1,4 @@
-// 0.33.0 item 4 (R-161): a flake costs a re-run, not a fix round. When the full suite fails, the failing test files named in its
+// 0.33.0 item 4: a flake costs a re-run, not a fix round. When the full suite fails, the failing test files named in its
 // node --test spec-reporter output are re-run once on the same head. A pass is logged as one `flake` event per flaked test (never
 // dropped); a failure, or output that names no file, is left to the caller to charge a fix round as before. Leaf: imports only
 // ../core.ts and ./log.ts, never factory.ts.

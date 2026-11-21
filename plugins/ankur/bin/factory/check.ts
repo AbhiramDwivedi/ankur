@@ -28,6 +28,23 @@ export const ENV_PATTERNS: RegExp[] = [
   /error while loading shared libraries: /, // the dynamic loader: a system library is missing
   /^mk[ds]?temp: mk[ds]?temp failed on .*Operation not permitted/, // a sandbox forbids the temp dir the host's mktemp picked
 ]
+// A command that cannot start: the shell found no such command, or a test runner names a project it does not have.
+// Kept apart from ENV_PATTERNS so a probe can tell "cannot start" from other environment failures.
+const CANNOT_START: RegExp[] = [
+  /: command not found\s*$/, // bash: `<name>: command not found`
+  /^command not found\b/, // a bare `command not found: <name>` (zsh) or `command not found` line
+  /\bProject\(s\) "[^"]*" not found/, // Playwright: --project names a project the config does not have
+]
+// The first line of output that says the command could not start, else a line for exit 126 or 127, else undefined.
+export function cannotStart(text: string, exit?: number): string | undefined {
+  for (const raw of text.split('\n')) {
+    const line = raw.trim()
+    const s = line.replace(/^error:\s*["']?/, '')
+    if (CANNOT_START.some((re) => { const x = re.exec(s); return x !== null && !/["'`]/.test(s.slice(0, x.index)) })) return line.length > 300 ? `${line.slice(0, 299)}…` : line
+  }
+  if (exit === 126 || exit === 127) return `the command could not start (exit ${exit})`
+  return undefined
+}
 // The first line of a failed check's output that names an environment failure, cut at 300 characters, or undefined. Besides
 // ENV_PATTERNS, node's `Cannot find package 'x' imported from <file>` (ERR_MODULE_NOT_FOUND) counts when the package.json
 // nearest to <file> declares x: the dependency is declared but not installed. An undeclared package is a code failure.
@@ -88,8 +105,15 @@ function failureBlocks(text: string): string[] {
 }
 // `env` only when env lines explain every failure: every failure block holds one, or no block is found and an env line is.
 // Otherwise the first env line, if any, is `envSeen` and the run is a code failure.
-export function envVerdict(text: string): { env?: string; envSeen?: string } {
+// A command that cannot start (cannotStart: exit 126 or 127, a `command not found` line, a missing runner project) is always `env`.
+export function envVerdict(text: string, exit?: number): { env?: string; envSeen?: string } {
+  // A specific line wins over the exit-code fallback, and an env line (a loader failure exits 127) wins over the fallback too.
   const first = envFailure(text)
+  const specific = cannotStart(text)
+  if (specific !== undefined) return { env: specific }
+  if (first !== undefined && (exit === 126 || exit === 127)) return { env: first }
+  const started = cannotStart(text, exit)
+  if (started !== undefined) return { env: started }
   if (first === undefined) return {}
   const blocks = failureBlocks(text)
   const explained = blocks.length === 0 || blocks.every((b) => envFailure(b) !== undefined)
@@ -169,17 +193,19 @@ export function bashRun(cwd: string, command: string, group?: { dir: string; lab
 // before merge). A targeted set runs outside the heavy slot; the full suite takes the slot for exactly its own run, then records
 // its time for slotWaitMs. A slot not free within heavyWaitMs comes back as `slot: {ran: false}`, which heavy reports as busy.
 // the files of --only (comma separated); a name with a character a shell would read is refused, never passed on
-function onlyFiles(f: Flags): string[] {
+// A path missing under cwd means the narrowed run could never pass: [] then, so the whole check runs and the record is not `only`.
+function onlyFiles(f: Flags, cwd: string): string[] {
   if (typeof f.only !== 'string' || f.only.trim() === '') return []
   const files = f.only.split(',').map((x) => x.trim()).filter((x) => x !== '')
   if (!files.every((n) => /^[A-Za-z0-9._:\/-]+$/.test(n) && !n.startsWith('-'))) throw usage('--only names a file with a character that is not allowed')
+  if (!files.every((n) => existsSync(path.resolve(cwd, n)))) return []
   return files
 }
 
 function checkTests(f: Flags, dir: string, slug: string, cwd: string): { exit: number; text: string; tests: Obj; slot?: Obj } {
   // 0.36.0 (F-20): --only <file,file> re-runs just those test files, the ones the last green check failed on. It is never a green
   // pass for the crew: cmdCheck marks its record `only`, and lastGreenHead skips such a record.
-  const only = onlyFiles(f)
+  const only = onlyFiles(f, cwd)
   if (only.length > 0) {
     const command = `node --test ${only.join(' ')}`
     const r = bashRun(cwd, command)
@@ -309,7 +335,7 @@ function suiteSteps(dir: string, slug: string, cwd: string, label: string, comma
   return { exit: 0, text }
 }
 
-// 0.33.0 item 4 (R-161): after a failed step, the failing files the output names are re-run once on the same head (bin/factory/flake.ts).
+// 0.33.0 item 4: after a failed step, the failing files the output names are re-run once on the same head (bin/factory/flake.ts).
 // A pass makes the step pass, with one flake event per flaked test, only when the named failures are the whole failure
 // (namedAreWholeFailure); otherwise, or on a failure, or when the output names no file, the first result comes back unchanged so the
 // caller charges a fix round as before. Never more than one re-run. A file name with a shell-special character is never re-run.
@@ -380,14 +406,9 @@ export function missingTestFiles(command: string, cwd: string, exists: (p: strin
   return out
 }
 
-export function cmdCheck(f: Flags): Obj {
-  const dir = dirOf(f)
-  const slug = need(f, 'slug')
-  const cwd = flat(need(f, 'cwd'))
-  const expect = need(f, 'expect')
-  if (expect !== 'red' && expect !== 'green') throw usage('--expect must be red or green')
-  const crew = loadPlan(dir).crews.find((c: Obj) => isObj(c) && c.slug === slug)
-  if (crew === undefined) throw usage(`no crew ${slug} in the plan`)
+// The crew's acceptance command as cmdCheck runs it: `acceptanceTest` as resolved, `command` after a trailing whole-suite step is cut,
+// `suiteOnly` when nothing but the suite is left. Pure: reads the goal file only. Throws the refusal or usage error cmdCheck throws.
+export function acceptanceFor(dir: string, slug: string, crew: Obj): { acceptanceTest: string; command: string; suiteOnly: boolean } {
   // the goal file is the one home of the acceptance command: its `## Acceptance test` fenced block wins; plan.json's acceptanceTest
   // is the fallback only when the goal file has no such section, and a malformed section is refused, never guessed at
   const goalFile = `${dir}/goals/${slug}.md`
@@ -401,6 +422,18 @@ export function cmdCheck(f: Flags): Obj {
   const cut = stripBlanketSuite(acceptanceTest)
   const suiteOnly = cut.blanket && cut.command.trim() === ''
   const command = cut.blanket && !suiteOnly ? cut.command : acceptanceTest
+  return { acceptanceTest, command, suiteOnly }
+}
+
+export function cmdCheck(f: Flags): Obj {
+  const dir = dirOf(f)
+  const slug = need(f, 'slug')
+  const cwd = flat(need(f, 'cwd'))
+  const expect = need(f, 'expect')
+  if (expect !== 'red' && expect !== 'green') throw usage('--expect must be red or green')
+  const crew = loadPlan(dir).crews.find((c: Obj) => isObj(c) && c.slug === slug)
+  if (crew === undefined) throw usage(`no crew ${slug} in the plan`)
+  const { command, suiteOnly } = acceptanceFor(dir, slug, crew)
   // a failed install goes into the check text, so the env catalog sees it
   const installs = expect === 'green' ? installMissingDeps(cwd).filter((i) => i.status !== 0) : []
   // 0.37.1: node 26 exits 0 for a missing named file when other named files pass; a missing file is a failure, red or green.
@@ -432,11 +465,11 @@ export function cmdCheck(f: Flags): Obj {
   const n = (used.length === 0 ? 0 : Math.max(...used)) + 1
   // a failing run whose env lines explain every failure carries `env`: never a red, and no fix builder for a green. One whose
   // env lines leave a code failure unexplained carries `envSeen` instead and counts as red.
-  const { env, envSeen } = exit === 0 ? {} : envVerdict(text)
+  const { env, envSeen } = exit === 0 ? {} : envVerdict(text, exit)
   const envKeys = { ...(env === undefined ? {} : { env }), ...(envSeen === undefined ? {} : { envSeen }) }
   const known = exit === 0 ? [] : catalogHits(text)
   const record = `${dir}/checks/${slug}-${n}.json`
-  writeFileSync(record, JSON.stringify({ command, expect, exit, head, tail, ...(expect === 'green' && onlyFiles(f).length > 0 ? { only: onlyFiles(f) } : {}), ...(tests === undefined ? {} : { tests }), ...envKeys, ...(known.length === 0 ? {} : { catalog: known }) }) + '\n', { flag: 'wx' })
+  writeFileSync(record, JSON.stringify({ command, expect, exit, head, tail, ...(expect === 'green' && onlyFiles(f, cwd).length > 0 ? { only: onlyFiles(f, cwd) } : {}), ...(tests === undefined ? {} : { tests }), ...envKeys, ...(known.length === 0 ? {} : { catalog: known }) }) + '\n', { flag: 'wx' })
   const ok = expect === 'red' ? exit !== 0 && env === undefined : exit === 0
   const since = ok && expect === 'green' ? testsSinceOf(cwd, f) : {}
   const body = { ok, exit, head, tail, record, ...(tests === undefined ? {} : { tests }), ...envKeys, ...(known.length === 0 ? {} : { catalog: known }), ...(ok && expect === 'green' ? { sourceChanges: sourceChangesOf(cwd, f) } : {}), ...(since.list === undefined ? {} : { testsSince: since.list }), ...(since.unknown === undefined ? {} : { testsUnknown: since.unknown }) }
@@ -517,7 +550,8 @@ function catalogHits(text: string): { id: string; fix: string; line: string }[] 
 }
 
 // Probes every crew need and every catalog probe on the host; writes nothing.
-export function runProbe(probe: Obj, repo: string): { pass: boolean; detail: string } {
+// `broken`: the probe command itself cannot start (cannotStart), so it says nothing about the need.
+export function runProbe(probe: Obj, repo: string): { pass: boolean; detail: string; broken?: boolean } {
   if (probe.kind === 'file') {
     const p = String(probe.path)
     return existsSync(path.resolve(repo, p)) ? { pass: true, detail: '' } : { pass: false, detail: p }
@@ -528,5 +562,7 @@ export function runProbe(probe: Obj, repo: string): { pass: boolean; detail: str
   const first = `${r.stdout ?? ''}\n${r.stderr ?? ''}`.split('\n').map((l) => l.trim()).find((l) => l !== '')
   const why = r.error !== undefined ? r.error.message : r.signal ? `killed by ${r.signal}` : `exit ${r.status}`
   const detail = first ?? why
+  const broken = cannotStart(`${r.stdout ?? ''}\n${r.stderr ?? ''}`, r.status ?? undefined)
+  if (broken !== undefined) return { pass: false, broken: true, detail: broken.length > 300 ? `${broken.slice(0, 299)}…` : broken }
   return { pass: false, detail: detail.length > 300 ? `${detail.slice(0, 299)}…` : detail }
 }

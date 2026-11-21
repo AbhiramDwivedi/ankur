@@ -3,7 +3,8 @@
 // says, beside the buttons, whether it was sent.
 import * as React from 'react'
 import type { Crew, CrewStuck, PostResult } from '../../store/types.ts'
-import { postMessage } from '../../store/api.ts'
+import { postWorkspaceMessage } from '../../store/api.ts'
+import { pageWorkspaces } from '../../store/workspaces.ts'
 import { buttonVariants } from '../../components/ui/button.tsx'
 import { flaggedAt, hhmmAt, stalledAgent, stalledRole } from './format.ts'
 
@@ -67,7 +68,7 @@ export function StuckCard({ crew, stuck, now }: StuckCardProps) {
   const send = (action: Action) => {
     if (busy) return
     setSent({ action, phase: 'sending' })
-    void postMessage(stuckMessage(crew, stuck, action)).then((r) => {
+    void postWorkspaceMessage(pageWorkspaces().getView().id ?? '', stuckMessage(crew, stuck, action)).then((r) => {
       if (r.error === null) setSent({ action, phase: 'sent', at: Date.now() })
       else setSent({ action, phase: 'failed', reason: reasonWords(r) })
     })
@@ -77,7 +78,7 @@ export function StuckCard({ crew, stuck, now }: StuckCardProps) {
 
   return (
     <div className="mt-3 rounded-card border border-fail/40 bg-fail-soft p-3">
-      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-meta">
+      <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2 text-meta">
         <dt className="font-semibold text-fail-text">Why</dt>
         <dd className="min-w-0 break-words text-fg">
           {idle ? `The project manager has sent nothing for ${stuck.minutes} min.` : `${stalledAgent(crew)} has sent nothing for ${stuck.minutes} min.`}

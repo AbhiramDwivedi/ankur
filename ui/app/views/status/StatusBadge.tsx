@@ -1,4 +1,4 @@
-// The one word-plus-icon status every view uses (R-44). The icon and the word sit in
+// The one word-plus-icon status every view uses. The icon and the word sit in
 // the same element, so colour is never the only cue. Active's icon is a LivePing-style dot drawn as an
 // svg, so it reads as a drawing like the others; reduced motion nulls its halo and leaves a static ring.
 import { CircleCheck, CircleDashed, Hand, TriangleAlert } from 'lucide-react'
@@ -17,7 +17,7 @@ const ICON_CLASS = 'size-3.5 shrink-0'
 export function ActiveIcon() {
   return (
     <span aria-hidden="true" className="relative inline-flex size-3.5 shrink-0 items-center justify-center">
-      <span className="absolute inset-0.5 rounded-full bg-brand opacity-40 motion-safe:animate-ping-dot" />
+      <span className="absolute inset-0.5 rounded-full bg-brand opacity-40" />
       <svg viewBox="0 0 14 14" className="relative size-3.5 text-brand" fill="none">
         <circle cx="7" cy="7" r="3" fill="currentColor" />
         <circle cx="7" cy="7" r="5.5" stroke="currentColor" strokeWidth="1" />

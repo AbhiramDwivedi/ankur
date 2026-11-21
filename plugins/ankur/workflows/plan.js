@@ -125,6 +125,7 @@ function poPrompt(judge, a) {
     'Plan review:',
     '',
     "Review this plan's acceptance criteria as the product owner. Flag any that only prove the code runs: no representative or realistic data, no automated grader or eval for AI or LLM output, no check a user would recognise, a requirement with no acceptance test.",
+    'As advice only, also flag a crew that overlaps an existing feature and two requirements that contradict each other, each on an unnumbered `Advice: <what>` line; advice alone is not a reason to REVISE, and the plan is not sent back for it.',
     '',
     `Requirements: ${F.repo}/docs/requirements.md (read it when it exists; every numbered requirement needs an acceptance test)`,
     `Goal files: ${F.dir}/goals/<crew slug>.md (written once the plan is approved; until then the crew goals and acceptance tests are in the plan below)`,
@@ -183,14 +184,15 @@ function reviseNote(first, findings) {
   ].join('\n')
 }
 
-// One review: { verdict: 'ACCEPT' | 'REVISE' | 'UNCLEAR', findings: ['1. ...'] }.
+// One review: { verdict: 'ACCEPT' | 'REVISE' | 'UNCLEAR', advice: ['<what>'], findings: ['1. ...'] }.
 async function reviewOnce(judge, label, a) {
   const text = await spawn('checker', label, poPrompt(judge, a), { judge })
   if (text == null) throw new Error(`${label} returned nothing`)
   const first = linesOf(text, /^PO:/)[0] || ''
   const verdict = /^PO:\s*ACCEPT\b/i.test(first) ? 'ACCEPT' : /^PO:\s*REVISE\b/i.test(first) ? 'REVISE' : 'UNCLEAR'
   const findings = linesOf(text, /^\d+\.\s/)
-  return { verdict, findings: verdict === 'UNCLEAR' && !findings.length ? ['(the product-owner review had no `PO: ACCEPT` or `PO: REVISE` line: ' + String(typeof text === 'string' ? text : JSON.stringify(text)).slice(0, 200).replace(/\s+/g, ' ') + ')'] : findings }
+  const advice = linesOf(text, /^Advice:/i).map((l) => l.replace(/^Advice:\s*/i, '')).filter(Boolean)
+  return { verdict, advice, findings: verdict === 'UNCLEAR' && !findings.length ? ['(the product-owner review had no `PO: ACCEPT` or `PO: REVISE` line: ' + String(typeof text === 'string' ? text : JSON.stringify(text)).slice(0, 200).replace(/\s+/g, ' ') + ')'] : findings }
 }
 
 const fix = F.fix === true
@@ -275,7 +277,7 @@ if (disagrees()) {
       recheck = { ran: false, reason: 'the revised plan kept the first plan\'s verdict lines and crew list' }
     }
   }
-  productOwner = { judge: judge.source, verdict: r.verdict, revised, open: r.verdict === 'ACCEPT' ? [] : r.findings }
+  productOwner = { judge: judge.source, verdict: r.verdict, revised, advice: r.advice, open: r.verdict === 'ACCEPT' ? [] : r.findings }
 }
 const personaDrafts = draftsOf(a.report).map((d) => d.name)
 

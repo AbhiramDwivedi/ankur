@@ -145,7 +145,7 @@ export function reportsOf(dir: string, slug: string): QcFile[] {
 // The k of the crew's newest logged re-plan, decision line `re-planned: <slug> from qc-<k>`, or undefined when none.
 export function replannedFrom(log: string, slug: string): number | undefined {
   let k: number | undefined
-  for (const m of log.matchAll(/^- [^|]*\|\s*re-planned: ([A-Za-z0-9._-]+) from qc-(\d+)\b/gm)) if (m[1] === slug) k = Number(m[2])
+  for (const m of log.matchAll(/^- [^|]*\|\s*(?:\[[A-Za-z0-9._-]+\] )?re-planned: ([A-Za-z0-9._-]+) from qc-(\d+)\b/gm)) if (m[1] === slug) k = Number(m[2])
   return k
 }
 // The crew's QC files that count toward its spend: a logged re-plan starts a fresh count, so only -qc-<k> and later count.
@@ -231,7 +231,7 @@ export function promptTask(transcript: string): string | undefined {
   return undefined
 }
 
-// The find-run command (R-141): a new PM session lists the runs an earlier PM session left unfinished. It scans one
+// The find-run command: a new PM session lists the runs an earlier PM session left unfinished. It scans one
 // level of `<git common dir>/ankur/*/plan.json`; there is no pointer file. A run is listed when its plan is approved and at
 // least one crew is neither merged nor dropped.
 const SAFE = /^[A-Za-z0-9._-]+$/

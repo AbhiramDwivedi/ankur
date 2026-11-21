@@ -1,4 +1,4 @@
-// The PM's message text as safe markdown (R-45): marked's lexer turned into React elements, so nothing is ever
+// The PM's message text as safe markdown: marked's lexer turned into React elements, so nothing is ever
 // written as HTML. Raw HTML shows as the text it is, images as their alt words, links only for http(s) and
 // always with rel="noopener noreferrer". Styled with classes only, so the CSP holds (no inline styles).
 import { Fragment, type ReactNode } from "react";
@@ -59,14 +59,14 @@ function block(tokens: Token[], key = ""): ReactNode[] {
       case "space":
         return;
       case "paragraph":
-        out.push(<p key={k} className="my-1.5 first:mt-0 last:mb-0">{inline((t as Tokens.Paragraph).tokens, k)}</p>);
+        out.push(<p key={k} className="my-2 first:mt-0 last:mb-0">{inline((t as Tokens.Paragraph).tokens, k)}</p>);
         return;
       case "heading":
-        out.push(<p key={k} className="my-1.5 font-semibold first:mt-0 last:mb-0">{inline((t as Tokens.Heading).tokens, k)}</p>);
+        out.push(<p key={k} className="my-2 font-semibold first:mt-0 last:mb-0">{inline((t as Tokens.Heading).tokens, k)}</p>);
         return;
       case "code":
         out.push(
-          <pre key={k} tabIndex={0} className="my-1.5 max-w-full overflow-x-auto rounded-ctl bg-sunken p-2 font-mono text-meta whitespace-pre [overflow-wrap:normal]">
+          <pre key={k} tabIndex={0} className="my-2 max-w-full overflow-x-auto rounded-ctl bg-sunken p-2 font-mono text-meta whitespace-pre [overflow-wrap:normal]">
             {(t as Tokens.Code).text}
           </pre>,
         );
@@ -75,9 +75,9 @@ function block(tokens: Token[], key = ""): ReactNode[] {
         const l = t as Tokens.List;
         const Tag = l.ordered ? "ol" : "ul";
         out.push(
-          <Tag key={k} className={`my-1.5 pl-5 ${l.ordered ? "list-decimal" : "list-disc"}`}>
+          <Tag key={k} className={`my-2 pl-5 ${l.ordered ? "list-decimal" : "list-disc"}`}>
             {l.items.map((it, j) => (
-              <li key={j} className="my-0.5">{block(it.tokens, `${k}.${j}.`)}</li>
+              <li key={j} className="my-1">{block(it.tokens, `${k}.${j}.`)}</li>
             ))}
           </Tag>,
         );
@@ -85,7 +85,7 @@ function block(tokens: Token[], key = ""): ReactNode[] {
       }
       case "blockquote":
         out.push(
-          <blockquote key={k} className="my-1.5 border-l-2 border-border-strong pl-3 text-muted">
+          <blockquote key={k} className="my-2 border-l-2 border-border-strong pl-3 text-muted">
             {block((t as Tokens.Blockquote).tokens, k)}
           </blockquote>,
         );
@@ -101,7 +101,7 @@ function block(tokens: Token[], key = ""): ReactNode[] {
       }
       default:
         // html, table and anything else: the source as plain text, so nothing is lost and nothing is HTML.
-        out.push(<p key={k} className="my-1.5 whitespace-pre-wrap first:mt-0 last:mb-0">{t.raw.trim()}</p>);
+        out.push(<p key={k} className="my-2 whitespace-pre-wrap first:mt-0 last:mb-0">{t.raw.trim()}</p>);
     }
   });
   return out;

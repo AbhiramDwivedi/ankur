@@ -43,19 +43,23 @@ export function FollowUps({ state }: FollowUpsProps) {
   const titleId = useId()
   const rows = rowsOf(state)
   return (
-    <section aria-labelledby={titleId} className="flex min-w-0 flex-col gap-1">
-      <h3 id={titleId} className="text-meta font-semibold text-fg">
-        Follow-ups
-      </h3>
-      {rows.length === 0 ? (
-        <p className="text-meta text-muted">Nothing sent yet.</p>
-      ) : (
-        <ul className="flex min-w-0 flex-col divide-y divide-border">
-          {rows.map((r) => (
-            <FollowUpRow key={r.key} text={r.text} intent={r.intent} at={r.at} queued={r.queued} />
-          ))}
-        </ul>
-      )}
+    <section aria-labelledby={titleId} className="min-w-0">
+      {/* Collapsed to one row; Enter or Space on the summary opens the list. */}
+      <details className="group min-w-0">
+        <summary className="flex min-h-6 cursor-pointer items-center gap-2 text-meta text-muted focus-visible:outline-2 focus-visible:outline-(--focus)">
+          <h3 id={titleId} className="text-meta font-semibold text-fg">
+            Follow-ups
+          </h3>
+          <span>{rows.length === 0 ? 'Nothing sent yet.' : `${rows.length} sent`}</span>
+        </summary>
+        {rows.length > 0 && (
+          <ul tabIndex={0} aria-label="Sent follow-ups" className="mt-1 flex max-h-14 min-w-0 flex-col divide-y divide-border overflow-y-auto">
+            {rows.map((r) => (
+              <FollowUpRow key={r.key} text={r.text} intent={r.intent} at={r.at} queued={r.queued} />
+            ))}
+          </ul>
+        )}
+      </details>
     </section>
   )
 }

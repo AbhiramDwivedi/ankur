@@ -44,9 +44,9 @@ function holdOf(dir: string, repo: string, plan: Obj, slug: string, command: str
   let escalateError: string | undefined
   let clientNote = ''
   try {
-    const esc = escalate(repo, dir, { kind: 'budget', title: `budget: ${v.why}`.slice(0, 200), detail: `${v.why}\nscope ${v.scope}, spent ${v.spentUsd === null ? 'unknown' : `${v.spentUsd} USD`}, limit ${v.limitUsd} USD; held at ${command} of crew ${slug}`, crews: [slug], ref: typeof (v as Obj).ref === 'string' && (v as Obj).ref !== '' ? String((v as Obj).ref) : `budget:${sid}:${v.scope}:${v.scope === 'run' ? 'run' : slug}`, blocking: true })
+    const esc = escalate(repo, dir, { kind: 'budget', title: `budget: ${v.why}`.slice(0, 200), detail: `${v.why}\nscope ${v.scope}, spent ${v.spentUsd === null ? 'unknown' : `${v.spentUsd} USD`}, limit ${v.limitUsd} USD; held at ${command} of crew ${slug}`, crews: [slug], ref: typeof (v as Obj).ref === 'string' && (v as Obj).ref !== '' ? String((v as Obj).ref) : `budget:${sid}:${v.scope}:${v.scope === 'run' ? 'run' : slug}`, blocking: true, risk: `Spent ${v.spentUsd === null ? 'unknown' : v.spentUsd} USD of the ${v.limitUsd} USD limit; to go on, type the word raise and the extra dollars to allow after the code; the limit rises by that amount` })
     // the one-time code exists only in this return value (the inbox keeps its hash); with no notify command nothing else delivers it, so the held entry carries it for the PM to relay
-    if (!esc.deduped && esc.code !== '' && esc.notified !== true) clientNote = `; client approval needed: ${esc.id} code ${esc.code} (relay to the client, who types /ankur:inbox approve ${esc.id} ${esc.code} raise <usd>)`
+    if (!esc.deduped && esc.code !== '' && esc.notified !== true) clientNote = `\n${esc.message}`
   } catch (e) {
     escalateError = (e instanceof Error ? e.message : String(e)).slice(0, 200)
   }

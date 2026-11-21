@@ -355,6 +355,10 @@ export function createReducer(): Reducer {
       goals: plan === null
         ? []
         : [{ id: 'run', goal: plan.goal, approval: plan.approval, approvedAt: plan.approvedAt }, ...plan.goals.map((g) => ({ ...g }))],
+      // the newest message of each (from, to) pair, oldest first (the conversation region of the page)
+      messages: [...pairs.values()]
+        .sort((a, b) => timeOf(a.ts) - timeOf(b.ts) || a.seq - b.seq)
+        .map((p) => ({ ts: p.ts, from: p.from, to: p.to, summary: p.summary })),
       skipped: skipped.map((s) => ({ ...s })),
     }
   }

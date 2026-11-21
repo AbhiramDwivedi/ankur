@@ -82,21 +82,21 @@ The shape, from a project that asked for CSV export:
 
 Kept by ankur's client brief. Ids are never reused.
 
-## R-1: Owners can export their invoices as CSV
+## R-1: Owners can export their invoices as CSV <!-- ankur-allow-rid -->
 Status: open
 Kind: functional
 Added: 2026-10-29T19:42:00Z | add invoice export
 Source: client
 Example: Given an account with 3 invoices, when the client clicks Export, then a CSV with 3 rows downloads.
 
-## R-2: The export finishes quickly for large accounts
+## R-2: The export finishes quickly for large accounts <!-- ankur-allow-rid -->
 Status: open
 Kind: nfr
 Measure: p95 under 5 s at 10,000 invoices
 Added: 2026-10-29T19:42:00Z | add invoice export
 Source: default
 
-## R-3: Exports hold only the signed-in owner's data
+## R-3: Exports hold only the signed-in owner's data <!-- ankur-allow-rid -->
 Status: open
 Kind: constraint
 Added: 2026-10-29T19:42:00Z | add invoice export
@@ -110,7 +110,7 @@ Source: client
 
 The file is committed, so it holds no names, emails, user paths or private infrastructure. Describe hosting and integrations by type, and rewrite a client answer that names one by type before you write the requirement.
 
-Run `node <plugin>/brief/cli.ts check <requirements path>` and fix the file until it prints `OK:`. Each error line is `ERROR: <text>`, for example `ERROR: R-2: nfr needs a Measure with a number`.
+Run `node <plugin>/brief/cli.ts check <requirements path>` and fix the file until it prints `OK:`. Each error line is `ERROR: <text>`, for example `ERROR: R-2: nfr needs a Measure with a number` <!-- ankur-allow-rid -->.
 
 ## Commit requirements.md
 
@@ -130,7 +130,7 @@ Commit the file alone on the target branch: `git switch <target>` if needed, `gi
 - `small` → one `functional` requirement with `Source: goal`, from your goal sentence.
 - `standard` → start the fact-finder as in "Find the facts first". Branches the facts answer get `by: "fact"`. Never call `AskUserQuestion`; the hook refuses it while the run is unattended. Run `remaining` and give every branch it prints `by: "default"` with the recommended answer as its note, plus a non-blocking `client-question`: `factory escalate --kind client-question --title-file <p> --ref brief:<sid>:<branch> --repo <repo> --dir <ankur dir>`, without `--blocking`. `<sid>` is the session id, `<branch>` is the branch id, and `<p>` is a file in `<ankur dir>` that holds the branch's `Ask` from `branches.md`. Each default becomes a requirement with `Source: default`, and the crews go on building against it while the question waits in the inbox.
 
-**Commit.** Commit `requirements.md` as in "Commit requirements.md", and log one line in `decisions.md` that names each default and the escalation it raised: `Defaults filled: R-<n> (<branch id>, E-<id>), ...`.
+**Commit.** Commit `requirements.md` as in "Commit requirements.md", and log one line in `decisions.md` that names each default and the escalation it raised: `Defaults filled: R-<n> (<branch id>, <item name, or E-<id> for an older item>), ...`.
 
 ## Greenfield
 

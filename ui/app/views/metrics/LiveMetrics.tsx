@@ -64,7 +64,7 @@ export function LiveMetrics({ state, now }: LiveMetricsProps) {
   const live = state?.session.usage?.live
   const series = useStamps(live?.at, live?.totalTokens, now)
 
-  // The old bar keeps its sunken tiles; the page's tiles (RunMetrics) are bordered surface tiles.
+  // The old bar keeps its sunken tiles.
   const OLD_TILE = 'border-0 bg-sunken px-3.5 py-3 shadow-none'
   if (state === null) return <Skeleton className="h-43 w-full rounded-panel" />
   const run = state.run

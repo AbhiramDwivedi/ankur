@@ -10,36 +10,36 @@ export const DENY_HINT = 'Sends: Not approved.'
 
 interface DecisionButtonProps {
   kind: 'allow' | 'deny'
-  hero: boolean
-  /** The filled look: only Approve, and only while the reply box is empty. */
+  /** The main look: only Approve, and only while the reply box is empty. */
   primary: boolean
-  busy: boolean
+  /** This is the button pressed and its POST is under way. */
+  pending: boolean
+  /** Another button of the ask is under way. */
   disabled: boolean
   onPress: () => void
 }
 
-export function DecisionButton({ kind, hero, primary, busy, disabled, onPress }: DecisionButtonProps) {
+export function DecisionButton({ kind, primary, pending, disabled, onPress }: DecisionButtonProps) {
   const allow = kind === 'allow'
-  const variant = primary ? (hero ? 'on-move' : 'primary') : hero ? 'ghost' : 'secondary'
-  const quiet = !primary && hero ? 'border border-move-line text-move-fg hover:bg-move-fg/10 hover:text-move-fg' : undefined
   const line: ReactNode = (
     <span className="flex min-w-0 flex-col items-start text-left">
       <span>{allow ? 'Approve' : 'Deny'}</span>{' '}
-      <span className={cn('text-micro font-normal whitespace-normal', hero ? (primary ? 'text-move' : 'text-move-muted') : primary ? 'text-primary-foreground' : 'text-muted')}>
+      <span className={cn('text-micro font-normal whitespace-normal', primary ? 'text-move' : 'text-move-muted')}>
         {allow ? APPROVE_HINT : DENY_HINT}
       </span>
     </span>
   )
   return (
     <Button
-      variant={variant}
-      className={cn('h-auto min-h-10 py-2 transition-none max-sm:w-full max-sm:justify-start pointer-coarse:min-h-11', quiet)}
-      busy={busy}
+      variant={primary ? 'on-move' : 'move'}
+      className="h-auto min-h-9 py-2 max-sm:w-full max-sm:justify-start"
+      pending={pending}
       disabled={disabled}
+      data-main={primary ? 'true' : undefined}
       icon={allow ? <Check aria-hidden="true" /> : <X aria-hidden="true" />}
       onClick={onPress}
     >
-      {busy ? 'Sending…' : line}
+      {pending ? 'Sending…' : line}
     </Button>
   )
 }

@@ -194,8 +194,27 @@ export function cmdOwnsCheck(f: Flags): Obj {
   const outside = files.filter((file) => !owns.some((g) => owned(file, g)) && !allowed.has(file))
   // the files the exemption let through: changed, outside the crew's owns, and exempt (sorted, so the report is stable)
   const exempt = files.filter((file) => !owns.some((g) => owned(file, g)) && allowed.has(file)).sort()
-  if (outside.length > 0) throw refuse({ ok: false, outside, exempt })
-  return { ok: true, exempt }
+  if (outside.length === 0) return { ok: true, exempt } // `joined` is reported only when the check joined a file
+  // The auto-join. Ordering, kept minimal: the join runs only after `outside` is computed and only when EVERY file in it can join,
+  // so a check that would refuse for any other file (a product file, a modified file, a file another crew owns) refuses
+  // exactly as before and changes nothing in plan.json. A file joins when the crew diff adds it (absent at the base), isTestPath
+  // or a `testGlobs` glob calls it a test, no other crew's owns covers it, and its name holds no glob character (the join adds the
+  // file name as an owns glob, which such a name would not match literally). The write is cmdOwnsExtend's: plan lock, added once.
+  const added = new Set(gitOrFail(c.wt, ['-c', 'core.quotepath=off', 'diff', '--no-renames', '--diff-filter=A', '--name-only', `${baseOf(c.wt, c.target)}...HEAD`]).split('\n').filter(Boolean))
+  let globs: string[] = []
+  try {
+    const g = configOf(c.repo).testGlobs
+    globs = Array.isArray(g) ? g.filter((x: unknown): x is string => typeof x === 'string' && x !== '') : []
+  } catch {
+    globs = []
+  }
+  const others = loadPlan(c.dir).crews.filter((x: Obj) => isObj(x) && x.slug !== c.slug)
+    .flatMap((x: Obj) => Array.isArray(x.owns) ? x.owns.filter((g: unknown): g is string => typeof g === 'string') : [])
+  const joinable = (file: string): boolean =>
+    added.has(file) && !/[*?[\]{}()!\\]/.test(file) && (isTestPath(file) || globs.some((g) => path.matchesGlob(file, g))) && !others.some((g) => owned(file, g))
+  if (!outside.every(joinable)) throw refuse({ ok: false, outside, exempt })
+  for (const file of outside) cmdOwnsExtend({ dir: c.dir, slug: c.slug, glob: file, reason: 'joined: a new test file the crew added that no crew owns' })
+  return { ok: true, exempt, joined: [...outside].sort() }
 }
 
 // The doc files any crew commit may change outside the crew's owns. Each crew owns the
@@ -206,7 +225,8 @@ export function cmdOwnsCheck(f: Flags): Obj {
 // a file under the ADR directory or the knowledge dir; never another .md, a README or a changelog), or it is a
 // prompt file (skills/**/SKILL.md, .claude/skills/**, agents/*.md and .claude/agents/*.md, the rules dir, the agents index, the
 // product-decisions file) that only the crew's knowledge commit changed and that is no judge (an agent whose name says QC,
-// checking, review, judge or product owner). A learned item's target widens nothing. A code file is never exempt.
+// checking, review, judge or product owner). The crew's own fragment (`<doc>.d/<slug>.md`, `<rulesDir>.d/<area>/<slug>.md`) of such a
+// prompt doc passes whichever crew commit wrote it, under the same frontmatter rule. A learned item's target widens nothing. A code file is never exempt.
 function knowledgeDocs(c: { dir: string; repo: string; slug: string; wt: string; target: string }): Set<string> {
   const base = baseOf(c.wt, c.target)
   const out = gitOrFail(c.wt, ['-c', 'core.quotepath=off', 'log', '--no-merges', '--no-renames', '--name-only', '--format=%x00%H', `${base}..HEAD`])
@@ -245,11 +265,11 @@ function knowledgeDocs(c: { dir: string; repo: string; slug: string; wt: string;
   // a base rule file (under rulesDir itself, not a fragment): a change of only its `verified` and `sources` keys is bookkeeping, not
   // rule text, whoever committed it; the body and every other frontmatter key must be unchanged
   const bookkeepingOnly = (file: string): boolean => ruleBookkeepingOnly(c.wt, base, 'HEAD', file, kc.rulesDir)
-  const ownStamp = (file: string): boolean => {
-    if (!ownStampFragment(file, contentAt('HEAD', file), kc.rulesDir, c.slug)) return false
+  const regularFile = (file: string): boolean => {
     const mode = run(c.wt, ['ls-tree', 'HEAD', '--', file])
     return mode.status === 0 && mode.out.startsWith('100644 ')
   }
+  const ownStamp = (file: string): boolean => ownStampFragment(file, contentAt('HEAD', file), kc.rulesDir, c.slug) && regularFile(file)
   const name = (file: string): string => file.split('/').pop() ?? ''
   // free docs: any member may change them with its code, every round
   // (only these: a README, a changelog or any other .md is a crew's to change only when its owns name it)
@@ -266,11 +286,20 @@ function knowledgeDocs(c: { dir: string; repo: string; slug: string; wt: string;
   const isPrompt = (file: string): boolean => isPromptDoc(file) || (fragOf(file) !== undefined && isPromptDoc(fragOf(file) as string))
   // an agent or persona that judges (QC, checking, review, product owner): never a crew's to edit, even in its knowledge commit
   const isJudge = (file: string): boolean => /(^|\/)agents\/[^/]+\.md$/.test(file) && /qc|check|review|judge|product-owner/i.test(name(file))
+  const ownFragment = (file: string): boolean => {
+    const doc = fragOf(file)
+    // a rules fragment is exactly `<rulesDir>.d/<area>/<slug>.md`: one area segment, so a deeper path names no rule
+    if (file.startsWith(`${kc.rulesDir}.d/`) && file.slice(kc.rulesDir.length + 3).split('/').length !== 2) return false
+    return doc !== undefined && name(file) === `${c.slug}.md` && isPromptDoc(doc) && !isJudge(doc)
+  }
   const isDoc = (file: string): boolean => {
     if (!file.toLowerCase().endsWith('.md')) return false
     if (bookkeepingOnly(file)) return true
     // the crew's own stamp fragment, whichever crew commit wrote it (a regular file, never a symlink)
     if (ownStamp(file)) return true
+    // the crew's own fragment (`<doc>.d/<slug>.md`, `<rulesDir>.d/<area>/<slug>.md`) of a prompt doc that is no judge's file,
+    // whichever crew commit wrote it: a fragment is stitched into its doc, never read as a prompt itself. The frontmatter rule applies.
+    if (ownFragment(file) && regularFile(file) && frontmatterKept(file)) return true
     const allowed = isPrompt(file) ? !isJudge(file) && !byMember.has(file) : isFreeDoc(file)
     return allowed && frontmatterKept(file)
   }

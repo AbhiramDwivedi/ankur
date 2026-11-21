@@ -91,17 +91,36 @@ export function settledWords(r: Request, sent: AnswerBody | null): { head: strin
   if (r.status === 'cancelled') return { head: cancelWords(r), lines: [] }
   if (r.kind === 'question') {
     const answers = r.answers ?? (sent && 'answers' in sent ? sent.answers : null) ?? {}
-    return {
-      head: 'Answered.',
-      lines: r.questions.map((q) => `${q.header}: ${answers[q.question] ?? '(no answer recorded)'}`),
-    }
+    const choice = r.questions.map((q) => answers[q.question] ?? '(no answer recorded)').join(', ')
+    return { head: answeredLine(choice), lines: [] }
   }
   const decision = r.decision ?? (sent && 'decision' in sent ? sent.decision : null)
   const message = r.message || (sent && 'message' in sent ? sent.message : '') || ''
-  const word =
-    decision === 'allow' ? 'Approved.' : decision === 'deny' ? 'Denied.' : decision === 'message' ? 'Replied with a message.' : ''
-  return { head: word ? `Answered. ${word}` : 'Answered.', lines: message ? [`Sent: ${message}`] : [] }
+  const choice =
+    r.kind === 'permission'
+      ? decision === 'deny'
+        ? 'Deny'
+        : 'Allow'
+      : decision === 'allow'
+        ? 'Approved'
+        : decision === 'deny'
+          ? 'Not approved'
+          : 'your reply'
+  return { head: answeredLine(choice), lines: message ? [`Sent: ${message}`] : [] }
 }
+
+/** The status line of an answered ask. */
+export const answeredLine = (choice: string) => `Answered: ${choice}. Sent to the project manager.`
+
+/** The status line of an approved ADR; `n` is its number, "0067". */
+export const adrAccepted = (n: string) => `Approved. ADR-${n} is accepted.`
+
+/** The count in the card's head: what waits on the person. */
+export const needWords = (n: number) => (n === 0 ? 'All answered' : n === 1 ? '1 needs you' : `${n} need you`)
+
+/** Why an answer did not go through, in words that say the session did not get it and pressing again is safe. */
+export const NOT_REACHED = 'The answer did not reach the session.'
+export const AGAIN_SAFE = 'Pressing again is safe.'
 
 export type AnswerBody =
   | { answers: Record<string, string> }
@@ -197,7 +216,7 @@ export function previewText(text: string | null | undefined, max = PREVIEW_MAX):
   return cut.replace(/[\s,;:.\-–]+$/, '') + '…'
 }
 
-// ---- send state (R-41, R-47): the 10 s and 30 s marks the composer and the cards share ------------------
+// ---- send state: the 10 s and 30 s marks the composer and the cards share ------------------
 
 export const STILL_SENDING = 'Still sending…'
 export const NOT_TAKEN = "The session hasn't taken the message. Try again, or reload if it keeps happening."

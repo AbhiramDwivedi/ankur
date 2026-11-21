@@ -1,4 +1,4 @@
-// What the polite announcer says when crew statuses change between two snapshots (R-44). Pure, no React.
+// What the polite announcer says when crew statuses change between two snapshots. Pure, no React.
 import type { RunState } from '../../store/types.ts'
 import { crewStatus, STATUS_WORD } from '../status/status.ts'
 

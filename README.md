@@ -36,7 +36,23 @@ npm --prefix ui run build
 npm --prefix ui start
 ```
 
-The server prints one line, `ankur-ui listening on http://127.0.0.1:<port>/?token=<token>`. Open that whole URL in your browser. To point it at another repo, add `-- --repo <path>` to the start command. [ui/README.md](ui/README.md) has the flags and how to stop it.
+The server prints one line, `ankur-ui listening on http://127.0.0.1:<port>/?token=<token>`. Open that whole URL in your browser. The page starts with no repo open: type the full path of a git repo into its "Repo path" field and open it. You can open several repos, one workspace each, and switch between them in the page.
+
+![The ankur page with two open workspaces in the left rail, the conversation with the project manager, a card waiting on your answer, and the crews at work](plugins/ankur/docs/ankur-ui.webp)
+
+[ui/README.md](ui/README.md) has the flags and how to stop it.
+
+## What a run costs
+
+A run costs tokens and time. One goal starts several agents: a project manager, builders, a QC engineer and sometimes a stress tester per crew. The agents run in parallel, so a run finishes sooner than one session would, and it spends more tokens in total. A large goal with several crews costs more than a small one.
+
+ankur states no price of its own. `factory cost` reads the token counts of a run and turns them into dollars with a price table that you supply in the `pricing` key of `.claude/ankur.json`. A model with no entry in your price table shows as unpriced, never as zero. The run total counts spend since the plan was approved; before approval, or when a model is unpriced, it is missing, never 0.
+
+## When not to use ankur
+
+ankur is the wrong tool for a small change. A one-file edit, a typo, a rename or a quick fix is faster and cheaper in a plain Claude Code session: ankur would plan it, start a crew and run a QC check for a change you can read in a minute. It also does not fit work with no tests to run, because the crews prove their work with tests.
+
+Use ankur for a goal big enough to split into parts that can be built at the same time.
 
 ## Read more
 

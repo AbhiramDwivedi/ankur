@@ -1196,7 +1196,7 @@ export function detachVerdict(command: unknown): { deny: string } | undefined {
   return undefined
 }
 
-// R-32: a command that runs retro/cli.ts scrub and then a git push or git merge that scrub does not
+// a command that runs retro/cli.ts scrub and then a git push or git merge that scrub does not
 // gate is refused. Scrub gates a later push or merge only when every operator from the first scrub segment up to it is
 // &&. One command is judged alone: a scrub in an earlier call is not seen, by design.
 export function pushGateVerdict(command: unknown): { deny: string } | undefined {
@@ -1217,7 +1217,7 @@ export function pushGateVerdict(command: unknown): { deny: string } | undefined 
   return undefined
 }
 
-// R-196 (0.37.1): the decision-log Bash guard is an accident catcher, not a security boundary. decisions.md is written only
+// (0.37.1): the decision-log Bash guard is an accident catcher, not a security boundary. decisions.md is written only
 // by `factory.ts decide`; an agent that writes it by hand through Bash is refused when the command plainly writes a file
 // whose base name is decisions.md: a `>` or `>>` redirect target, a `tee` operand, a `sed -i` or `perl -i` operand, or the
 // destination of `cp` or `mv`. Everything else passes, reads included. The approval defence is the typed-prompt proof, which
@@ -2539,14 +2539,14 @@ export const register: Register = on => {
     return next(e)
   }).catch(failOpen)
 
-  // The push and merge gate (R-32): a main-session Bash command that runs retro scrub and then a git
+  // The push and merge gate: a main-session Bash command that runs retro scrub and then a git
   // push or git merge that scrub does not gate (not joined by && all the way) is refused. Members are never push-gated; a
   // member's command that backgrounds a process outside run_in_background is refused instead (the detach gate).
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     if (e.agentId === undefined) {
       const input = e as unknown as { command?: unknown; args?: unknown }
       const command = typeof input.command === 'string' ? input.command : isRecord(input.args) ? input.args.command : undefined
-      // R-196: a Bash command that plainly writes decisions.md by hand is refused. An accident catcher: it fails open.
+      // a Bash command that plainly writes decisions.md by hand is refused. An accident catcher: it fails open.
       const decisionLog = await safely($, 'decision log Bash guard', async () => decisionLogBashVerdict(command))
       if (decisionLog !== undefined) {
         await safely($, 'decision log guard log', () => logRule($, 'decision log guard refused a Bash call: it writes decisions.md'))

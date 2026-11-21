@@ -4,17 +4,17 @@ Applies to every change in every project, whatever its language or domain. It as
 
 ## Rules
 
-1. A module imports another module only through that module's index or public entry file.
-   Test: no import path in the diff reaches past another module's entry file into its internals.
+1. A module imports another module only through that module's index or public entry file, and imports between modules keep one direction, with no cycles.
+   Test: no import path in the diff reaches past another module's entry file into its internals, and no import it adds closes a cycle between modules.
 2. Each new file or function belongs to the module whose responsibility it serves, so cohesion stays high.
    Test: every new file sits under a path the module map assigns to a module whose stated responsibility covers it.
 3. Code at a module edge depends on an interface or abstract type, not on another module's concrete class, to keep coupling loose, when a second implementation or a test double exists or is planned; otherwise rule 12 applies.
    Test: constructor and function parameters that cross a module boundary are typed as interfaces, protocols or function types, not concrete classes.
-4. A class that mixes I/O with domain logic has one reason to change and receives its collaborators instead of constructing them (SOLID: single responsibility, dependency inversion); otherwise rule 12 applies.
-   Test: no new class both does I/O and holds domain logic, and no constructor in the diff calls `new` (or the language's equivalent) on another module's service.
+4. A class that mixes I/O with domain logic has one reason to change and receives its collaborators instead of constructing them (SOLID: single responsibility, dependency inversion); otherwise rule 12 applies. Shared mutable state has one owner that guards every write.
+   Test: no new class both does I/O and holds domain logic, no constructor in the diff calls `new` (or the language's equivalent) on another module's service, and no new shared mutable state (a module-level, static or global value more than one caller writes) is written without a lock, queue or single owner.
 5. A seam that two or more modules or crews build against has an explicit contract: a typed signature, schema or documented interface; otherwise rule 12 applies.
    Test: each function, endpoint or message that crosses a module boundary in the diff has declared input and output types or a schema file.
-6. Code that takes input from outside the process validates it at that boundary so it can fail fast with a specific error; otherwise rule 12 applies.
+6. Code that takes input from outside the process validates it at that boundary so it can fail fast with a specific error; otherwise rule 12 applies. Every error is named and never swallowed.
    Test: new public functions check required arguments at the top and raise or return a named error, and no `catch` block in the diff swallows an error without rethrowing or logging it.
 7. Operations that something actually retries are idempotent: running one twice leaves the same state as running it once; otherwise rule 12 applies.
    Test: every new write, job or handler that may be retried uses an idempotency key, an upsert, or a check-before-write, and a test runs it twice.

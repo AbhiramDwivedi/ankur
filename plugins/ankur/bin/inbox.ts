@@ -2,36 +2,44 @@
 // blockingFor and budgetRaises. Imports node: builtins and relative paths only, and never factory.ts (its top-level await would make an import cycle).
 
 import { spawnSync } from 'node:child_process'
-import { createHash, randomBytes, randomInt } from 'node:crypto'
+import { createHash, randomInt } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CliError, commonDir, configOf, flat, listOf, readText, refuse, sharedDir, str, usage, need } from './core.ts'
+import { CODE_WORDS } from './inbox-words.ts'
 import { readJsonl, withLock, writeJsonAtomic } from './lock.ts'
 import { proofTranscriptRoot, readProofFile } from './transcripts.ts'
 import type { Flags, Obj } from './core.ts'
 
-export type EscalateInput = { kind: string; title: string; detail?: string; crews?: string[]; ref?: string | null; blocking?: boolean; ownSession?: boolean }
-export type EscalateOut = { id: string; kind: string; deduped: boolean; code: string; notified: boolean | null; notifyError?: string }
+export type EscalateInput = { kind: string; title: string; detail?: string; crews?: string[]; ref?: string | null; blocking?: boolean; ownSession?: boolean; risk?: string; onYes?: string; onNo?: string }
+export type EscalateOut = { id: string; kind: string; deduped: boolean; code: string; notified: boolean | null; notifyError?: string; message?: string }
 
-// kind -> who may resolve it, whether it always blocks, and whether a --by pm resolve needs --note (graded by risk).
-const KINDS: Record<string, { by: 'client' | 'any'; blocking: boolean; evidence?: true }> = {
-  'client-question': { by: 'client', blocking: false },
-  'scope-change': { by: 'client', blocking: true },
+// The plain summary of an item: what it costs or risks, what happens on a yes, what happens on a no.
+type Summary = { risk: string; onYes: string; onNo: string }
+
+// kind -> who may resolve it, whether it always blocks, whether a --by pm resolve needs --note (graded by risk), and the plain summary
+// shown when the caller passes none (every client kind has one).
+const KINDS: Record<string, { by: 'client' | 'any'; blocking: boolean; evidence?: true; text?: Summary }> = {
+  'client-question': { by: 'client', blocking: false, text: { risk: 'None; the crew only needs your answer', onYes: 'The crew takes your answer and goes on', onNo: 'The crew goes on without it, or stops if it cannot' } },
+  'scope-change': { by: 'client', blocking: true, text: { risk: 'The goal grows or changes, so the work takes longer and costs more', onYes: 'The crew builds the changed scope', onNo: 'The crew keeps to the scope you approved' } },
   'pm-question': { by: 'any', blocking: true },
-  'client-trigger': { by: 'client', blocking: true },
-  'long-term-cost': { by: 'client', blocking: true },
-  budget: { by: 'client', blocking: true },
+  'client-trigger': { by: 'client', blocking: true, text: { risk: 'The run goes ahead and its agents start spending', onYes: 'The run goes ahead as planned', onNo: 'The run stays stopped until the plan changes' } },
+  'long-term-cost': { by: 'client', blocking: true, text: { risk: 'A choice that costs more to keep or undo later', onYes: 'The crew keeps the choice and goes on', onNo: 'The crew picks another approach' } },
+  budget: { by: 'client', blocking: true, text: { risk: 'The run has spent its spend limit, and going on adds to the bill', onYes: 'The run goes on with the allowance you add: type raise <usd> with the amount in dollars', onNo: 'The run stays stopped at its limit' } },
   'allowance-spent': { by: 'any', blocking: true, evidence: true },
-  'doctor-bundle': { by: 'client', blocking: true },
+  'doctor-bundle': { by: 'client', blocking: true, text: { risk: 'A set of setup changes to your project files', onYes: 'The changes are applied to the project', onNo: 'Your project files stay as they are' } },
   blocked: { by: 'any', blocking: true },
   'stall-unrecovered': { by: 'any', blocking: true },
-  'push-pr': { by: 'client', blocking: false },
-  'prod-deploy': { by: 'client', blocking: false },
-  'intake-triage': { by: 'client', blocking: false },
+  'push-pr': { by: 'client', blocking: false, text: { risk: 'Your code is published on the remote and may be seen by others', onYes: 'You push and open the pull request, then mark it done', onNo: 'Nothing is published' } },
+  'prod-deploy': { by: 'client', blocking: false, text: { risk: 'A change goes live for real users and may be hard to undo', onYes: 'You deploy it, then mark it done', onNo: 'Nothing is deployed' } },
+  'intake-triage': { by: 'client', blocking: false, text: { risk: 'Work you did not ask for is sorted into your plan', onYes: 'The crew takes the sorted work into the plan', onNo: 'The crew leaves the work out' } },
 }
+const FALLBACK_TEXT: Summary = { risk: 'See the title and detail of this item', onYes: 'The run goes on as the title says', onNo: 'The run goes on without it, or stops if it cannot' }
 const DECISIONS = ['approve', 'reject', 'answer', 'done', 'dismiss']
-const CODE_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+const SUMMARY_MAX = 300
+const NAME_WORDS = 5
+const NAME_CHARS = 40
 const SLUG_RE = /^[A-Za-z0-9._-]+$/
 
 const sessionOf = (dir: string): string => path.posix.basename(flat(dir).replace(/\/+$/, ''))
@@ -215,7 +223,7 @@ function proof(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unkno
   let found: { text: string; rest: string; at: number } | null = null
   for (const k of cands) {
     if (!k.chain || !Number.isFinite(k.at) || !(k.at > after)) continue
-    if (c.quote !== undefined && !(typeof c.quote === 'string' && c.quote !== '' && k.text.startsWith(c.quote))) continue
+    if (c.quote !== undefined && !(typeof c.quote === 'string' && c.quote !== '' && (k.text.startsWith(c.quote) || String(maskCode(k.text, open.id, open.codeHash)).startsWith(c.quote)))) continue
     const t = argsOf(k.text).split(/\s+/)
     if (t[0] !== c.decision || t[1] !== open.id || t[2] === undefined || codeHashOf(open.id, t[2]) !== open.codeHash) continue
     let from = 3
@@ -294,8 +302,29 @@ export function verifiedItems(repo: string): Map<string, Item> {
 
 const codeFile = (sessionDir: string, id: string): string => `${sessionDir}/escalate-code-${id}.json`
 
-const codeOf = (): string => Array.from({ length: 6 }, () => CODE_CHARS[randomInt(CODE_CHARS.length)]).join('')
-const idOf = (): string => `E-${new Date().toISOString().slice(0, 10).replaceAll('-', '')}-${randomBytes(3).toString('hex')}`
+// Three random words: 1024^3 or more codes, as hard to guess as the six letters they replace.
+const codeOf = (): string => Array.from({ length: 3 }, () => CODE_WORDS[randomInt(CODE_WORDS.length)]).join('-')
+
+// The item name: the title in lowercase ASCII (accents folded), runs of other characters as one hyphen, at most NAME_WORDS words and NAME_CHARS
+// characters cut at a word boundary (one longer word is cut hard). Nothing left of the title gives the kind.
+function nameOf(title: string, kind: string): string {
+  const words = title.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w !== '')
+  let name = ''
+  for (const w of words.slice(0, NAME_WORDS)) {
+    const next = name === '' ? w : `${name}-${w}`
+    if (next.length > NAME_CHARS) break
+    name = next
+  }
+  if (name === '' && words.length > 0) name = words[0].slice(0, NAME_CHARS)
+  return name === '' ? kind : name
+}
+
+// One line of at most SUMMARY_MAX characters, and never the inbox command: every summary line stays before the first line that holds it.
+const oneLine = (s: unknown): string => String(s ?? '').replace(/\s+/g, ' ').trim().replaceAll('/ankur:inbox', 'ankur:inbox').slice(0, SUMMARY_MAX).trim()
+
+// The six-line message the client reads: the title, the plain summary, then the two commands.
+const messageOf = (title: string, s: Summary, id: string, code: string, kind = ''): string =>
+  [oneLine(title), `Cost or risk: ${s.risk}`, `If you approve: ${s.onYes}`, `If you reject: ${s.onNo}`, `To approve, type: /ankur:inbox approve ${id} ${code}${kind === 'budget' ? ' raise <usd>' : ''}`, `To reject, type: /ankur:inbox reject ${id} ${code}`].join('\n')
 
 // Same {v:1, ts, ...} line as factory.ts appendEvent. Ids and kinds only: never a title, detail, note, quote or code.
 function event(dir: string, obj: Obj): void {
@@ -318,6 +347,8 @@ export function escalate(repo: string, dir: string, input: EscalateInput): Escal
   const S = sharedDir(repo)
   const file = `${S}/inbox.jsonl`
   const code = codeOf()
+  const dflt = spec.text ?? FALLBACK_TEXT
+  const summary: Summary = { risk: oneLine(input.risk) || dflt.risk, onYes: oneLine(input.onYes) || dflt.onYes, onNo: oneLine(input.onNo) || dflt.onNo }
   // Everything that can throw but the append runs before it: a bad ankur.json or an unwritable session dir leaves no item whose code was never shown.
   const notifies = typeof configOf(repo).notify === 'string'
   mkdirSync(dir, { recursive: true })
@@ -337,15 +368,16 @@ export function escalate(repo: string, dir: string, input: EscalateInput): Escal
         }
       }
     }
-    // 24-bit ids can collide across sessions: redraw while the id is already in the shared file (read under the lock)
+    // two items can share a name: count up (-2, -3, ...) while the id is already in the shared file (read under the lock)
     const taken = existsSync(file) ? readFileSync(file, 'utf8') : ''
-    let id = idOf()
-    while (taken.includes(`"id":"${id}"`)) id = idOf()
-    open = { v: 1, op: 'open', id, ts, kind: input.kind, session, crews, ref, blocking, title, detail, codeHash: codeHashOf(id, code) }
+    const base = nameOf(title, input.kind)
+    let id = base
+    for (let n = 2; taken.includes(`"id":"${id}"`); n++) id = `${base}-${n}`
+    open = { v: 1, op: 'open', id, ts, kind: input.kind, session, crews, ref, blocking, title, detail, risk: summary.risk, onYes: summary.onYes, onNo: summary.onNo, codeHash: codeHashOf(id, code) }
     // the code outlives a process that dies after the append; removed when the item resolves, listed only by `inbox --recover-codes`
     writeJsonAtomic(codeFile(flat(dir), id), { id, code }, { mode: 0o600 })
     appendFileSync(file, JSON.stringify(open) + '\n')
-    out = { id, kind: input.kind, deduped: false, code, notified: null }
+    out = { id, kind: input.kind, deduped: false, code, notified: null, message: messageOf(title, summary, id, code, input.kind) }
   })
   const res = out as unknown as EscalateOut
   if (res.deduped) return { ...res, code: '' }
@@ -361,7 +393,7 @@ export function escalate(repo: string, dir: string, input: EscalateInput): Escal
   }
   safeEvent({ event: 'escalate', crew, id: row.id, kind: row.kind, blocking })
   if (notifies) {
-    const n = notify(repo, { ...row, code })
+    const n = notify(repo, { ...row, code, message: res.message })
     res.notified = n.ok
     if (!n.ok) {
       res.notifyError = n.error
@@ -449,7 +481,7 @@ function typedProof(repo: string, session: string, open: Obj, decision: string, 
   if (main === null) return { missing: `no transcript of session ${session} under ${proofTranscriptRoot()}` }
   const scan = scanFile(main, session, new Set([String(open.id)]))
   const p = scan === null ? null : proof(repo, open, { decision, raiseUsd }, scan.cands.get(String(open.id)) ?? [], true)
-  if (p !== null) return { quote: p.text.slice(0, 1000), rest: p.rest }
+  if (p !== null) return { quote: String(maskCode(p.text, open.id, open.codeHash)).slice(0, 1000), rest: p.rest }
   if (raiseUsd === undefined && scan !== null) {
     // the client typed a raise but the agent left out --raise-usd: the flag is the cause, not a missing prompt
     for (const k of scan.cands.get(String(open.id)) ?? []) {
@@ -468,7 +500,7 @@ function typedProof(repo: string, session: string, open: Obj, decision: string, 
  * open row of the same kind, session and ref. Else the reason it does not count. Fails closed: a stored row alone proves nothing.
  */
 export function approvalProof(repo: string, dir: string, item: string | undefined, approved = false): string | null {
-  if (item === undefined || item === '') return 'approve --by client needs --item <E-id>: the client-trigger item for this plan, which the client approves by typing /ankur:inbox approve <E-id> <code>'
+  if (item === undefined || item === '') return 'approve --by client needs --item <item>: the client-trigger item for this plan, which the client approves by typing /ankur:inbox approve <item> <code>'
   const items = verifiedItems(repo)
   const it = items.get(item)
   if (it === undefined) return `no such item: ${item}`
@@ -501,7 +533,7 @@ export function approvalProof(repo: string, dir: string, item: string | undefine
  * is not a yes for this one). Else the reason it does not count. Fails closed: a stored row alone proves nothing.
  */
 export function personaInstallProof(repo: string, dir: string, item: string | undefined, name: string, draftedMs: number): string | null {
-  if (item === undefined || item === '') return `needs --item <E-id>: the client-question item persona:${name}`
+  if (item === undefined || item === '') return `needs --item <item>: the client-question item persona:${name}`
   const items = verifiedItems(repo)
   const it = items.get(item)
   if (it === undefined) return `no such item: ${item}`
@@ -667,6 +699,7 @@ function listItems(f: Flags): Obj {
     if (kind !== undefined && it.open.kind !== kind) continue
     if (crew !== undefined && !it.crews.includes(crew)) continue
     const row: Obj = { id, ts: it.open.ts, kind: it.open.kind, session: it.open.session, crews: it.crews, ref: it.open.ref ?? null, blocking: it.blocking, title: it.open.title, state }
+    for (const k of ['risk', 'onYes', 'onNo']) if (it.open[k] !== undefined) row[k] = it.open[k]
     if (it.resolve !== null) {
       row.decision = it.resolve.decision
       row.by = it.resolve.by
@@ -725,9 +758,10 @@ export const INBOX_COMMANDS: Record<string, (f: Flags) => Obj> = {
     const title = textOf(f, 'title')
     if (title === undefined || title === '') throw usage('missing --title or --title-file')
     const ref = str(f, 'ref')
-    const out = escalate(flat(need(f, 'repo')), absDirOf(need(f, 'dir')), { kind, title, detail: textOf(f, 'detail'), crews: listOf(f, 'crew'), ref: ref === undefined ? null : ref, blocking: f.blocking === true || f.blocking === 'true' })
+    const out = escalate(flat(need(f, 'repo')), absDirOf(need(f, 'dir')), { kind, title, detail: textOf(f, 'detail'), crews: listOf(f, 'crew'), ref: ref === undefined ? null : ref, blocking: f.blocking === true || f.blocking === 'true', risk: textOf(f, 'risk'), onYes: textOf(f, 'on-yes'), onNo: textOf(f, 'on-no') })
     const body: Obj = { id: out.id, kind: out.kind, deduped: out.deduped }
     body.code = out.deduped ? null : out.code
+    body.message = out.deduped ? null : (out.message ?? null)
     body.notified = out.notified
     if (out.notifyError !== undefined) body.notifyError = out.notifyError
     return body

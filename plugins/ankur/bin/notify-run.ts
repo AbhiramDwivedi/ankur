@@ -1,5 +1,5 @@
 // Runs the client-owned `notify` command of .claude/ankur.json for one new inbox item (contract-025 section 3, notify steps 2-5).
-// stdin: {repo, row} (the open op plus code). Exit 0 when the command exits 0 within 10 s; else exit 1 with one {error} JSON line.
+// stdin: {repo, row} (the open op plus code and the plain-language message). Exit 0 when the command exits 0 within 10 s; else exit 1 with one {error} JSON line.
 // The command is the one place a shell is used. Imports node: builtins and relative paths only, and never factory.ts.
 
 import { spawn, spawnSync } from 'node:child_process'

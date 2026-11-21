@@ -30,7 +30,7 @@ export function Notice({ tone = 'info', live = 'polite', id, className, children
       role={live === 'polite' ? 'status' : undefined}
       className={cn('flex min-w-0 items-start gap-2 rounded-ctl px-3 py-2 text-ui', look[tone], className)}
     >
-      <Icon aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+      <Icon aria-hidden="true" className="mt-1 size-3.5 shrink-0" />
       <span className="min-w-0">{children}</span>
     </div>
   )

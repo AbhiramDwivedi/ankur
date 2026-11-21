@@ -1,4 +1,4 @@
-// retro (R-23): reads <ankur dir>/retro/state.json, which only the plugin writes, for the
+// retro: reads <ankur dir>/retro/state.json, which only the plugin writes, for the
 // state's retro key. Returns the parsed value only when it is JSON, has v 1 and matches
 // docs/retro-state.schema.json (as ui/contract/state.schema.json copies it); null otherwise. Unlike files.ts
 // cached(), a file that fails to parse gives null, never the last good value. Reads only.

@@ -117,7 +117,7 @@ export async function heavyMain(argv: string[], sys: HeavySys = {}): Promise<{ b
       if (res.ran === false) return { body: { heavy: { label, ran: false, waitedMs: res.waitedMs, waitLimitMs: res.waitLimitMs, why: res.why } }, code: 1 }
       const exit = Number.isInteger(res.exit) ? (res.exit as number) : 1
       const stdout = readText(`${jdir}/out.txt`) ?? ''
-      // timedOut: the command ran past ANKUR_HEAVY_RUN_MS and the job stopped it (R-145)
+      // timedOut: the command ran past ANKUR_HEAVY_RUN_MS and the job stopped it
       let meta: Obj = { label, waitedMs: res.waitedMs, exit, slots, ...(res.timedOut === true ? { timedOut: true, limitNote: res.limitNote } : {}) }
       let parsed: unknown
       try {
@@ -216,7 +216,7 @@ function startJob(dir: string, key: string, job: Obj, spawnFn: typeof spawn = sp
 // `heavy-job --dir D --job KEY` (internal, started by heavyMain): takes the slot when the job needs it, runs the command in its
 // own process group with output to the job dir, releases the slot the moment the command ends, records a slot run's time for
 // slotWaitMs, and writes result.json last (atomically), which is what the caller waits for.
-// R-144: sys.platform and sys.spawn default to process.platform and child_process.spawn. R-145: a command still running after
+// sys.platform and sys.spawn default to process.platform and child_process.spawn. a command still running after
 // ANKUR_HEAVY_RUN_MS (default slotWaitMs) has its group stopped (SIGTERM, then SIGKILL KILL_GRACE_MS later), the slot released and
 // result.json written with timedOut: true. killGroup in resources/index.ts does the tree stop on win32, so this file holds no OS kill tool.
 export async function heavyJobMain(argv: string[], sys: HeavySys = {}): Promise<{ body: Obj; code: number }> {

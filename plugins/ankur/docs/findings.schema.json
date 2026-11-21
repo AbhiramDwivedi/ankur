@@ -97,7 +97,7 @@
       }
     },
     "recurred": {
-      "description": "A recurrence retro/cli.ts recur added (R-31): a problem a merged fix was meant to end has come back. It keeps the catalog entry's shape, and its evidence is a file and line of the structured files the counting step reads, or of the extract's catalog hits.",
+      "description": "A recurrence retro/cli.ts recur added: a problem a merged fix was meant to end has come back. It keeps the catalog entry's shape, and its evidence is a file and line of the structured files the counting step reads, or of the extract's catalog hits.",
       "type": "object",
       "additionalProperties": false,
       "required": ["id", "judge", "kind", "title", "evidence", "cost", "fix", "target", "signature", "recurs"],

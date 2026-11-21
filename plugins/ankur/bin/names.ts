@@ -1,5 +1,5 @@
 // ankur-allow-truss: this module is where the old name lives.
-// The one place that knows both the new names (ankur) and the old ones (the old name), for the 0.36.0 rename (R-190). Every lookup of a
+// The one place that knows both the new names (ankur) and the old ones (the old name), for the 0.36.0 rename. Every lookup of a
 // config file, a run dir or an env var goes through here, so a project set up under the old name keeps working for one release.
 // Leaf module: Node built-ins only, imports no other bin module. Paths come back as path.join builds them; callers pass them through flat().
 import { existsSync } from 'node:fs'

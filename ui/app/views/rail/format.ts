@@ -39,9 +39,10 @@ export function basename(p: string): string {
   return i < 0 ? p : p.slice(i + 1)
 }
 
-/** The /api/image URL for an image a crew branch holds. */
-export function imageUrl(img: DesignImage): string {
-  return '/api/image?' + new URLSearchParams({ ref: img.ref, path: img.path }).toString()
+/** The image URL for an image a crew branch holds: the workspace's own route, or the un-scoped /api/image without one. */
+export function imageUrl(img: DesignImage, workspaceId?: string | null): string {
+  const base = workspaceId ? `/api/workspaces/${encodeURIComponent(workspaceId)}/image?` : '/api/image?'
+  return base + new URLSearchParams({ ref: img.ref, path: img.path }).toString()
 }
 
 /** The crew whose branch an image ref names (`ankur-<slug>`), or null. */
@@ -60,14 +61,6 @@ export function firstGoal(state: RunState | null): { goal: string | null; approv
     approval: g?.approval ?? run.approval,
     approvedAt: g?.approvedAt ?? run.approvedAt,
   }
-}
-
-/** "Approved by you at HH:MM" or "Approved automatically at HH:MM"; null before approval. */
-export function approvalLine(state: RunState | null): string | null {
-  const g = firstGoal(state)
-  if (!g || !g.approvedAt) return null
-  const t = hhmm(g.approvedAt)
-  return g.approval === 'auto' ? `Approved automatically at ${t}` : `Approved by you at ${t}`
 }
 
 /** The model family a model id names, for ModelBadge's dot. */

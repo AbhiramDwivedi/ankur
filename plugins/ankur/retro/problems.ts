@@ -518,7 +518,7 @@ export function assemble(directory: string, parts: Part[]): Problems {
 export function problems(directory: string): Problems {
   const ctx = readCtx(directory)
   const out = assemble(directory, [timePart(ctx), ...codePart(ctx), qualityPart(ctx), rulesPart(ctx), costPart(ctx)])
-  // 0.33.0 item 4 (R-161): every flake event in log order, so a flake is reported and never dropped
+  // 0.33.0 item 4: every flake event in log order, so a flake is reported and never dropped
   out.flakes = ctx.events
     .filter((e) => e.event === 'flake' && typeof e.file === 'string' && typeof e.name === 'string')
     .map((e) => ({ crew: String(e.crew ?? ''), file: e.file, name: e.name, head: String(e.head ?? ''), ms: typeof e.ms === 'number' ? e.ms : 0 }))

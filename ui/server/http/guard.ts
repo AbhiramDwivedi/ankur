@@ -1,4 +1,4 @@
-// Host, then Origin, then token. No rate limit (R-16).
+// Host, then Origin, then token. No rate limit.
 import { timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 

@@ -1,7 +1,7 @@
 // The server's notices and the stream's own state, as one polite list. Each item
 // reads "Status: <text>"; the list is always there, so screen readers hear items arrive.
 import type { Connection, RunState } from '../../store/types.ts'
-import { Dot } from '../../components/ui/dot.tsx'
+import { Dot, StatusGlyph } from '../../components/ui/dot.tsx'
 
 export interface RunStatusProps {
   state: RunState | null
@@ -20,16 +20,23 @@ export function RunStatus({ state, connection, replacesReconnecting }: RunStatus
     items.push(n)
   }
   return (
-    <ul aria-label="Run status" aria-live="polite" className="flex min-w-0 flex-col gap-1 empty:hidden">
-      {items.map((n) => (
-        <li key={n.id} className="flex min-w-0 items-start gap-2 rounded-ctl bg-signal-soft px-3 py-2 text-ui text-signal-text">
-          <Dot tone="signal" className="mt-2" />
-          <span className="min-w-0 break-words">
+    <ul aria-label="Run status" aria-live="polite" className="flex min-w-0 flex-1 flex-wrap items-center gap-2 empty:hidden">
+      {items.map((n) => {
+        const failed = n.id === 'no-plugin'
+        return (
+        <li
+          key={n.id}
+          title={n.text}
+          className={`flex min-w-0 items-center gap-2 rounded-ctl bg-sunken px-2 text-meta ${failed ? 'text-fail-text' : 'text-muted'}`}
+        >
+          {failed ? <StatusGlyph glyph="fail" small /> : <Dot tone="neutral" />}
+          <span className="min-w-0 line-clamp-2 [overflow-wrap:anywhere]">
             <span className="sr-only">Status: </span>
             {n.text}
           </span>
         </li>
-      ))}
+        )
+      })}
     </ul>
   )
 }

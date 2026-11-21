@@ -81,7 +81,7 @@ function checkEntry(e: unknown, at: number): Entry {
   if (!isObj(e)) throw new Error(`${where}: must be an object`)
   onlyKeys(e, ['id', 'kind', 'title', 'anchor', 'patterns', 'fix', 'probe', 'fixedBy'], where)
   if (typeof e.id !== 'string' || e.id.length > 100 || !ID.test(e.id)) throw new Error(`${where}: id must be lowercase words joined by single hyphens`)
-  if (!(KINDS as readonly unknown[]).includes(e.kind)) throw new Error(`${where}: kind is not one of the R-27 kinds`)
+  if (!(KINDS as readonly unknown[]).includes(e.kind)) throw new Error(`${where}: kind is not one of the R-27 kinds`) // ankur-allow-rid: runtime error text, kept as it is
   if (!nonEmpty(e.title) || e.title.length > 200) throw new Error(`${where}: title must be 1 to 200 characters`)
   if (!nonEmpty(e.anchor)) throw new Error(`${where}: anchor must be a non-empty string`)
   if (!Array.isArray(e.patterns) || e.patterns.length === 0) throw new Error(`${where}: patterns must be a non-empty array`)

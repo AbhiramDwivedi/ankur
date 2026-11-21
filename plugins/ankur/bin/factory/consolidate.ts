@@ -1,4 +1,4 @@
-// `factory consolidate` (0.32.0 item 3, R-131): owns the between-wave memory consolidation. It reads the feature map, the knowledge
+// `factory consolidate` (0.32.0 item 3):owns the between-wave memory consolidation. It reads the feature map, the knowledge
 // docs and the architecture doc, decides in code (never through an agent) what to merge, flag, prune and re-point, and writes ONE
 // reviewable unified diff plus its record under the ankur dir. It changes no tracked file until `--accept`, which applies the
 // diff and commits it once; `--reject` drops the proposal. Never imports factory.ts, whose top-level await would make an import cycle.

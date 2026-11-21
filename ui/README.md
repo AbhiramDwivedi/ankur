@@ -1,6 +1,6 @@
 # Ankur local web UI
 
-`ui/` runs Ankur from a browser tab. One Node process hosts a Claude Code session with the Ankur plugin loaded, and serves a page that shows the run live in two columns. The left rail holds the conversation with the PM and the record (decisions and ADRs); the right side holds the crew network, deliverables and run metrics, with what needs you on top.
+`ui/` runs Ankur from a browser tab. One Node process hosts a Claude Code session with the Ankur plugin loaded, and serves a page that shows the run live in three columns, without scrolling the page. The left rail lists your workspaces. The centre holds the workspace header, a summary strip (the stage timeline and the usage so far) and tabs: Conversation, ADRs, Deliverables, Decisions and Design. The right side holds Your move (what needs you) on top, then one line per crew.
 
 The UI is not part of the plugin install: `claude plugin install ankur@ankur` installs only `plugins/ankur/`. To get the UI, clone the repo:
 
@@ -14,7 +14,7 @@ The commands below run from the repo root, the directory that holds `ui/` and `p
 
 - Node 24 or later. `ui/package.json` sets `"engines": { "node": ">=24" }`, and `node` runs the server's `.ts` files as they are. On an older Node the server prints a one-line warning to stderr at startup and carries on.
 - Claude Code, logged in. The UI drives your local Claude Code through `@anthropic-ai/claude-agent-sdk` on your existing login. It asks for no API key of its own.
-- A git repo to run Ankur in.
+- One or more git repos to run Ankur in. You open them from the page, one workspace each.
 
 ## Install the dependencies
 
@@ -42,16 +42,16 @@ npm --prefix ui start
 
 ## Start the UI
 
-1. Start the server, and point it at the repo you want Ankur to work in. Run this from the repo root:
+1. Start the server. It starts with no repo open: you open one from the page in step 4. Run this from the repo root:
 
    ```
-   node ui/server/main.ts --repo /path/to/your/repo
+   node ui/server/main.ts
    ```
 
    Or start it through npm:
 
    ```
-   npm --prefix ui start -- --repo /path/to/your/repo
+   npm --prefix ui start
    ```
 
    On Windows, stopping an `npm start` task (for example closing the terminal or stopping a background task) can leave npm and the server running, because the server's parent is npm's cmd shell. Start with `node` directly to avoid it. If a later start reports the port is in use and a running ankur UI is recorded for that port, the message names its pid. Stop it with `taskkill /PID <pid> /F` on Windows, or `kill <pid>` elsewhere.
@@ -68,15 +68,23 @@ npm --prefix ui start
 
 3. Open that whole URL, token included, in your browser. The server sets a cookie for the token and redirects to the same page without it, so the token doesn't stay in the address bar.
 
-4. Type your goal in the message box and send it. The Claude Code session starts with your first message, not when the server starts.
+4. Open a directory. The page asks for a path in the "Repo path" field. Type the full path of a git repo (`~` at the start means your home directory; other relative paths are refused) and open it. Any folder inside a repo opens that repo's workspace, and opening it again returns the workspace that is already open. A path that isn't a git repo or doesn't exist is refused with the reason. You can open several repos: each is a workspace, listed with its status and its open-request count, and you switch between them in the page.
+
+5. Type your goal in the message box of a workspace and send it. That workspace's Claude Code session starts with its first message, not when the server starts or when you open the directory. Each workspace has its own conversation, crews and decisions, and its own session with the Ankur plugin loaded.
+
+### Workspaces
+
+- Each workspace has its own store and its own Claude Code session. Stopping a workspace ends only its session and the Claude Code process tree under it (its agents, workflows and heavy jobs), on Windows too. A later message to a stopped workspace starts a fresh session.
+- Open workspaces live in the server's memory only. Restarting the server closes them all, and the UI stores nothing.
+- The routes are `GET` and `POST /api/workspaces`, `POST /api/workspaces/<id>/stop`, and `/events`, `/message`, `/requests/<id>/answer` and `/image` under `/api/workspaces/<id>/`. The token, `Host` and `Origin` checks apply to every one. When the server was started with a first workspace (see Flags), the un-scoped `/api/events`, `/api/message`, `/api/requests/<id>/answer` and `/api/image` act on that first workspace.
 
 ### Flags
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--repo <path>` | `$INIT_CWD` when set, else the current directory | The repo the session runs in. `npm` sets `INIT_CWD` to the directory you ran `npm` from. With `node` directly, it is the current directory unless `INIT_CWD` is set. |
+| `--repo <path>` | none: no workspace is open | Optional. Opens this directory as the first workspace, as given, with no git check. Without it nothing is open at start, whatever directory you started from (the server no longer reads `INIT_CWD`). |
 | `--plugin <path>` | `plugins/ankur` beside `ui/` | The Ankur plugin root. It must contain `.claude-plugin/plugin.json`, or the server exits with code 2. |
-| `--ankur-dir <path>` | Found from the session id | Read this Ankur dir instead. Meant for tests on a copy of real Ankur files. |
+| `--ankur-dir <path>` | Found from the session id | Read this Ankur dir instead, for the `--repo` workspace. Meant for tests on a copy of real Ankur files. It does nothing without `--repo`. |
 | `--port <n>` | `0` | The port to listen on, 0 to 65535. `0` lets the OS pick a free port. |
 
 Every flag takes a value. An unknown flag or a missing value exits with code 2 and a usage line on stderr. A failed listen exits with code 1.
@@ -89,7 +97,7 @@ Every flag takes a value. An unknown flag or a missing value exits with code 2 a
 
 ## Stop the UI
 
-Press Ctrl+C in the terminal that runs the server. On `SIGINT` or `SIGTERM` the server closes the Claude Code session and the HTTP server, then exits with code 0.
+Press Ctrl+C in the terminal that runs the server. On `SIGINT` or `SIGTERM` the server stops every workspace's Claude Code session and its process tree, closes the HTTP server, then exits with code 0.
 
 ## Run the checks
 
@@ -105,7 +113,7 @@ This runs `node --test` on `ui/contract/*.check.ts` (state, session, http) and `
 
 ### Browser tests
 
-1. Install the Playwright browsers once. The tests use Chromium only (R-48: Chrome only) (`ui/e2e/browsers.spec.ts`):
+1. Install the Playwright browsers once. The tests use Chromium only (`ui/e2e/browsers.spec.ts`):
 
    ```
    npx --prefix ui playwright install chromium

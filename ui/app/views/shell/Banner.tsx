@@ -1,16 +1,22 @@
-// The page banner: the mark, the Session status, the model and what the session
-// has spent, and the notifications and theme toggles. It never shows the goal and never a limit.
-import { useEffect, useRef, useState, type MouseEvent } from 'react'
+// The page header: the workspace's name (h1), one line of its goal, the run badge (status and elapsed time), the
+// notifications and theme buttons, the PM session line and the server notices. It holds what RunContext held.
+// It never shows the model, the cost or a limit: the Usage cell of the summary strip owns the figures.
+import { useEffect, useRef, useState } from 'react'
 import { Bell, BellRing, Moon, Sun } from 'lucide-react'
 import type { Connection, Request, RunState } from '../../store/types.ts'
 import { useTheme } from '../../lib/theme.ts'
+import { cn } from '../../lib/utils.ts'
 import { Button } from '../../components/ui/button.tsx'
-import { Dot, LivePing } from '../../components/ui/dot.tsx'
+import { StatusGlyph, type Glyph } from '../../components/ui/dot.tsx'
 import { sessionWords, usePageFlags } from '../move/format.ts'
+import { Skeleton } from '../../components/ui/skeleton.tsx'
+import { Badge } from '../../components/ui/badge.tsx'
 import { RunStatusBadge } from '../status/RunStatusBadge.tsx'
-import { costState, formatRunTime, formatUsd, runTimeMs } from '../metrics/format.ts'
+import { workspaceStatusLabel, type RunStatus } from '../status/status.ts'
+import { formatElapsed, runTimeMs } from '../metrics/format.ts'
+import { firstGoal } from '../rail/format.ts'
 import { runStatusOf } from './runStatus.ts'
-import { RunStatus } from './RunStatus.tsx'
+import { RunStatus as RunNotices } from './RunStatus.tsx'
 import { useLinkTimers } from './useLinkTimers.ts'
 import { UnreachableNotice } from './UnreachableNotice.tsx'
 
@@ -18,7 +24,17 @@ export interface BannerProps {
   state: RunState | null
   now: number
   connection: Connection
+  /** The workspace the page shows: its name is the title. */
+  workspace?: { name: string; path: string } | null
+  /** Set while the workspace is stopping or stopped: the badge then says that word in place of the run word. */
+  lifecycle?: 'stopping' | 'stopped' | null
+  /** The workspace's snapshot has not arrived: the badge is a skeleton, not a guessed word. */
+  loading?: boolean
+  /** The workspace has no session: the badge says so, in the rail's word, not the recorded run's status. */
+  noSession?: boolean
 }
+
+export const NO_GOAL = 'No goal yet. Type one below and ankur starts a Claude Code session in this repository.'
 
 const btnTarget = 'min-h-6 pointer-coarse:min-h-11 pointer-coarse:min-w-11'
 
@@ -27,7 +43,22 @@ const notifySupported = () => typeof window !== 'undefined' && 'Notification' in
 const notifyTitle = (r: Request) =>
   r.kind === 'question' ? 'Ankur: Question from Claude' : r.kind === 'permission' ? `Ankur: Approval needed: ${r.toolName}` : null
 
-export function Banner({ state, now, connection }: BannerProps) {
+/** The run badge: glyph, tone and words per run status. Words carry the meaning; the glyph and tone repeat it. */
+const BADGE: Record<RunStatus, { glyph: Glyph; tone: string }> = {
+  working: { glyph: 'run', tone: 'bg-run-soft text-run-text' },
+  waiting: { glyph: 'ask', tone: 'bg-signal-soft text-signal-text' },
+  finished: { glyph: 'idle', tone: 'bg-sunken text-muted' },
+  'not-started': { glyph: 'idle', tone: 'bg-sunken text-muted' },
+}
+
+function badgeWords(status: RunStatus, ms: number | null): string {
+  const elapsed = ms === null ? '' : `, ${formatElapsed(ms)}`
+  if (status === 'working') return `Running${elapsed}`
+  if (status === 'waiting') return `Waiting on you${elapsed}`
+  return status === 'finished' ? 'Idle, goal finished' : 'Idle'
+}
+
+export function Banner({ state, now, connection, workspace, lifecycle, loading = false, noSession = false }: BannerProps) {
   const { dark, toggle } = useTheme()
   const flags = usePageFlags()
   const [notifyOn, setNotifyOn] = useState(false)
@@ -81,43 +112,54 @@ export function Banner({ state, now, connection }: BannerProps) {
 
   const session = state?.session ?? null
   const status = runStatusOf(state, connection)
-  const runMs = state ? runTimeMs(state, now) : null
-  const notRecorded = state !== null && costState(state) === 'not-recorded'
-  const cost = typeof session?.usage?.costUsd === 'number' ? session.usage.costUsd : 0
-  const runTime = runMs != null ? formatRunTime(runMs) : null
-  // Agrees with the Cost tile: no $ when Cost reads "Not recorded", only the run time.
-  const summary = notRecorded ? (runTime ?? 'Run metrics') : `${formatUsd(cost)} · ${runTime ?? formatRunTime(0)}`
-  const summaryTitle = notRecorded && runTime ? `Run time ${runTime} · cost not recorded` : summary
+  // The elapsed time only means something while a run exists; an idle badge has none.
+  const runMs = state && status !== 'not-started' ? runTimeMs(state, now) : null
+  const goal = firstGoal(state)
+  const goalText = goal === null ? null : (goal.goal ?? 'A run with no goal text.')
   const words = slow && !live ? 'Still connecting to the session…' : sessionWords(state, false, flags.expired)
   const working = session !== null && (session.status === 'running' || session.backgroundTasks.length > 0)
   // Same reading as views/status/status.ts: a waiting session with background tasks and no open request.
   const stillRunning =
     session?.status === 'waiting' && session.backgroundTasks.length > 0 && !(state?.requests ?? []).some((q) => q.status === 'open')
   const bad = flags.expired || unreachable || session?.status === 'error'
-
-  // Scroll Run metrics into view and move focus to its heading (the link's own jump leaves focus on the link).
-  const toMetrics = (e: MouseEvent<HTMLAnchorElement>) => {
-    const section = document.getElementById('run-metrics')
-    if (!section) return
-    e.preventDefault()
-    const h = section.querySelector<HTMLElement>('h2')
-    section.scrollIntoView({ block: 'start' })
-    h?.focus({ preventScroll: true })
-    // Sections above it can still grow after a load (deliverables, the network): keep the target in view while
-    // the layout settles, for a short time only.
-    const keep = new ResizeObserver(() => section.scrollIntoView({ block: 'start', behavior: 'instant' }))
-    keep.observe(document.body)
-    window.setTimeout(() => keep.disconnect(), 1500)
-  }
+  const dot: Glyph = bad ? 'fail' : working ? 'run' : session?.status === 'waiting' ? 'ask' : 'idle'
+  const badge = BADGE[status]
 
   return (
-    <header role="banner" className="flex min-w-0 flex-col gap-2 border-b border-border bg-surface px-4 py-3 lg:px-6">
-      <div className="flex h-8 min-w-0 items-center gap-2">
-        <img src="/favicon.svg" alt="" width={24} height={24} className="size-6 shrink-0" />
-        <h1 className="text-title font-semibold text-fg">Ankur</h1>
-        {/* Two lines inside the 32 px row when the rail is narrow, never cut off. */}
-        <p className="min-w-0 text-meta leading-4 text-muted">Software factory</p>
-        <div className="ml-auto flex shrink-0 items-center gap-1">
+    <header className="flex min-w-0 shrink-0 flex-col gap-1 border-b border-border bg-surface px-4 py-2 lg:px-6">
+      <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-2">
+        <div className="flex min-w-0 flex-1 basis-60 flex-col">
+          <h1 title={workspace?.name} className="min-w-0 truncate text-title font-semibold text-fg">
+            {workspace?.name ?? 'Ankur'}
+          </h1>
+          {goalText !== null ? (
+            <p title={goalText} className="min-w-0 truncate text-ui text-muted">
+              {goalText}
+            </p>
+          ) : (
+            <p className="min-w-0 truncate text-ui text-muted">{NO_GOAL}</p>
+          )}
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          <p
+            role="status"
+            aria-label="Run status"
+            className={cn('inline-flex min-h-6 items-center gap-1', !loading && !lifecycle && !noSession && 'rounded-chip px-2 text-meta font-medium whitespace-nowrap', !loading && !lifecycle && !noSession && badge.tone)}
+          >
+            {loading ? (
+              <Skeleton className="h-6 w-24" />
+            ) : lifecycle ? (
+              // A stopped or stopping workspace says the rail's word, not the last run word: one name per state.
+              <Badge tone={lifecycle === 'stopping' ? 'fail' : 'neutral'}>{workspaceStatusLabel(lifecycle)}</Badge>
+            ) : noSession ? (
+              <RunStatusBadge status="not-started" word={workspaceStatusLabel('not-started')} />
+            ) : (
+              <>
+                <StatusGlyph glyph={badge.glyph} small />
+                <span>{badgeWords(status, runMs)}</span>
+              </>
+            )}
+          </p>{' '}
           <Button
             size="sm"
             variant="ghost"
@@ -126,7 +168,7 @@ export function Banner({ state, now, connection }: BannerProps) {
             aria-disabled={notifyOn || undefined}
             onClick={turnOnNotifications}
           >
-            {notifyOn ? 'Notifications on' : 'Turn on notifications'}
+            <span className="max-xl:sr-only">{notifyOn ? 'Notifications on' : 'Turn on notifications'}</span>
           </Button>
           <Button size="icon" variant="ghost" className={btnTarget} aria-label="Dark theme" aria-pressed={dark} onClick={toggle}>
             {dark ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}
@@ -134,37 +176,17 @@ export function Banner({ state, now, connection }: BannerProps) {
         </div>
       </div>
 
-      <div className="flex min-h-8 min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
-        <p role="status" aria-label="Run status" className="shrink-0">
-          <RunStatusBadge status={status} />
+      <div className="flex min-w-0 items-center gap-2">
+        <StatusGlyph glyph={dot} />
+        <span className="shrink-0 text-meta text-muted">PM session:</span>
+        <p role="status" aria-label="Session" title={words} className={cn('min-w-0 truncate text-meta', bad ? 'text-fail-text' : 'text-fg')}>
+          {words}
         </p>
-        <a
-          href="#run-metrics"
-          title={summaryTitle}
-          onClick={toMetrics}
-          className={`ml-auto inline-flex min-w-0 items-center truncate whitespace-nowrap rounded-ctl font-mono text-ui tabular-nums text-fg hover:underline ${btnTarget}`}
-        >
-          {notRecorded && runTime && <span className="sr-only">Run time </span>}
-          {summary}
-        </a>
+        {stillRunning && <p className="min-w-0 truncate text-meta text-muted">Agents still running; nothing needed from you</p>}
+        <RunNotices state={state} now={now} connection={connection} replacesReconnecting={unreachable && !!state} />
       </div>
 
-      <div className="flex min-h-8 min-w-0 flex-wrap items-center gap-x-4 gap-y-1 lg:flex-nowrap">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          {working ? <LivePing tone="ok" /> : <Dot tone={bad ? 'fail' : session?.status === 'waiting' ? 'signal' : 'neutral'} />}
-          <span className="shrink-0 text-ui text-muted">PM session:</span>
-          <p role="status" aria-label="Session" title={words} className={bad ? 'min-w-0 truncate text-ui text-fail-text' : 'min-w-0 truncate text-ui text-fg'}>
-            {words}
-          </p>
-          {stillRunning && <p className="min-w-0 text-ui text-muted">Agents still running; nothing needed from you</p>}
-        </div>
-      </div>
-
-      {/* While loading, hold the room one server notice takes, so the composer does not move when state arrives. */}
-      <div className={state ? 'contents' : 'min-h-[3.25rem]'}>
-        {unreachable ? <UnreachableNotice /> : null}
-        <RunStatus state={state} now={now} connection={connection} replacesReconnecting={unreachable && !!state} />
-      </div>
+      {unreachable ? <UnreachableNotice /> : null}
     </header>
   )
 }

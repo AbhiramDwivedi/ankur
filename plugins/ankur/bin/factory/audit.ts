@@ -37,7 +37,7 @@ export function roleAudit(role: string, recordedType: string | undefined, toolNa
   return undefined
 }
 
-// R-143: the time a step's event carries, from a transcript time; {} (so appendEvent keeps its finish-time ts) when none can be read.
+// the time a step's event carries, from a transcript time; {} (so appendEvent keeps its finish-time ts) when none can be read.
 const stamp = (t: string | undefined): Obj => {
   const ms = t === undefined ? NaN : Date.parse(t)
   return Number.isFinite(ms) ? { ts: new Date(ms).toISOString() } : {}

@@ -50,7 +50,7 @@
     {
       "if": { "properties": { "event": { "const": "flake" } } },
       "then": {
-        "description": "A test file failed in the full suite and passed on its one re-run on the same head (R-161): one line per flaked test, never dropped. ms is the re-run's duration.",
+        "description": "A test file failed in the full suite and passed on its one re-run on the same head: one line per flaked test, never dropped. ms is the re-run's duration.",
         "additionalProperties": false,
         "required": ["crew", "file", "name", "head", "ms"],
         "properties": {
@@ -65,12 +65,12 @@
     {
       "if": { "properties": { "event": { "const": "escalate" } } },
       "then": {
-        "description": "An exception raised to the inbox (contract-025 section 3). id is E-<yyyymmdd>-<6hex>; blocking says the linked crews are held until it is resolved.",
+        "description": "An exception raised to the inbox (contract-025 section 3). id is the item name: lowercase hyphenated words from the title, with -2 added on a clash (an old E-<yyyymmdd>-<6hex> id still resolves); blocking says the linked crews are held until it is resolved.",
         "additionalProperties": false,
         "required": ["id", "kind", "blocking"],
         "properties": {
           "v": true, "ts": true, "event": true, "crew": true,
-          "id": { "type": "string", "pattern": "^E-[0-9]{8}-[0-9a-f]{6}$" },
+          "id": { "type": "string", "pattern": "^(?:E-[0-9]{8}-[0-9a-f]{6}|[a-z0-9]+(?:-[a-z0-9]+)*)$", "maxLength": 60 },
           "kind": { "enum": ["client-question", "scope-change", "client-trigger", "long-term-cost", "budget", "allowance-spent", "doctor-bundle", "blocked", "stall-unrecovered", "push-pr", "prod-deploy", "intake-triage", "pm-question"] },
           "blocking": { "type": "boolean" }
         }
@@ -84,7 +84,7 @@
         "required": ["id", "decision", "by"],
         "properties": {
           "v": true, "ts": true, "event": true, "crew": true,
-          "id": { "type": "string", "pattern": "^E-[0-9]{8}-[0-9a-f]{6}$" },
+          "id": { "type": "string", "pattern": "^(?:E-[0-9]{8}-[0-9a-f]{6}|[a-z0-9]+(?:-[a-z0-9]+)*)$", "maxLength": 60 },
           "decision": { "enum": ["approve", "reject", "answer", "done", "dismiss"] },
           "by": { "enum": ["client", "pm"] }
         }
@@ -98,7 +98,7 @@
         "required": ["id", "error"],
         "properties": {
           "v": true, "ts": true, "event": true, "crew": true,
-          "id": { "type": "string", "pattern": "^E-[0-9]{8}-[0-9a-f]{6}$" },
+          "id": { "type": "string", "pattern": "^(?:E-[0-9]{8}-[0-9a-f]{6}|[a-z0-9]+(?:-[a-z0-9]+)*)$", "maxLength": 60 },
           "error": { "type": "string", "maxLength": 200 }
         }
       }
@@ -152,7 +152,7 @@
         "required": ["id", "scope", "reversal"],
         "properties": {
           "v": true, "ts": true, "event": true, "crew": true,
-          "id": { "type": ["string", "null"], "pattern": "^E-[0-9]{8}-[0-9a-f]{6}$" },
+          "id": { "type": ["string", "null"], "pattern": "^(?:E-[0-9]{8}-[0-9a-f]{6}|[a-z0-9]+(?:-[a-z0-9]+)*)$", "maxLength": 60 },
           "scope": { "type": "string", "minLength": 1 },
           "reversal": { "enum": ["cheap", "costly", "irreversible"] }
         }

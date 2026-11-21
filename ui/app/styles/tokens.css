@@ -1,39 +1,54 @@
-/* The D2 tokens, from ui/contract/redesign/tokens.json. Plain blocks, not @theme,
+/* The ankur tokens, from ui/contract/redesign/tokens.json. Plain blocks, not @theme,
    so Tailwind never tree-shakes a token. app.css maps them to utilities. */
 
 :root {
   color-scheme: light;
 
-  --bg: #F8FAFC;
+  --bg: #F7F8F4;
   --surface: #FFFFFF;
-  --sunken: #F1F5F9;
-  --border: #E2E8F0;
-  --border-strong: #CBD5E1;
-  --fg: #0F172A;
-  --muted: #475569;
-  --subtle: #64748B;
-  --brand: #2563EB;
-  --brand-strong: #1D4ED8;
-  --brand-soft: #EFF6FF;
-  --brand-line: #BFDBFE;
-  --move: #1D4ED8;
+  --sunken: #EEF0EA;
+  --border: #E0E3DA;
+  --border-strong: #C5CABC;
+  --fg: #1C1A15;
+  --muted: #4E4B42;
+  --subtle: #67635A;
+  --brand: #3D7A1C;
+  --brand-strong: #2F6014;
+  --brand-soft: #EEF6E6;
+  --brand-line: #C3DDA8;
+  --brand-hover: #336817;
+  --on-brand: #FFFFFF;
+  --sun: #F2C230;
+  --sun-soft: #FDF5D6;
+  --sun-text: #7A5A00;
+  --move: #2B2219;
   --move-fg: #FFFFFF;
-  --move-muted: #C7D7FE;
-  --move-line: #4F75E8;
-  --signal: #F59E0B;
-  --signal-soft: #FEF3C7;
-  --signal-text: #92400E;
-  --ok: #059669;
-  --ok-soft: #ECFDF5;
-  --fail: #E11D48;
-  --fail-soft: #FFF1F2;
-  --fail-text: #BE123C;
-  --opus: #7C3AED;
-  --sonnet: #0284C7;
+  --move-muted: #D8CCBC;
+  --move-line: #54453A;
+  --run: #2563EB;
+  --run-soft: #EBF2FD;
+  --run-text: #1E56B8;
+  --signal: #5B21B6;
+  --signal-soft: #F2EDFD;
+  --signal-text: #5B2AB8;
+  --ok: #6B675D;
+  --ok-soft: #EEF0EA;
+  --ok-text: #1C1A15;
+  --fail: #DC2626;
+  --fail-soft: #FDF0EE;
+  --fail-text: #B42318;
+  --opus: #8A5A2B;
+  --sonnet: #0E7C86;
+  --pressed: #E0E3DA;
+  --disabled-bg: #EEF0EA;
+  --disabled-fg: #8C887D;
+  --focus: #3D7A1C;
+  --focus-on-move: #F2C230;
+  --scrim: rgb(28 26 21 / .32);
 
-  --e1: 0 1px 2px rgb(15 23 42 / .05);
-  --e2: 0 1px 2px rgb(15 23 42 / .04), 0 12px 28px -16px rgb(15 23 42 / .22);
-  --e-hero: 0 2px 6px rgb(29 78 216 / .22), 0 28px 56px -28px rgb(29 78 216 / .65);
+  --e1: 0 1px 2px rgb(28 26 21 / .06);
+  --e2: 0 1px 2px rgb(28 26 21 / .05), 0 12px 28px -16px rgb(28 26 21 / .24);
+  --e-hero: 0 2px 6px rgb(43 34 25 / .25), 0 24px 48px -28px rgb(43 34 25 / .6);
 
   --radius-chip: 6px;
   --radius-ctl: 8px;
@@ -50,7 +65,36 @@
   --text-h1: 22px;
   --text-ask: 24px;
 
-  /* shadcn's names, per tokens.json "shadcn". --muted and --border are D2 keys of the same name, so
+  --leading-micro: 16px;
+  --leading-meta: 16px;
+  --leading-ui: 18px;
+  --leading-body: 21px;
+  --leading-lead: 24px;
+  --leading-title: 24px;
+  --leading-h1: 28px;
+  --leading-ask: 31px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+
+  --motion-quick: 150ms;
+  --motion-base: 200ms;
+  --motion-max: 300ms;
+  --ease-out: cubic-bezier(.2, 0, 0, 1);
+  --pressed-offset: translateY(1px);
+
+  /* The sprout mark: tokens.json "icon". */
+  --icon-tile: #2B2219;
+  --icon-glyph: #A6D45A;
+  --icon-glyph-on-light: #3D7A1C;
+
+  /* shadcn's names, per tokens.json "shadcn". --muted and --border are keys of the same name, so
      they already hold their hex above; a var() of themselves would be circular. */
   --background: var(--bg);
   --foreground: var(--fg);
@@ -68,48 +112,62 @@
   --destructive: var(--fail);
   --input: var(--border-strong);
   --ring: var(--brand);
-
-  /* The focus outline colour. Not a tokens key: brand on move is 1.30:1. */
-  --focus: var(--brand);
 }
 
 .dark {
   color-scheme: dark;
 
-  --bg: #0A0F1C;
-  --surface: #0F172A;
-  --sunken: #0B1222;
-  --border: #1E293B;
-  --border-strong: #334155;
-  --fg: #E2E8F0;
-  --muted: #A3B1C6;
-  --subtle: #7D8BA1;
-  --brand: #3B82F6;
-  --brand-strong: #60A5FA;
-  --brand-soft: #0F1E3D;
-  --brand-line: #1E3A8A;
-  --move: #1D4ED8;
+  --bg: #0E110C;
+  --surface: #151912;
+  --sunken: #0B0E09;
+  --border: #252A20;
+  --border-strong: #3A4032;
+  --fg: #E8E6DE;
+  --muted: #B4B0A4;
+  --subtle: #908C80;
+  --brand: #7FBB4C;
+  --brand-strong: #9CD06B;
+  --brand-soft: #1A2812;
+  --brand-line: #34501F;
+  --brand-hover: #93C962;
+  --on-brand: #0E110C;
+  --sun: #F5CB45;
+  --sun-soft: #2E2610;
+  --sun-text: #F5CB45;
+  --move: #2A2018;
   --move-fg: #FFFFFF;
-  --move-muted: #C7D7FE;
-  --move-line: #4F75E8;
-  --signal: #FBBF24;
-  --signal-soft: #33260A;
-  --signal-text: #FCD34D;
-  --ok: #34D399;
-  --ok-soft: #06281F;
-  --fail: #FB7185;
-  --fail-soft: #2A0E17;
-  --fail-text: #FDA4AF;
-  --opus: #A78BFA;
-  --sonnet: #38BDF8;
+  --move-muted: #D8CCBC;
+  --move-line: #54453A;
+  --run: #5B9BF0;
+  --run-soft: #10203A;
+  --run-text: #8DB8F7;
+  --signal: #C9A8FF;
+  --signal-soft: #221A38;
+  --signal-text: #D3C2FF;
+  --ok: #908C80;
+  --ok-soft: #1A1E16;
+  --ok-text: #E8E6DE;
+  --fail: #F87171;
+  --fail-soft: #2E1210;
+  --fail-text: #FCA89F;
+  --opus: #D9A066;
+  --sonnet: #4CC3CC;
+  --pressed: #252A20;
+  --disabled-bg: #0B0E09;
+  --disabled-fg: #6E6A60;
+  --focus: #9CD06B;
+  --focus-on-move: #F5CB45;
+  --scrim: rgb(0 0 0 / .6);
 
-  --e1: 0 0 0 1px rgb(255 255 255 / .02);
+  --e1: 0 0 0 1px rgb(255 255 255 / .03);
   --e2: 0 16px 32px -18px rgb(0 0 0 / .7);
-  --e-hero: 0 0 0 1px rgb(96 165 250 / .35), 0 30px 70px -30px rgb(59 130 246 / .75);
+  --e-hero: 0 0 0 1px #54453A, 0 30px 60px -30px rgb(0 0 0 / .8);
 }
 
-[data-surface="move"] {
-  --focus: var(--move-fg);
+/* Inside the dark hero card the ring is sun-coloured: brand on move is under 3:1. */
+[data-surface="move"],
+.move {
+  --focus: var(--focus-on-move);
 }
 
 [aria-invalid="true"] {

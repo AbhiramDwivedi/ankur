@@ -47,6 +47,44 @@ export async function ankurDirFor(repo: string, sessionId: string): Promise<stri
   }
 }
 
+// <git common dir>/ankur (resolveRunDir), the folder that holds every run dir of the repo; null outside a git repo or when git fails.
+export async function runRootFor(repo: string): Promise<string | null> {
+  try {
+    const out = (await git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).toString('utf8').trim()
+    return out === '' ? null : resolveRunDir(out)
+  } catch {
+    return null
+  }
+}
+
+// The child dir of the run root, other than `shared`, that holds plan.json or events.jsonl with the newest mtime
+// of the two; a tie goes to the larger name. null when there is none.
+export function newestRunDir(runRoot: string): string | null {
+  let best: { dir: string; name: string; mtime: number } | null = null
+  let names: string[]
+  try {
+    names = fs.readdirSync(runRoot)
+  } catch {
+    return null
+  }
+  for (const name of names) {
+    if (name === 'shared') continue
+    const dir = path.join(runRoot, name)
+    let mtime = -1
+    for (const f of ['plan.json', 'events.jsonl']) {
+      try {
+        const s = fs.statSync(path.join(dir, f))
+        if (s.isFile() && s.mtimeMs > mtime) mtime = s.mtimeMs
+      } catch {
+        // this file is not there
+      }
+    }
+    if (mtime < 0) continue
+    if (best === null || mtime > best.mtime || (mtime === best.mtime && name > best.name)) best = { dir, name, mtime }
+  }
+  return best === null ? null : best.dir
+}
+
 const isImage = (p: string): boolean => IMAGE_EXT.has(path.extname(p).toLowerCase())
 
 function names(out: Buffer): string[] {

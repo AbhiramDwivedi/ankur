@@ -180,7 +180,7 @@ export function buildPersonas(repo: string, ankurDir?: string): { personas: Obj;
   return { personas, warnings }
 }
 
-// factory persona-install --from <dir> --repo <root> [--replace] [--dir <ankur dir> --item <E-id>...]: copies <dir>/*.md into
+// factory persona-install --from <dir> --repo <root> [--replace] [--dir <ankur dir> --item <item>...]: copies <dir>/*.md into
 // <root>/.claude/agents/ and commits them. With --dir, each persona it writes needs an approved client-question item (see the gate below).
 export function cmdPersonaInstall(f: Flags): Obj {
   const from = need(f, 'from')
@@ -201,7 +201,7 @@ export function cmdPersonaInstall(f: Flags): Obj {
     jobs.push({ name, text: readText(path.join(from, n)) })
   }
   const target = path.join(repo, '.claude', 'agents')
-  // --dir is the run's ankur dir: the install is a mid-run one, which waits for the client (R-56). Each persona that would be written
+  // --dir is the run's ankur dir: the install is a mid-run one, which waits for the client. Each persona that would be written
   // needs a client-question item `persona:<name>` of this session that the client approved with a typed prompt; nothing is written otherwise.
   // A --from that is a run's <ankur dir>/personas is a mid-run install even without --dir: leaving --dir out never skips the gate.
   const inRun = /\/(ankur|truss)\/[^/]+$/.test(flat(path.dirname(path.resolve(from)))) && path.basename(path.resolve(from)) === 'personas' // ankur-allow-truss: the legacy run dir
@@ -220,7 +220,7 @@ export function cmdPersonaInstall(f: Flags): Obj {
       const why = items.map((it) => personaInstallProof(repo, dir, it, j.name, drafted))
       if (!why.some((w) => w === null)) {
         held.push(j.name)
-        unproven.push(items.length === 0 ? `${j.name}: needs --item <E-id>, the client-question item persona:${j.name} the client approved by typing /ankur:inbox approve <E-id> <code>` : `${j.name}: ${why.join('; ')}`)
+        unproven.push(items.length === 0 ? `${j.name}: needs --item <item>, the client-question item persona:${j.name} the client approved by typing /ankur:inbox approve <item> <code>` : `${j.name}: ${why.join('; ')}`)
       }
     }
     if (pending.length > 0 && held.length === pending.length) throw refuse({ error: `persona-install --dir installs nothing without the client's yes: ${unproven.join(' | ')}`, installed: [] })

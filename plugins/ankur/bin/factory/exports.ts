@@ -1,4 +1,4 @@
-// The names bin/factory.ts exported before 0.33.0 (R-154), but main and gatesMain: factory.ts loads only the module of the command it
+// The names bin/factory.ts exported before 0.33.0, but main and gatesMain: factory.ts loads only the module of the command it
 // runs, so a test or a module that wants one of these imports it from here. Each name comes from its leaf module, never from a barrel
 // (store.ts, factory/shared.ts, factory/resources.ts), and never from factory.ts, whose top-level await would make an import cycle.
 export { CliError, usage, refuse, flat, str, need, listOf, isObj, readText, readJson, parseLabel, repoPathOf, configOf } from '../core.ts'

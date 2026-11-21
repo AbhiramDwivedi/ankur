@@ -85,7 +85,7 @@ export function stripBlanketSuite(command: string): { command: string; blanket: 
 
 /** The generated stage bundles (stage.js, first line `// Generated ... from the modules in ...`) a test loads by calling
  * `loadStageBundle` (bin/build-stage.ts). The call names no path, so the name is the edge; a test that loads one step module names
- * that module by a relative literal and reaches it alone (R-140). */
+ * that module by a relative literal and reaches it alone. */
 function stageBundles(a: string, text: string, tracked: string[], read: (p: string) => string | null): string[] {
   if (!/\bloadStageBundle\b/.test(text)) return []
   return tracked.filter((t) => t !== a && base(t) === 'stage.js' && GENERATED.test(read(t) ?? ''))

@@ -5,6 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { createGuard } from './guard.ts';
 import { route, sendJson } from './routes.ts';
 import { createSse } from './sse.ts';
+import type { SseHub } from './sse.ts';
 
 // Local copies of the Decision 9 interfaces (type-only; ui-state and ui-session own the real ones).
 export interface StateSource {
@@ -21,11 +22,34 @@ export interface SessionControl {
   answer(id: string, body: unknown): AnswerResult;
 }
 
-export function createServer(opts: { state: StateSource; session: SessionControl; webDir: string }): {
+// The registry of ui-workspaces as the routes use it (type-only; ui-workspaces owns the real one).
+export interface WorkspaceHandle {
+  state: StateSource;
+  control: SessionControl;
+}
+export interface WorkspaceSource {
+  list(): unknown[];
+  open(path: unknown): Promise<{ ok: true; workspace: unknown; existed: boolean } | { ok: false; error: string }>;
+  get(id: string): WorkspaceHandle | null;
+  primary(): WorkspaceHandle | null;
+  stop(id: string): Promise<{ ok: true; workspace: unknown } | { ok: false; error: 'workspace' }>;
+}
+
+// With `workspaces`, the /api/workspaces routes work and the un-scoped routes act on its primary (--repo) workspace.
+// With `state` and `session` only, the server is the single-repo server it always was.
+export function createServer(opts: { state?: StateSource; session?: SessionControl; webDir: string; workspaces?: WorkspaceSource }): {
   listen(port: number): Promise<{ port: number; token: string; url: string }>;
   close(): Promise<void>;
 } {
-  const sse = createSse(opts.state);
+  const single = opts.state ? createSse(opts.state) : null;
+  // One SSE hub per workspace store, made the first time a stream asks for it.
+  const hubs = new Map<StateSource, SseHub>();
+  const hubFor = (state: StateSource): SseHub => {
+    let h = hubs.get(state);
+    if (!h) { h = createSse(state); hubs.set(state, h); }
+    return h;
+  };
+  const routeOpts = { ...opts, hubFor };
   let server: http.Server | null = null;
 
   return {
@@ -50,7 +74,7 @@ export function createServer(opts: { state: StateSource; session: SessionControl
           res.writeHead(303, { Location: v.location, 'Set-Cookie': v.cookie, 'Content-Length': 0 });
           return void res.end();
         }
-        route(opts, sse, req, res).catch(() => {
+        route(routeOpts, single, req, res).catch(() => {
           if (!res.headersSent) sendJson(res, 500, { error: 'server' });
           else res.destroy();
         });
@@ -60,7 +84,8 @@ export function createServer(opts: { state: StateSource; session: SessionControl
     async close() {
       const s = server;
       server = null;
-      sse.closeAll();
+      single?.closeAll();
+      for (const h of hubs.values()) h.closeAll();
       if (!s) return;
       await new Promise<void>((resolve) => {
         s.close(() => resolve());

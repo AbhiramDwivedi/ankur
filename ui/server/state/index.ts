@@ -1,6 +1,6 @@
 // ui-state: watches and reduces the Ankur dir, the config, the architecture doc and
 // the ADR dir into one in-memory state that matches ui/contract/state.schema.json, with a snapshot and deltas.
-// Memory only (R-13). Reads only: nothing here writes to the Ankur dir, the repo or the plugin.
+// Memory only. Reads only: nothing here writes to the Ankur dir, the repo or the plugin.
 // A 500 ms poll is the source of truth; fs.watch only makes a read happen sooner.
 // Node built-ins only; erasable TypeScript. `SessionView` is another module's type, erased at run time.
 import fs from 'node:fs'
@@ -18,7 +18,9 @@ import { createFileReaders } from './files.ts'
 import { readRetro } from './retro.ts'
 import { readPurposes, purposeOf } from './agents.ts'
 import { agentTypeOf } from './names.ts'
-import { createImageTracker, ankurDirFor } from './git.ts'
+import { createImageTracker, ankurDirFor, runRootFor, newestRunDir } from './git.ts'
+import { createInboxReader } from './inbox.ts'
+import { createCostReader } from './cost.ts'
 import type { Adr, Decision } from './files.ts'
 
 // ---- the Decision 9 interface -------------------------------------------------------------------
@@ -65,7 +67,7 @@ const emptySession = {
   error: null,
 }
 
-const KEYS = ['ankurDir', 'session', 'requests', 'run', 'decisions', 'adrs', 'design', 'notices', 'retro'] as const
+const KEYS = ['ankurDir', 'session', 'requests', 'run', 'decisions', 'adrs', 'design', 'notices', 'retro', 'inbox', 'cost'] as const
 
 function isDir(p: string): boolean {
   try {
@@ -77,7 +79,7 @@ function isDir(p: string): boolean {
 
 export function createStore(opts: { repo: string; ankurDir?: string; pluginPath?: string; pollMs?: number; claudeDir?: string }): Store {
   const repo = opts.repo
-  const purposes = readPurposes(opts.pluginPath) // once at start; nothing is written (R-9)
+  const purposes = readPurposes(opts.pluginPath) // once at start; nothing is written
   let taskOf: Map<string, string> = new Map() // the session view's task map; never published
   const pollMs = opts.pollMs ?? 500
   const instance = crypto.randomBytes(8).toString('hex')
@@ -85,6 +87,12 @@ export function createStore(opts: { repo: string; ankurDir?: string; pluginPath?
   const gitImages = createImageTracker(repo, () => refresh())
 
   let ankurDir: string | null = opts.ankurDir ?? null
+  // Until a session (or --ankur-dir) names the run dir, the newest run dir of the repo is read.
+  let explicit = opts.ankurDir !== undefined
+  let runRoot: string | null = null
+  let rootAsked = 0
+  const inboxOf = createInboxReader()
+  const costOf = createCostReader(repo, opts.claudeDir)
   let session: unknown = emptySession
   let requests: unknown[] = []
   let transcript: { n: number }[] = []
@@ -172,8 +180,28 @@ export function createStore(opts: { repo: string; ankurDir?: string; pluginPath?
     readers = []
   }
 
+  function findRoot(): void {
+    const now = Date.now()
+    if (explicit || runRoot !== null || (rootAsked !== 0 && now - rootAsked < 5000)) return
+    rootAsked = now
+    void runRootFor(repo).then((r) => {
+      if (closed || r === null) return
+      runRoot = r
+      refresh()
+    })
+  }
+
   function refresh(): void {
     if (closed) return
+    if (!explicit) {
+      findRoot()
+      const found = runRoot === null ? null : newestRunDir(runRoot)
+      if (found !== ankurDir) {
+        ankurDir = found
+        exists = false
+        dropAnkur()
+      }
+    }
     const nowExists = ankurDir !== null && isDir(ankurDir)
     if (nowExists !== exists || (nowExists && reducer === null)) {
       exists = nowExists
@@ -336,6 +364,8 @@ export function createStore(opts: { repo: string; ankurDir?: string; pluginPath?
       design,
       notices: all,
       retro,
+      inbox: exists ? inboxOf(ankurDir) : null,
+      cost: exists ? costOf(ankurDir) : null,
     }
   }
 
@@ -379,7 +409,9 @@ export function createStore(opts: { repo: string; ankurDir?: string; pluginPath?
   // ---- the interface --------------------------------------------------------------------------------------
 
   function setAnkurDir(p: string | null): void {
-    if (closed || p === ankurDir) return
+    if (closed) return
+    explicit = p !== null
+    if (p === ankurDir) return
     ankurDir = p
     exists = false
     dropAnkur()

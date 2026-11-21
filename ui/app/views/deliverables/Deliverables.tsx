@@ -1,9 +1,9 @@
 // "Built artifacts and deliverables" (D2 :762-830). The items come from the
-// state alone: Plan is design.planMd, Docs are the architecture doc (ADRs live in the rail's timeline only, R-37),
+// state alone: Plan is design.planMd, Docs are the architecture doc (ADRs live in the rail's timeline only),
 // Code is one item per merged crew, Images are design.images (an image whose crew hasn't merged is pending). A type
 // filter with counts, a Group by toggle, the list, and a preview: an aside at 1024 px and up, the Deliverable
-// dialog below it. Plan and Architecture preview as rendered markdown (lazy), and the timeline can open one ADR's
-// fields here through preview-target.ts.
+// dialog below it. Plan, Architecture and an ADR open in the dialog at every width. Plan and Architecture preview
+// as rendered markdown (lazy), and the timeline can open one ADR's fields here through preview-target.ts.
 import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import { Box, Copy, ExternalLink } from 'lucide-react'
 import { Button } from '../../components/ui/button.tsx'
@@ -11,6 +11,7 @@ import { Badge } from '../../components/ui/badge.tsx'
 import { Skeleton } from '../../components/ui/skeleton.tsx'
 import { cn } from '../../lib/utils.ts'
 import type { RunState } from '../../store/types.ts'
+import { pageWorkspaces } from '../../store/workspaces.ts'
 import { basename, crewOfRef, hhmm, imageUrl } from '../rail/format.ts'
 import { AdrPreview } from './AdrPreview.tsx'
 import { DeliverableDialog } from './DeliverableDialog.tsx'
@@ -107,7 +108,7 @@ function Preview({ item, onOpenDesign }: { item: Deliverable; onOpenDesign?: () 
       {p.kind !== 'text' && (
       <div className="grid h-56 place-items-center overflow-hidden rounded-t-card border-b border-border bg-bg">
         {p.kind === 'image' ? (
-          <img src={imageUrl({ ref: p.ref, path: p.path })} alt={`${p.path} (built on ${p.ref})`} className="max-h-full max-w-full object-contain" />
+          <img src={imageUrl({ ref: p.ref, path: p.path }, pageWorkspaces().getView().id)} alt={`${p.path} (built on ${p.ref})`} className="max-h-full max-w-full object-contain" />
         ) : (
           <div className="flex flex-col items-center gap-2 p-4 text-center">
             <Box aria-hidden="true" className="size-8 text-brand-strong" />
@@ -180,7 +181,7 @@ function Preview({ item, onOpenDesign }: { item: Deliverable; onOpenDesign?: () 
 
 const chip = (on: boolean) =>
   cn(
-    'inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-meta font-medium transition-colors duration-(--duration-quick) ease-out pointer-coarse:h-10',
+    'inline-flex h-7 shrink-0 items-center gap-1 rounded-full px-3 text-meta font-medium transition-colors duration-(--duration-quick) ease-out pointer-coarse:h-10',
     on ? 'bg-fg text-bg' : 'bg-secondary text-muted hover:text-fg',
   )
 
@@ -196,7 +197,6 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
   const [adrSel, setAdrSel] = useState<string | null>(null)
   const [notice, setNotice] = useState('')
   const opener = useRef<HTMLElement | null>(null)
-  const asideRef = useRef<HTMLElement | null>(null)
   const allChip = useRef<HTMLButtonElement | null>(null)
 
   const all = state ? deliverablesOf(state) : []
@@ -211,12 +211,13 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
   const docSelected = !adrCurrent && current?.preview.kind === 'text'
 
   const narrow = () => typeof window !== 'undefined' && !window.matchMedia('(min-width: 1024px)').matches
+  // Architecture and Plan open in the detail dialog at every width (S2); the other items preview in the aside at 1024 px and up.
   const open = (item: Deliverable, el: HTMLButtonElement) => {
     setSelected(item.id)
     setAdrSel(null)
     setNotice('')
     opener.current = el
-    if (narrow()) setDialog(true)
+    if (narrow() || item.id === 'architecture' || item.id === 'plan') setDialog(true)
   }
   const close = () => {
     setDialog(false)
@@ -245,17 +246,7 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
     setNotice('')
     setChosen('all')
     setAdrSel(found.file)
-    if (narrow()) {
-      setDialog(true)
-      return
-    }
-    requestAnimationFrame(() => {
-      const aside = asideRef.current
-      if (!aside) return
-      const calm = window.matchMedia('(prefers-reduced-motion: no-preference)').matches
-      aside.scrollIntoView({ block: 'nearest', behavior: calm ? 'smooth' : 'auto' })
-      aside.querySelector<HTMLElement>('h3')?.focus()
-    })
+    setDialog(true)
   }, [target, state])
 
   const design = onOpenDesign
@@ -277,7 +268,7 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
 
   return (
     <section aria-labelledby="deliverables-h" className="min-w-0">
-      <div className="mb-4 flex min-w-0 flex-wrap items-center gap-2.5 border-b border-border pb-3">
+      <div className="mb-4 flex min-w-0 flex-wrap items-center gap-3 border-b border-border pb-3">
         <Box aria-hidden="true" className="size-5 shrink-0 text-muted" />
         <h2 id="deliverables-h" className="text-title font-semibold text-fg">
           Built artifacts and deliverables
@@ -304,7 +295,7 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
       ) : (
         <>
           <div className="mb-3 flex min-w-0 flex-wrap items-center gap-2">
-            <div role="group" aria-label="Filter by type" className="no-scrollbar flex max-w-full min-w-0 gap-1.5 overflow-x-auto">
+            <div role="group" aria-label="Filter by type" className="no-scrollbar flex max-w-full min-w-0 gap-2 overflow-x-auto">
               {FILTERS.map((f) => (
                 <button key={f} ref={f === 'all' ? allChip : undefined} type="button" aria-pressed={chosen === f} onClick={() => toggle(f)} className={chip(chosen === f)}>
                   {f === 'all' ? 'All' : TYPE_LABEL[f]}{' '}
@@ -312,7 +303,7 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
                 </button>
               ))}
             </div>
-            <div role="group" aria-label="Group by" className="ml-auto inline-flex shrink-0 rounded-ctl bg-secondary p-0.5 text-meta font-medium">
+            <div role="group" aria-label="Group by" className="ml-auto inline-flex shrink-0 rounded-ctl bg-secondary p-1 text-meta font-medium">
               {(['stage', 'type'] as const).map((g) => (
                 <button
                   key={g}
@@ -320,7 +311,7 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
                   aria-pressed={by === g}
                   onClick={() => setBy(g)}
                   className={cn(
-                    'h-6 rounded-chip px-2.5 transition-colors duration-(--duration-quick) ease-out pointer-coarse:h-10',
+                    'h-6 rounded-chip px-3 transition-colors duration-(--duration-quick) ease-out pointer-coarse:h-10',
                     by === g ? 'bg-surface text-fg shadow-e1' : 'text-muted hover:text-fg',
                   )}
                 >
@@ -345,14 +336,14 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
               )}
             >
               {shown.length > 0 && (
-              <ul aria-label="Deliverables" className="min-w-0 self-start rounded-card border border-border bg-surface px-1.5 pb-1.5 shadow-e1">
+              <ul aria-label="Deliverables" className="min-w-0 self-start rounded-card border border-border bg-surface px-2 pb-2 shadow-e1">
                 {groups.map((g) => {
                   const open_ = more.has(g.key)
                   const rows = open_ ? g.items : g.items.slice(0, PAGE)
                   const hidden = g.items.length - rows.length
                   return (
                     <li key={g.key} className="min-w-0">
-                      <h3 className="flex items-center gap-2 px-2.5 pt-3 pb-1 text-meta font-semibold text-muted">
+                      <h3 className="flex items-center gap-2 px-3 pt-3 pb-1 text-meta font-semibold text-muted">
                         {g.label}
                         <span className="font-normal tabular-nums">{g.items.length}</span>
                       </h3>
@@ -365,7 +356,7 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
                         <Button
                           variant="ghost"
                           size="sm"
-                          className="ml-1.5"
+                          className="ml-2"
                           onClick={() => setMore((s) => new Set(s).add(g.key))}
                         >
                           Show {hidden} more
@@ -378,11 +369,11 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
               )}
               {preview != null && (
                 <aside
-                  ref={asideRef}
                   aria-label={`Preview: ${preview}`}
                   className="min-w-0 self-start overflow-hidden rounded-card border border-border bg-surface shadow-e2 max-lg:hidden"
                 >
-                  {body}
+                  {/* While the dialog shows the same preview, the aside does not mount it a second time. */}
+                  {dialog ? null : body}
                 </aside>
               )}
             </div>
@@ -390,7 +381,7 @@ export function Deliverables({ state, onOpenDesign }: DeliverablesProps) {
         </>
       )}
 
-      {dialog && preview != null && <DeliverableDialog onClose={close}>{body}</DeliverableDialog>}
+      {dialog && preview != null && <DeliverableDialog onClose={close} kicker={adrCurrent ? (adrCurrent.number != null ? `ADR-${String(adrCurrent.number).padStart(4, '0')}` : 'ADR') : current ? TYPE_LABEL[current.type] : undefined} title={adrCurrent?.title ?? current?.title} subtitle={adrCurrent?.file ?? current?.path}>{body}</DeliverableDialog>}
     </section>
   )
 }

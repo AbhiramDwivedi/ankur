@@ -1,4 +1,4 @@
-// The CLI flags bin/factory.ts handles itself around a command (0.33.0 R-154, moved from bin/factory.ts): --status-line, --reap-first.
+// The CLI flags bin/factory.ts handles itself around a command (0.33.0, moved from bin/factory.ts): --status-line, --reap-first.
 // This module imports no command module statically, so factory.ts can load it before it reads the command name; reapFirst loads
 // reap.ts with a lazy import() only when its flag is present. Never imports factory.ts, whose top-level await would make an import cycle.
 import { readFileSync } from 'node:fs'
@@ -53,7 +53,7 @@ export async function takeAdmitFlag(argv: string[]): Promise<{ admit: Obj | null
   if (!(cut < 0 ? argv : argv.slice(0, cut)).includes('--admit-first')) return { admit: null, argv }
   return (await import('./admit.ts')).takeAdmitFlag(argv)
 }
-// 0.34.0 R-170 (fixtures/runner-folds-034/folds.json): the fold riders. A rider flag names a second factory step that
+// 0.34.0 (fixtures/runner-folds-034/folds.json): the fold riders. A rider flag names a second factory step that
 // the dispatcher runs in the same process, so the stage spends one runner call on a pair. A `first` rider runs before the carrying command
 // and its body goes under `<step>First`; an `after` rider runs after it, only where the unfolded stage would run the second call, and its body
 // goes under `<step>After`. Mechanical: no judgement, no retry. Steps run through main (passed in, as gatesRun takes it), so a rider loads
@@ -148,7 +148,7 @@ export async function runRidersAfter(riders: Rider[], carrier: string[], body: O
     body[r.key] = await runRider(r, carrier, body, main)
   }
 }
-// R-154: a key a plugin module's own command table (INBOX_COMMANDS, COST_COMMANDS, QUEUE_COMMANDS, WORKTYPE_COMMANDS) gains that a core
+// a key a plugin module's own command table (INBOX_COMMANDS, COST_COMMANDS, QUEUE_COMMANDS, WORKTYPE_COMMANDS) gains that a core
 // command already has. main refuses it; it is read from the module's source text and the module is never loaded, so a core command still
 // loads only its own module. A table body ends at its first line that starts with `}`.
 const PLUGIN_TABLES: Record<string, string> = { 'inbox.ts': 'INBOX_COMMANDS', 'cost.ts': 'COST_COMMANDS', 'queue.ts': 'QUEUE_COMMANDS', 'worktypes.ts': 'WORKTYPE_COMMANDS' }

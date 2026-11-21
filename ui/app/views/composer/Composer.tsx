@@ -1,11 +1,10 @@
-// The Message form (R-41): the first send starts an ankur run, later sends are messages or a
-// new goal. Ctrl+Enter sends, Enter is a newline; on any failure the text stays in the box.
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from 'react'
+// The Message form: the first send starts an ankur run, later sends are messages or a
+// new goal. Enter sends, Shift+Enter is a newline; on any failure the text stays in the box.
+import { useEffect, useId, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { ArrowUp, Play, Plus } from 'lucide-react'
-import type { RunState } from '../../store/types.ts'
-import { postMessage } from '../../store/api.ts'
-import { pageStore } from '../../store/store.ts'
+import type { Connection, RunState } from '../../store/types.ts'
+import { postWorkspaceMessage } from '../../store/api.ts'
 import { cn } from '../../lib/utils.ts'
 import { Button } from '../../components/ui/button.tsx'
 import { Textarea } from '../../components/ui/textarea.tsx'
@@ -15,7 +14,6 @@ import { triggerLook } from '../../components/ui/tabs.tsx'
 import {
   CARD_OPEN_HINT,
   GOAL_BOX_ID,
-  NOT_TAKEN,
   STILL_SENDING,
   WORKING_STATUS,
   noteResult,
@@ -30,6 +28,13 @@ import { FollowUps } from './FollowUps.tsx'
 export interface ComposerProps {
   state: RunState | null
   now: number
+  /** The workspace this composer sends to; the composer is keyed by it, so a typed goal never crosses over. */
+  workspace: { id: string; name: string }
+  connection: Connection
+  /** A stop under way makes the box read-only; a stopped session makes the next goal start a new one. */
+  lifecycle?: 'stopping' | 'stopped' | null
+  /** A message was taken by the server. */
+  onSent?: () => void
 }
 
 type Choice = 'message' | 'goal'
@@ -39,6 +44,8 @@ const CHOICES: { value: Choice; label: string }[] = [
   { value: 'goal', label: 'New goal' },
 ]
 
+// The session never took the message (the 30 s alert and the page's own 15 s timeout both land here); sending again is safe.
+const NOT_TAKEN = 'The session has not taken the message. Try again, or reload if it keeps happening. Sending again is safe.'
 const EXPIRED_HINT = "This page's session has expired. Reload to continue."
 const OFFLINE_HINT = 'Not connected. Your text is kept.'
 const TYPE_FIRST = 'Type a goal first.'
@@ -53,7 +60,7 @@ function grow(box: HTMLTextAreaElement | null) {
   box.style.height = `${box.scrollHeight + edge}px`
 }
 
-export function Composer({ state, now }: ComposerProps) {
+export function Composer({ state, now, workspace, connection, lifecycle = null, onSent }: ComposerProps) {
   const base = useId()
   const flags = usePageFlags()
   const [text, setText] = useState('')
@@ -64,24 +71,29 @@ export function Composer({ state, now }: ComposerProps) {
   const sending = useRef(false)
   const refocus = useRef(false)
 
-  // The radiogroup and "Message to the PM" wording appear once a plan exists or a goal was sent.
+  // The Send as default of Message appears once a plan exists or a goal was sent.
+  const stopping = lifecycle === 'stopping'
+  // After a stop the next goal starts a new session: the box reads as it did before the first goal.
   const planned =
+    lifecycle !== 'stopped' &&
     state !== null &&
     ((state.run !== null && state.run.version !== null) || state.transcript.some((e) => e.role === 'user' && e.intent === 'goal'))
   const sentAny = state !== null && (state.transcript.some((e) => e.role === 'user') || (state.session.queue ?? []).length > 0)
   const cardOpen = openCards(state).length > 0
   const stage = useSendState(busy, error !== null)
   const expired = flags.expired
-  // useConnection has no server snapshot, and the view tests render on the server; assume live there.
-  const offline = useSyncExternalStore(pageStore().subscribe, pageStore().getConnection, () => 'live') !== 'live'
+  const offline = connection !== 'live'
   const empty = text.trim() === ''
   // Before a run the composer defaults to New goal (a goal starts /ankur:run); once planned it defaults to Message.
-  const choice: Choice = picked ?? (planned ? 'message' : 'goal')
+  const choice: Choice = lifecycle === 'stopped' ? 'goal' : (picked ?? (planned ? 'message' : 'goal'))
   const asGoal = choice === 'goal'
   const lastEntry = state?.transcript[state.transcript.length - 1]
   const working = state?.session.status === 'running' && lastEntry?.role === 'user'
 
-  const sendName = !planned && choice === 'goal' ? 'Start run' : choice === 'goal' ? 'Add as new goal' : 'Send to PM'
+  // A single-repo server (workspace id '') has the same label and button words; only its placeholder differs.
+  const legacy = workspace.id === ''
+  const sendName = !planned && choice === 'goal' ? 'Start' : choice === 'goal' ? 'Add as new goal' : 'Send'
+  const starts = !planned && choice === 'goal'
   const SendIcon = !planned && choice === 'goal' ? Play : choice === 'goal' ? Plus : ArrowUp
   const hintId = `${base}-hint`
   const alertId = `${base}-alert`
@@ -95,6 +107,16 @@ export function Composer({ state, now }: ComposerProps) {
   else if (!planned && choice === 'goal') hint = empty ? TYPE_FIRST : START_HINT
   else hint = choice === 'goal' ? GOAL_HINT : MESSAGE_HINT
 
+  // A workspace with no messages yet and nothing to answer: the box is where the client starts. With an ask open the
+  // client starts at the skip link, which leads to Your move.
+  const firstUse = state !== null && state.transcript.length === 0 && !cardOpen
+  // Only when focus has nowhere else: Alt+Up and Alt+Down put it on the new workspace row, and the composer must not
+  // take it back when that workspace's state arrives.
+  useEffect(() => {
+    const at = document.activeElement
+    if (firstUse && (at === null || at === document.body)) box.current?.focus()
+  }, [firstUse])
+
   useEffect(() => {
     if (!refocus.current) return
     refocus.current = false
@@ -102,7 +124,7 @@ export function Composer({ state, now }: ComposerProps) {
   })
 
   const send = async (retry = false) => {
-    if ((sending.current && !retry) || expired || offline) return
+    if ((sending.current && !retry) || expired || offline || stopping) return
     if (empty) {
       box.current?.focus()
       return
@@ -111,7 +133,7 @@ export function Composer({ state, now }: ComposerProps) {
     setBusy(true)
     setError(null)
     const sent = text
-    const res = await postMessage(sent, asGoal ? 'goal' : undefined)
+    const res = await postWorkspaceMessage(workspace.id, sent, asGoal ? 'goal' : undefined)
     sending.current = false
     setBusy(false)
     const tokenDead = noteResult(res.status, res.error)
@@ -120,16 +142,24 @@ export function Composer({ state, now }: ComposerProps) {
       setText((cur) => (cur.startsWith(sent) ? cur.slice(sent.length) : cur))
       if (box.current && box.current.value === sent) box.current.style.height = ''
       if (planned && choice === 'goal') setChoice(null)
+      onSent?.()
       return
     }
     if (tokenDead) return
     // The page's own 15 s timeout means the session never took the message: say so as the 30 s stuck alert does.
-    setError(res.status === 0 && res.error === 'timeout' ? NOT_TAKEN : notSent(reasonOf(res.status, res.error)))
+    const reason = reasonOf(res.status, res.error)
+    setError(
+      res.status === 0 && res.error === 'timeout'
+        ? NOT_TAKEN
+        : starts
+          ? `Could not start the session: ${reason}. Your goal is kept; press Start to try again.`
+          : `${notSent(reason)} Sending again is safe.`,
+    )
     refocus.current = true
   }
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       void send()
     }
@@ -149,20 +179,20 @@ export function Composer({ state, now }: ComposerProps) {
       id="composer"
       aria-label="Message"
       noValidate
-      className="flex min-w-0 flex-col gap-2"
+      className="flex min-w-0 shrink-0 flex-col gap-2"
       onSubmit={(e) => {
         e.preventDefault()
         void send()
       }}
     >
-      <label htmlFor={GOAL_BOX_ID} className="text-meta font-medium text-fg">
-        {planned || choice === 'message' ? 'Message to the PM' : 'Your goal'}
+      <label htmlFor={GOAL_BOX_ID} className="sr-only">
+        Message the project manager in {workspace.name}
       </label>
 
       <div
         role="radiogroup"
         aria-label="Send as"
-        className="inline-flex max-w-full items-center gap-0.5 self-start overflow-x-auto rounded-ctl bg-secondary p-0.5 no-scrollbar"
+        className="inline-flex max-w-full items-center gap-1 self-start overflow-x-auto rounded-ctl bg-secondary p-1 no-scrollbar"
       >
         {CHOICES.map((c, i) => {
           const on = c.value === choice
@@ -195,10 +225,19 @@ export function Composer({ state, now }: ComposerProps) {
           aria-describedby={alertText ? alertId : hintId}
           aria-invalid={error ? true : undefined}
           rows={3}
-          placeholder={planned || choice === 'message' ? 'Ask the PM, or add a detail' : 'Describe the goal, for example: add CSV export'}
+          placeholder={
+            lifecycle === 'stopped'
+              ? `Type a goal to start a new session for ${workspace.name}`
+              : planned || choice === 'message'
+                ? 'Ask the PM, or add a detail'
+                : legacy
+                  ? 'Describe the goal, for example: add CSV export'
+                  : 'Type a goal, e.g. add rate limiting to the public API'
+          }
           className="max-h-[40vh] resize-y focus-visible:outline-2 focus-visible:outline-(--focus) focus-visible:-outline-offset-2"
           value={text}
           disabled={expired}
+          readOnly={stopping || busy}
           onChange={(e) => {
             setText(e.target.value)
             if (error) setError(null)
@@ -210,10 +249,10 @@ export function Composer({ state, now }: ComposerProps) {
           <Button
             type="submit"
             variant="primary"
-            busy={busy}
-            disabled={expired || offline || empty || busy}
+            pending={busy}
+            disabled={expired || offline || empty || stopping}
             icon={<SendIcon aria-hidden="true" />}
-            className="bg-move text-move-fg hover:bg-move/90 [.dark_&]:hover:bg-move/90 pointer-coarse:h-11"
+            className="pointer-coarse:h-11"
           >
             {busy ? 'Sending…' : sendName}
           </Button>

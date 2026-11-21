@@ -105,7 +105,7 @@ A crew of one or two members can run with no project manager and no stress test.
 
 ## A run at a glance
 
-1. **Client brief.** The PM sizes the goal, asks in one round only what the repo can't answer, and records numbered requirements (`R-1`, `R-2`…) that every crew traces back to.
+1. **Client brief.** The PM sizes the goal, asks in one round only what the repo can't answer, and records numbered requirements that every crew traces back to.
 2. **Plan.** The design engineer gives each module a verdict, `extend` if the design already fits or `change` if an interface must move, splits the work into crews and stages, and runs each crew's acceptance test once to prove it.
 3. **Approve, only if needed.** A plan that only extends the design starts on its own. It waits for you when it changes the design or another client trigger applies.
 4. **Build.** Each crew owns its files and works in its own worktree. Test-writers go first; their tests must fail before the builder starts.

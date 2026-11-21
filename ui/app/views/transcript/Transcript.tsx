@@ -1,12 +1,11 @@
-// The conversation with the PM (R-45): a chat thread with the PM's hand-offs to crews (R-40)
+// The conversation with the PM: a chat thread with the PM's hand-offs to crews
 // woven in as system lines. The log is its own scroll container. It follows new items only while the reader sits
 // at the bottom; once they scroll up it holds still and offers "New messages". It shows the newest PAGE items and
 // adds PAGE more on request. A card's "Read in thread" reaches a message through REVEAL_EVENT.
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ArrowDown, MessageSquare, TriangleAlert } from 'lucide-react'
+import { ArrowDown, Square, TriangleAlert } from 'lucide-react'
 import { Button } from '../../components/ui/button.tsx'
 import { Skeleton } from '../../components/ui/skeleton.tsx'
-import { cn } from '../../lib/utils.ts'
 import type { RunState } from '../../store/types.ts'
 import { hhmm } from '../rail/format.ts'
 import { REVEAL_EVENT } from '../move/format.ts'
@@ -16,13 +15,23 @@ import { PmAvatar } from './PmAvatar.tsx'
 import { SystemLine } from './SystemLine.tsx'
 import { isGrouped, mergeThread, PAGE, type ThreadItem } from './thread.ts'
 
+/** What the page itself knows of the workspace's session: a stop under way, or done (at is the page's clock, null after a reload). */
+export type Lifecycle = { kind: 'stopping' } | { kind: 'stopped'; at: number | null }
+
 export interface TranscriptProps {
   state: RunState | null
   now: number
+  lifecycle?: Lifecycle | null
 }
 
 const OUTSIDE_RUN = "This run was started outside the page, so its messages aren't shown here. Send a message to the PM to continue."
-const FIRST_USE = 'Tell the PM what to build. Sending your goal starts an ankur run.'
+const FIRST_USE = 'No messages yet. Send the project manager a goal or a question.'
+
+export const lifecycleWords = (l: Lifecycle): string =>
+  l.kind === 'stopping'
+    ? 'Stopping the session…'
+    : `Session stopped${l.at === null ? '' : ` at ${hhmm(new Date(l.at).toISOString())}`}. Its Claude Code process has ended.`
+const RECORDED_MAX = 8 // the newest messages of messages.jsonl the page lists under the thread
 const WORKING = 'Working on it…'
 const STILL_WORKING = 'Still working. Crews may be running; their progress shows in Build network.'
 const ENDED = 'The session has ended. Reload to start a new one.'
@@ -66,22 +75,20 @@ function Dots() {
       {[0, 1, 2].map((i) => (
         <span
           key={i}
-          className={cn(
-            'size-1 rounded-full bg-muted motion-safe:animate-pulse motion-safe:[animation-duration:1.2s]',
-            i === 1 && 'motion-safe:[animation-delay:200ms]',
-            i === 2 && 'motion-safe:[animation-delay:400ms]',
-          )}
+          className="size-1 rounded-full bg-muted"
         />
       ))}
     </span>
   )
 }
 
-export function Transcript({ state, now }: TranscriptProps) {
+export function Transcript({ state, now, lifecycle = null }: TranscriptProps) {
   const transcript = state?.transcript
   const flow = state?.session.flow
   const queue = state?.session.queue
   const items = useMemo(() => mergeThread(transcript ?? [], flow ?? [], queue ?? []), [transcript, flow, queue])
+  const runMessages = state?.run?.messages
+  const recorded = useMemo(() => (runMessages ?? []).slice(-RECORDED_MAX), [runMessages])
   const [limit, setLimit] = useState(PAGE)
   const shown = items.length > limit ? items.slice(items.length - limit) : items
   const hiddenCount = items.length - shown.length
@@ -192,7 +199,8 @@ export function Transcript({ state, now }: TranscriptProps) {
         ? STILL_WORKING
         : WORKING
       : null
-  const ended = state?.session.status === 'ended' || state?.session.status === 'error'
+  // A stop the client asked for says so in its own line; the "ended" notice is for a session that died on its own.
+  const ended = (state?.session.status === 'ended' || state?.session.status === 'error') && lifecycle === null
 
   const row = (it: ThreadItem, prev: ThreadItem | undefined) => {
     if (it.kind === 'system') {
@@ -219,14 +227,11 @@ export function Transcript({ state, now }: TranscriptProps) {
   }
 
   return (
-    <section aria-labelledby="transcript-h" className="relative min-w-0">
-      <div className="mb-3 flex items-center gap-2">
-        <MessageSquare aria-hidden="true" className="size-5 shrink-0 text-muted" />
-        <h2 id="transcript-h" className="text-title font-semibold text-fg">
-          Conversation
-        </h2>
-      </div>
-      <div className="relative min-w-0">
+    <section aria-labelledby="transcript-h" className="relative flex min-h-40 min-w-0 flex-1 flex-col">
+      <h2 id="transcript-h" className="sr-only">
+        Conversation
+      </h2>
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <div
           ref={box}
           role="log"
@@ -234,10 +239,7 @@ export function Transcript({ state, now }: TranscriptProps) {
           aria-live="polite"
           tabIndex={0}
           onScroll={onScroll}
-          className={cn(
-            'max-h-[50vh] min-w-0 overflow-x-hidden overflow-y-auto rounded-card bg-sunken px-3 py-3 lg:max-h-[min(60vh,560px)]',
-            'min-h-56',
-          )}
+          className="min-h-24 min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-card bg-sunken px-3 py-3 [scroll-behavior:auto] max-h-[70dvh] lg:max-h-none"
         >
           {!state ? (
             <div className="flex flex-col gap-2">
@@ -254,7 +256,7 @@ export function Transcript({ state, now }: TranscriptProps) {
                   </Button>
                 </div>
               )}
-              {shown.length === 0 && !ended ? (
+              {shown.length === 0 && !ended && lifecycle === null ? (
                 <ol>
                   <Bubble id="msg-first-use" who="pm" time="" grouped={false} hint>
                     {state.run ? OUTSIDE_RUN : FIRST_USE}
@@ -262,6 +264,12 @@ export function Transcript({ state, now }: TranscriptProps) {
                 </ol>
               ) : (
                 <ol>{shown.map((it, i) => row(it, shown[i - 1]))}</ol>
+              )}
+              {lifecycle !== null && (
+                <p role="status" className="mt-4 flex min-w-0 items-center justify-center gap-2 text-center text-meta text-muted [overflow-wrap:anywhere]">
+                  <Square aria-hidden="true" className="size-3.5 shrink-0 text-subtle" />
+                  <span>{lifecycleWords(lifecycle)}</span>
+                </p>
               )}
               {waiting && (
                 <div aria-hidden="true" className="mt-4 flex items-center gap-2 text-meta text-muted">
@@ -276,6 +284,24 @@ export function Transcript({ state, now }: TranscriptProps) {
                   {ENDED}
                 </p>
               )}
+          {recorded.length > 0 && (
+            <div className="mt-4 min-w-0">
+              <h3 id="recorded-h" className="mb-1 text-meta font-semibold text-muted">
+                Recorded messages
+              </h3>
+              <ol aria-labelledby="recorded-h" className="flex min-w-0 flex-col gap-1">
+                {recorded.map((m) => (
+                  <li key={`${m.ts}|${m.from}|${m.to}`} className="min-w-0 rounded-ctl bg-sunken px-3 py-2 text-meta text-fg [overflow-wrap:anywhere]">
+                    <span className="text-muted">
+                      {hhmm(m.ts) !== '' && `${hhmm(m.ts)} `}
+                      {m.from} to {m.to}
+                    </span>
+                    <p>{m.summary}</p>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          )}
             </>
           )}
         </div>

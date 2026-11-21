@@ -5,8 +5,9 @@ import { cn } from '../../lib/utils.ts'
 export function Skeleton({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
+      data-slot="skeleton"
       aria-hidden="true"
-      className={cn('rounded-chip bg-secondary motion-safe:animate-pulse', className)}
+      className={cn('rounded-chip bg-secondary', className)}
       {...props}
     />
   )

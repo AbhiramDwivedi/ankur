@@ -273,8 +273,8 @@ function queueNext(f: Flags): Obj {
     let escalateError: string | undefined
     let clientNote = ''
     try {
-      const esc = escalate(repo, dir, { kind: 'budget', title: `budget: ${verdict.why}`.slice(0, 200), detail: `${verdict.why}\nscope ${verdict.scope}, spent ${verdict.spentUsd === null ? 'unknown' : `${verdict.spentUsd} USD`}, limit ${verdict.limitUsd} USD; held at queue-next`, ref: `budget:${sid}:${verdict.scope}:${verdict.scope}`, blocking: true })
-      if (!esc.deduped && esc.code !== '' && esc.notified !== true) clientNote = `; client approval needed: ${esc.id} code ${esc.code} (relay to the client, who types /ankur:inbox approve ${esc.id} ${esc.code} raise <usd>)`
+      const esc = escalate(repo, dir, { kind: 'budget', title: `budget: ${verdict.why}`.slice(0, 200), detail: `${verdict.why}\nscope ${verdict.scope}, spent ${verdict.spentUsd === null ? 'unknown' : `${verdict.spentUsd} USD`}, limit ${verdict.limitUsd} USD; held at queue-next`, ref: `budget:${sid}:${verdict.scope}:${verdict.scope}`, blocking: true, risk: `Spent ${verdict.spentUsd === null ? 'unknown' : verdict.spentUsd} USD of the ${verdict.limitUsd} USD limit; to go on, type the word raise and the extra dollars to allow after the code; the limit rises by that amount` })
+      if (!esc.deduped && esc.code !== '' && esc.notified !== true) clientNote = `\n${esc.message}`
     } catch (e) {
       escalateError = (e instanceof Error ? e.message : String(e)).slice(0, 200)
     }

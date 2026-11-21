@@ -204,7 +204,7 @@ function withoutDraftFiles(personas: Obj): Obj {
 }
 
 // Each persona draft the table lists gets one non-blocking client-question item `persona:<name>` (escalate dedupes a repeat, so a second start
-// or another crew opens none; blockingFor stays empty, so no crew waits). The client's yes is typed and the PM then runs persona-install --item <E-id>.
+// or another crew opens none; blockingFor stays empty, so no crew waits). The client's yes is typed and the PM then runs persona-install --item <item>.
 // An item of this session for the ref that was resolved after the draft was written is the client's answer: it is not asked again. Returns the warnings of a failed open.
 function draftQuestions(c: StartCtx, personas: Obj, entries: Obj[]): string[] {
   const out: string[] = []
@@ -220,6 +220,7 @@ function draftQuestions(c: StartCtx, personas: Obj, entries: Obj[]): string[] {
       if (answered) continue
       escalate(c.repo, c.dir, {
         kind: 'client-question', title: `install persona ${name}`, ref, ownSession: true, crews: entries.map((e) => String(e.slug)),
+        risk: `Standards of a persona become checks on every later diff; until you approve it, ${name} tasks run as general-purpose`, onYes: `The PM installs the persona ${name}, and its standards apply to later diffs`, onNo: `Tasks for ${name} keep running as general-purpose with the draft inlined`,
         detail: `The plan drafted the project persona ${name} (${flat(String(p.file))}). Until you approve it, its tasks run as general-purpose with the draft inlined, and no crew waits. Standards of a persona become checks on every later diff. To install it, type /ankur:inbox approve <this id> <code>; the PM then runs factory persona-install --from ${flat(path.dirname(String(p.file)))} --dir ${flat(c.dir)} --item <this id>.`,
       })
     } catch (e) {
@@ -495,14 +496,14 @@ function cmdStartResume(f: Flags, c: StartCtx, slug: string, kind: string): Obj 
   if (membersDeny !== undefined) return stageOut(c, [], [], [{ slug, reason: membersDeny }], [], [])
   const atDeny = acceptanceRefusal(goalFile)
   if (atDeny !== undefined) return stageOut(c, [], [], [{ slug, reason: atDeny }], [], [])
-  // R-89: one finisher per crew; a live finisher lease refuses the resume
+  // one finisher per crew; a live finisher lease refuses the resume
   const lease = takeLease(c.dir, `finisher-${slug}`)
   if (lease === null) throw refuse({ slug, why: 'finisher live' })
   try {
     const wt = ensureWorktree(c.repo, slug, c.settings.target)
-    // R-159: the crew branch head before the sync, so stage.js knows whether the sync moved it
+    // the crew branch head before the sync, so stage.js knows whether the sync moved it
     const headBefore = gitOrFail(c.repo, ['rev-parse', `refs/heads/${crewBranchOf(c.repo, slug)}`])
-    // R-90: the target goes into the crew branch as cmdSync does; a conflict is aborted (the worktree stays clean) and stage.js re-syncs it to the resolver
+    // the target goes into the crew branch as cmdSync does; a conflict is aborted (the worktree stays clean) and stage.js re-syncs it to the resolver
     let syncConflicts: string[] | undefined
     // An operation left unconcluded in the worktree (the resolver's merge, partly or fully resolved) is never merged
     // into or aborted; its unmerged paths (none when all are staged) go to the resolver as the sync conflicts, which concludes it
