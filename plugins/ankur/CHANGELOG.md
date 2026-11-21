@@ -2,9 +2,52 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.41.0 (2026-11-21)
+
+The client brief now asks about production readiness, fitted to the kind of thing you build. Set-up proposes your stack's dependency audit as a static check. The full test suite now runs once per goal at the goal check instead of before every crew merge, and a version bump or a price edit no longer runs the whole suite.
+
+To update an existing install, run `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code.
+
+### Changed
+
+- **The goal check now runs the full suite, and fails when it cannot.** After a goal's last crew merges, the goal check runs the goal's own check, then your project's full test suite on the same commit. A goal that changed more than docs and has no known suite command fails the goal check instead of passing with nothing run. To fix it, name the command in `targetedTests.full` of `.claude/ankur.json`, or add a `test` script to `package.json`, then run the goal check again.
+- **The full suite before a crew merges runs only when the change cannot be bounded.** A crew whose change maps to a known set of tests merges after those tests pass; the suite runs once at the goal check instead. A crew whose change the test selection cannot bound still runs the full suite before it merges.
+- **A config or package.json change no longer always runs the full suite.** When only fields that cannot steer which tests run have changed, such as a package's `version` or `description`, or the config's `pricing`, `merge`, `roles` or doc paths, the file is treated like any other changed file.
+
+### Readiness questions that fit what you build
+
+- **The client brief now covers production readiness.** Seven new questions: where logs and traces go, checking packages for known security holes, backup and restore, what happens to work in progress on a stop, what can go wrong on a login, payment or personal-data path, rollback, and who keeps it running. Each answer, or its default, holds builders and QC to a named principle rule.
+- **The questions follow the kind of thing you build.** Ankur works out from your repo, or from your answer about the outcome, whether the goal is a service, a scheduled job, a pipeline, a CLI, a library, a web front end, a mobile app, a spreadsheet macro or a one-off script. It never asks that as a question of its own. A macro is not asked about telemetry, rollback or a runbook. A CLI or library is not asked about shutdown or a runbook.
+- **What does not apply is written down.** Each question left out for your kind lands under `## Non-goals` in `docs/requirements.md` with the reason, for example why shutdown handling does not apply to a script. Nothing is dropped silently.
+- **Facts are not asked.** A logging library, an OpenTelemetry SDK or a collector config in the repo answers the logging question, and an audit step answers the security-holes question. The logging question is asked only when an outside monitoring service would add a recurring cost; otherwise the default stands.
+- **Existing briefs keep working.** A brief with no deliverable kind keeps every question, as before.
+
+### Set-up proposes your dependency audit
+
+- **An audit check from your lockfiles.** `/ankur:init` now reads your tracked lockfiles (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `Cargo.lock`) and proposes the stack's own audit command, such as `npm audit`, as a static check, with the lockfile it came from. A lockfile in a subfolder gets a check that runs in that folder.
+- **Nothing is written until you approve it.** The proposed commands never rewrite files, and a project with dependencies but no lockfile gets a note instead of a check. A Cargo project is told that `cargo-audit` must be installed. Stacks other than these four get no proposal yet.
+
+### The full suite once per goal
+
+- **Docs-only goals skip it.** When every file the goal's merged crews changed ends in `.md`, the suite does not run, and the result says why. A goal check that already runs `npm test` (or `pnpm test`, `yarn test`) is not followed by a second run.
+- **When ankur can't tell what changed, the suite runs.** A merged crew with no merge record, or a range git cannot read, counts as a code change.
+- **A goal with no goal check of its own runs the suite alone.** It is no longer an error.
+- **The result says what happened.** The JSON line gains `suite: {ran, why, exit?}`, and a red suite fails the goal check.
+- **The suite gets its own time.** The goal's check and the suite run as two background jobs, each with the whole run limit (`ANKUR_HEAVY_RUN_MS`). When the call returns `pending`, run it again: a check that already passed is not run a second time.
+- **A skipped suite before merge is never silent.** The log names the crew and the reason the suite did not run there.
+
+### Config and package.json changes
+
+- **Fields that can steer tests still run the full suite.** A change to `targetedTests`, `testGlobs`, `target`, `heavySlots`, `staticChecks`, a package's `name` (workspaces and self-reference imports resolve by it), `scripts` or any dependency field, a key ankur does not know, a file that does not parse, or a file added or deleted still runs it. Lockfiles, tsconfig, `.npmrc`, `.nvmrc` and tool config files still run it too.
+- **If your own tests read `.claude/ankur.json`,** add a `targetedTests.map` entry for that path naming them, so a config edit they depend on still runs them.
+
+### Fixed
+
+- **The update steps work on an existing install.** The release notes and the README now give the marketplace and plugin commands above. Installing again does not move an existing install to a new version.
+
 ## 0.40.0 (2026-11-21)
 
-You can now approve open requests in your own words, and one reply can answer several of them. Nothing else changes. Update with `claude plugin marketplace update ankur`, then reinstall: `claude plugin install ankur@ankur`.
+You can now approve open requests in your own words, and one reply can answer several of them. Nothing else changes. To update an existing install, run `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code.
 
 ### Approve in plain words
 

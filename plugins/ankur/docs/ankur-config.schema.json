@@ -107,7 +107,7 @@
       "items": { "type": "string", "minLength": 1 }
     },
     "targetedTests": {
-      "description": "0.31.0 (speed goal item 1): how a crew's green check picks its tests. factory check maps the crew's diff to the test files that import a changed file, transitively, or that name it in a string (bin/testmap.ts selectTests), and runs those outside the heavy slot. It runs the full suite instead when reach is unclear: a config file or dependency manifest, a shared test helper or fixture, code no test reaches, or a deleted code file. A large diff selects the union of each changed file's reach (0.34.0). The full suite also runs once before merge, after the QC PASS.",
+      "description": "0.31.0 (speed goal item 1): how a crew's green check picks its tests. factory check maps the crew's diff to the test files that import a changed file, transitively, or that name it in a string (bin/testmap.ts selectTests), and runs those outside the heavy slot. It runs the full suite instead when reach is unclear: a config file or dependency manifest, a shared test helper or fixture, code no test reaches, or a deleted code file. A large diff selects the union of each changed file's reach (0.34.0). After the QC PASS the full suite runs before merge only when the crew's change cannot be bounded, and it runs once per goal at the goal check.",
       "type": "object",
       "additionalProperties": false,
       "properties": {

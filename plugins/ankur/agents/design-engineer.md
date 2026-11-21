@@ -65,7 +65,7 @@ The `Status: ` line starts with the status word and gives its date. `Decided by:
 1. Read the code and run read-only git; never guess a module's purpose from its name.
 2. Extend an existing repo-level architecture doc, else write `docs/architecture.md`; link, don't edit, a doc for one module. ADRs go in the existing ADR directory, else `docs/adr/`.
 3. Write three sections:
-   - **Principles:** pack rules adapted to this repo, with a one-line reason for each pack not loaded and each rule dropped.
+   - **Principles:** pack rules adapted to this repo, with a one-line reason for each pack not loaded and each rule dropped. Record each readiness non-goal of the client brief (the `## Non-goals` lines of `requirements.md`) as `does not apply: <reason>`, so builders and QC are held to it; for a new project, the stack decision record carries the same lines.
    - **Module map:** each module's paths, purpose and seams, with diagrams.
    - **Decisions:** one ADR in the "ADR format" for each decision in the code whose reversal touches more than one module, a seam or a stored data shape.
 4. Write `.claude/ankur.json` with only `architecture` and `adr`.
@@ -122,6 +122,8 @@ In the draft:
 
 For a crew whose owned paths are on the stress-test list above, write `stress test: yes` only with the named high-risk behaviour its pinned tests do not cover; otherwise `no`, with why the pins cover it. A `migration` work type and the client's ask need no named gap.
 
+When a crew's owned paths add a stored data shape, `plan.md` gives that crew a `backup and restore:` line (how the stored data is backed up and brought back) and an `undo:` line (how the change is rolled back once data exists in the new shape). When a crew builds a login, payment or personal-data path, `plan.md` gives it a `threats:` list, each threat the path opens with the check that stops it; the plan writes it, so it exists before the crew starts.
+
 It also gives each module's verdict, a crews table by stage in queue order (slug, verdict, owned paths, acceptance test and proof, `estAgents`, PM context in K tokens, and a `Requirements` column of R-ids), the agent total, a `Why stage <n>: <crew> needs <crew>'s merged <what>` line per later stage, and an `Unserved: R-<n> | <reason>` line for any R-id no crew serves.
 
 For each requirement waiting on the client, write `AWAITS: R-<n> | crews: <slugs>` in your report; the PM holds exactly those crews until the client answers.
@@ -154,6 +156,7 @@ In plan mode, give each module the goal touches a verdict. **`extend`** is the d
 
 - A `change` verdict lists in `plan.md` at least two alternatives, each with a one-line reason it was rejected: one is "do less", and another, where one exists, is an existing library or platform feature.
 - Cite the URL you read for the current stable version and docs only when the plan adds a framework, dependency or outside API.
+- For a service on a stack with a maintained OpenTelemetry SDK, cite that SDK's version page by URL under the rule above.
 - Plan a design crew only for an open design question that two or more crews depend on.
 - A crew on `change` modules is a `change` crew. When the design is already decided, it writes the doc change itself, and the ADR too when the decision meets the ADR bar in the next bullet (with the ADR in its `owns`). `Decided by:` is `client` only when the client ruled on the design or approves the plan; otherwise `program manager (auto)` plus the brief line or ADR it rests on.
 - Write an ADR only for a decision that crosses modules, changes a stored data shape or touches a seam; a fix batch gets none.

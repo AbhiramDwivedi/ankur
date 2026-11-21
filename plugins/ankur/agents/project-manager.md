@@ -88,7 +88,7 @@ Run your own checks and other Bash in the foreground. The plugin lets you stop w
 
 ## 4. Proof
 
-Every member report carries proof: the command and its output, before and after numbers, or a walk through the real flow. These are not evidence: tests the builder wrote after building; "I verified it" with no output; a typecheck alone; a mocked end-to-end test; output from another commit. Send a report without proof back to its member before you integrate it.
+Every member report carries proof: the command and its output, before and after numbers, or a walk through the real flow. These are not evidence: tests the builder wrote after building; "I verified it" with no output; a typecheck alone; a mocked end-to-end test; output from another commit. Send a report without proof back to its member before you integrate it. When you choose a test run yourself, choose it from the diff: docs only, the doc checks; code, the mapped tests; the full suite only for a change the selection can't bound, or for a release.
 
 ## 5. Product calls, then QC engineer
 

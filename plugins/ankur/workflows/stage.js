@@ -2325,14 +2325,22 @@ function noteTests(crew, parsed) {
 }
 
 // 0.31.0 item 1: the full suite runs once before merge, after a QC PASS, unless the green check already ran it on this head (a diff
-// whose reach was unclear). null when it passed or was not needed; the failing check result otherwise.
+// whose reach was unclear). The check is asked to skip a bounded change (`--skip-bounded`): when its selection over the
+// whole crew diff is targeted it runs no suite and its tests carry `fullSkipped`, the reason, which is logged (no silent skip);
+// the goal end runs the suite once. A crew whose selection cannot bound the change keeps its full run.
+// null when it passed, was skipped or was not needed; the failing check result otherwise.
 async function fullSuite(crew) {
   const gr = crew.greenRecord
   if (crew.fullAt === crew.head || (gr && gr.head === crew.head && gr.mode === 'full')) return null
   crew.step = 'full-suite'
-  const g = await check(crew, 'green', null, '--full')
+  const g = await check(crew, 'green', null, '--full --skip-bounded')
   if (g.met) {
     crew.fullAt = crew.head
+    const t = g.parsed && isPlainObject(g.parsed.tests) ? g.parsed.tests : null
+    if (t && typeof t.fullSkipped === 'string' && t.fullSkipped) {
+      log(`full suite skipped before merge: crew ${crew.slug}, ${t.fullSkipped}`)
+      return null
+    }
     log(`full suite before merge: crew ${crew.slug}, passed on head ${crew.head}`)
     return null
   }

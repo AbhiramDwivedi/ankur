@@ -42,6 +42,17 @@ The server prints one line, `ankur-ui listening on http://127.0.0.1:<port>/?toke
 
 [ui/README.md](ui/README.md) has the flags and how to stop it.
 
+## Update
+
+To move an existing install to a new version, update the marketplace, then the plugin. Installing again does not do this: it reports that ankur is already installed and leaves the old version in place.
+
+```sh
+claude plugin marketplace update ankur
+claude plugin update ankur@ankur
+```
+
+Then restart Claude Code. The new version loads on the restart.
+
 ## What a run costs
 
 A run costs tokens and time. One goal starts several agents: a project manager, builders, a QC engineer and sometimes a stress tester per crew. The agents run in parallel, so a run finishes sooner than one session would, and it spends more tokens in total. A large goal with several crews costs more than a small one.

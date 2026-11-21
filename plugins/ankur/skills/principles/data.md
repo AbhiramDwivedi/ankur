@@ -32,6 +32,8 @@ Use this pack for any change to a batch or streaming pipeline, an ETL or ELT job
    Test: no step in the diff writes directly to the table or path consumers read; it writes to staging, then renames or swaps.
 14. Personal and sensitive columns are tagged in the schema and masked or dropped before they leave the restricted zone.
    Test: each new column holding personal data in the diff has a classification tag and a masking or drop rule in the stage that leaves the restricted zone.
+15. Every store holding data the project cannot rebuild from its sources has a backup that meets the data-loss and recovery-time limits the architecture doc records, and a restore from that backup has been tried once.
+   Test: the diff or the runbook names the backup of each new store (schedule, retention, where it lives), and a recorded restore (a script, a CI job or a dated runbook entry) brought the data back into a scratch target and checked it.
 
 ## Notes
 

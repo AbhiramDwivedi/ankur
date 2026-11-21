@@ -24,6 +24,7 @@ Each pack is a numbered list of rules. Every rule has a one-line test that names
 1. Always load `core.md`.
 2. Add each pack whose domain the work touches. QC engineer by the paths and files the work changes, not by what the project calls itself:
    - an HTTP route, request handler, worker entry point, or service deploy config means `service.md`;
+   - a scheduled job or queue worker means `service.md` even when it has no HTTP route;
    - UI components, pages, or stylesheets mean `frontend.md`;
    - a pipeline step, a migration, or a schema file between stages means `data.md`;
    - a prompt file, an LLM client call, or an eval suite means `ai.md`;

@@ -381,9 +381,10 @@ export function cmdPlanCheck(f: Flags): Obj {
   const warnings = stageWarnings(dirOf(f), crews)
   // a bare-directory owns entry (`dir/`) is read as `dir/**` by owns-check and the stage split; say so, so a plan that meant it is explicit
   for (const c of crews) for (const g of Array.isArray(c.owns) ? c.owns : []) if (typeof g === 'string' && g.endsWith('/')) warnings.push(`crew ${name(c)}: owns entry ${g} is a bare directory, read as ${g}**; write ${g}** to say so`)
-  // 0.31.0 item 1: the green check runs the tests the diff reaches and the full suite runs before merge, so a trailing whole-suite
-  // step only slows every check; factory check cuts it (stripBlanketSuite), and the plan should drop it
-  for (const c of crews) if (typeof c.acceptanceTest === 'string' && stripBlanketSuite(c.acceptanceTest).blanket) warnings.push(`crew ${name(c)}: the acceptance test ends with the whole test suite (npm test); the green check runs the tests the diff reaches and the full suite runs before merge, so drop that step`)
+  // 0.31.0 item 1: the green check runs the tests the diff reaches, and the full suite runs before merge only when the selection
+  // cannot bound the crew's change and once at goal check, so a trailing whole-suite step only slows every check; factory check
+  // cuts it (stripBlanketSuite), and the plan should drop it
+  for (const c of crews) if (typeof c.acceptanceTest === 'string' && stripBlanketSuite(c.acceptanceTest).blanket) warnings.push(`crew ${name(c)}: the acceptance test ends with the whole test suite (npm test); the green check runs the tests the diff reaches, and the full suite runs before merge only when the selection cannot bound the change, and once at goal check, so drop that step`)
   // a file owned (by exact path, not glob) by more than half of a goal's crews, in a goal of 3 crews or more, is a hotspot
   const byGoal = new Map<string, any[]>()
   for (const c of crews) byGoal.set(goalOf(c), [...(byGoal.get(goalOf(c)) ?? []), c])

@@ -22,8 +22,8 @@ Applies to every change in every project, whatever its language or domain. It as
    Test: each new external call and error branch in the diff logs or records a metric with a stable event name and context fields.
 9. Errors and logs never carry secrets or personal data.
    Test: grep the diff for tokens, passwords, keys and full request bodies inside log, print or error-message calls; none appear.
-10. New settings, endpoints and permissions ship with a secure default: off, closed or least access until configured.
-   Test: every new flag, CORS rule, auth check or permission in the diff defaults to deny or disabled.
+10. New settings, endpoints and permissions ship with a secure default: off, closed or least access until configured. A login, payment or personal-data path ships only after a written list of what can go wrong on it.
+   Test: every new flag, CORS rule, auth check or permission in the diff defaults to deny or disabled, and each new login, payment or personal-data path has a written list of what can go wrong (in the design note, an ADR or the architecture doc) whose every item names its guard or the risk the client accepted.
 11. Secrets come from configuration or a secret store, never from source.
    Test: a secret scanner (for example `gitleaks detect`) or a grep for key patterns finds nothing new in the diff.
 12. Code is written for a current requirement, not a guessed future one (YAGNI).
@@ -33,4 +33,4 @@ Applies to every change in every project, whatever its language or domain. It as
 14. Dead code goes in the same change that makes it dead.
    Test: no function, file or flag the diff stops using is left in place; a search for its name finds no remaining definition.
 15. A new dependency is added only when neither the language's standard library nor a dependency the project already has does the job, and the change says why.
-   Test: each package the diff adds to a manifest is named in the approved scope or has a `Why:` line in its commit message, and no existing manifest entry or standard-library API already does that job.
+   Test: each package the diff adds to a manifest is named in the approved scope or has a `Why:` line in its commit message, no existing manifest entry or standard-library API already does that job, and the stack's audit command (for example `npm audit`, `pip-audit` or `cargo audit`) runs as a static check and reports no new known-vulnerable package.

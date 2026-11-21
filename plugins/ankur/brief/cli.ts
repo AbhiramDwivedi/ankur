@@ -1,16 +1,17 @@
-// The client brief's command line: next, remaining, check and trace over the branches file,
+// The client brief's command line: next, remaining, skipped, check and trace over the branches file,
 // the brief state file and the requirements ledger. `main` returns the text and exit code; running the file
 // prints the text and sets the code. Erasable TypeScript only, Node standard library only (P19).
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { checkTrace, nextBranches, parseBranches, parseRequirements, remainingBranches } from './ledger.ts'
+import { checkTrace, DELIVERABLES, nextBranches, parseBranches, parseRequirements, remainingBranches, skippedBranches } from './ledger.ts'
 import type { Branch, BriefState } from './ledger.ts'
 
 // argument counts after the command name
 export const COMMANDS = {
   next: { min: 2, max: 3 },
   remaining: { min: 2, max: 2 },
+  skipped: { min: 2, max: 2 },
   check: { min: 1, max: 1 },
   trace: { min: 3, max: 3 },
 }
@@ -43,6 +44,7 @@ const loadState = (path: string): BriefState => {
   for (const k of ['packs', 'opened', 'requirements']) if (!Array.isArray(s[k])) throw bad(`${k} must be an array`)
   if (s.visits === null || typeof s.visits !== 'object' || Array.isArray(s.visits)) throw bad('visits must be an object')
   if (typeof s.stopped !== 'boolean') throw bad('stopped must be a boolean')
+  if (s.deliverable !== undefined && !(DELIVERABLES as readonly string[]).includes(s.deliverable as string)) throw bad(`deliverable must be one of ${DELIVERABLES.join(', ')}`)
   return s as unknown as BriefState
 }
 
@@ -68,6 +70,11 @@ const run = (cmd: string, args: string[]): { code: number; lines: string[] } => 
   if (cmd === 'remaining') {
     const bs = loadBranches(args[0])
     return { code: 0, lines: nextLines(remainingBranches(bs, loadState(args[1]))) }
+  }
+  if (cmd === 'skipped') {
+    const state = loadState(args[1])
+    const bs = skippedBranches(loadBranches(args[0]), state)
+    return { code: 0, lines: bs.length === 0 ? ['SKIP: none'] : bs.map((b) => `SKIP: ${b.id} | ${b.pack} | does not apply to ${state.deliverable}: ${b.otherwise}`) }
   }
   if (cmd === 'check') {
     const r = parseRequirements(read(args[0]))

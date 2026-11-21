@@ -11,6 +11,8 @@ Each `## <id>` section is one branch. Text before the first `## ` is ignored. Fi
 - `Recommend`: how to pick the recommended answer from the facts.
 - `Writes`: the kind of requirement the answer becomes.
 - `Opens`: branches an answer can make relevant.
+- `Deliverables`: optional, the kinds of deliverable the branch applies to, comma-and-space separated, from `service job pipeline cli library web mobile macro script other`. With no list, the branch applies to every kind. A run whose `deliverable` is set and is not `other` never asks a branch whose list leaves its kind out; `skipped` prints that branch instead.
+- `Otherwise`: the one-line reason the branch does not apply to the kinds its `Deliverables` leaves out. A branch has both fields or neither.
 
 Order matters: `next` walks this file top to bottom and stops a batch after the first branch that has `Opens`.
 
@@ -70,7 +72,7 @@ Fact: third-party SDKs, API clients and base URLs (`package.json` or `pyproject.
 Ask: Which outside services does this talk to: payments, email, maps, an identity provider, another team's API? docs/requirements.md is committed to the repo, so name the kind of service (for example "a card payment provider") and leave out names, emails, user paths and private infrastructure details.
 Recommend: Recommend the integrations the dependencies and client code already show. With none, recommend "none" and let the goal text add any it names.
 Writes: constraint
-Opens: webhooks, secrets
+Opens: webhooks, secrets, threat
 
 ## auth
 Pack: core
@@ -79,7 +81,7 @@ Fact: login, session or token code and identity-provider config (`src/auth*`, `m
 Ask: Who is allowed in, and how do they prove who they are: nobody (public), a shared password, accounts you manage, or sign-in through an existing provider?
 Recommend: Recommend the scheme the repo already uses. With none, recommend sign-in through an existing provider when `users` has more than one type, and "no login" when it is one person or a library.
 Writes: constraint
-Opens: authz
+Opens: authz, threat
 
 ## secrets
 Pack: core
@@ -96,7 +98,7 @@ Fact: stored personal or financial fields (`schema*`, `migrations/`, `models/`, 
 Ask: Will this store or handle personal, financial, health or otherwise private data? Which fields?
 Recommend: Recommend "yes" and list the field names from the schema when the facts show email, name, address, payment or health columns; otherwise recommend "no sensitive data".
 Writes: constraint
-Opens: compliance, retention
+Opens: compliance, retention, threat
 
 ## scale
 Pack: core
@@ -130,12 +132,70 @@ Ask: What is the monthly budget for running this, and what would be a surprise?
 Recommend: Recommend a ceiling just above what the current hosting and API plan costs, or the free tier when the facts show no paid plan.
 Writes: nfr
 
+## observability
+Pack: core
+Visit: standard, large
+Deliverables: service, job, pipeline, cli, library, web, mobile
+Otherwise: it runs by hand in front of the person who started it, who sees each failure on screen, and no operator reads its logs later
+Fact: a logging library, an OpenTelemetry SDK or a collector config (`package.json` or `pyproject.toml` dependencies such as `pino`, `winston`, `structlog` or `@opentelemetry/*`; `otel*.yaml`, `otel-collector*`, the hosting platform's log settings)
+Ask: When something goes wrong in production, where should its logs, traces and metrics go: only the hosting platform's own log view, or an outside monitoring service you pay for?
+Recommend: Recommend the logging and telemetry the repo already uses. With none, recommend structured log lines to stdout (core rule 8) and, for a service or job on a stack with a maintained OpenTelemetry SDK, traces and metrics through that SDK (service rule 14), kept on the hosting platform's own log view so they add no recurring cost.
+Writes: constraint
+
+## supply-chain
+Pack: core
+Visit: standard, large
+Deliverables: service, job, pipeline, cli, library, web, mobile, script
+Otherwise: a spreadsheet macro has no package manifest or lockfile, so there is no dependency list for an audit command to check
+Fact: a lockfile and an audit step (`package-lock.json`, `pnpm-lock.yaml`, `poetry.lock`, `Cargo.lock`; `npm audit`, `pip-audit` or `cargo audit` in `package.json` scripts or `.github/workflows/`; `dependabot.yml`, `renovate.json`)
+Ask: Should every change be checked for packages with known security holes, and should a hit block the change or only warn?
+Recommend: Recommend the audit step the repo already runs. With none, recommend the stack's own audit command as a static check that blocks a change adding a known-vulnerable package (core rule 15).
+Writes: constraint
+
+## shutdown
+Pack: core
+Visit: standard, large
+Deliverables: service, job, pipeline
+Otherwise: it is not a long-running service, scheduled job or pipeline, so no platform stops it mid-work to deploy or scale it and no in-flight work waits on a stop signal
+Fact: signal handlers and drain logic (`SIGTERM`, `process.on('SIGTERM'`, `signal.signal`, `terminationGracePeriodSeconds`, `stop_grace_period`, a queue consumer's ack or nack on exit)
+Ask: When the platform stops this to deploy or scale, what should happen to work in progress: finish it, hand it back to the queue, or drop it, and how long may that take?
+Recommend: Recommend the stop handling the repo already has. With none, recommend: stop taking new work, finish or hand back in-flight work within 30 seconds, then exit (service rule 7).
+Writes: nfr
+
+## rollback
+Pack: core
+Visit: standard, large
+Deliverables: service, job, pipeline, cli, library, web, mobile
+Otherwise: nothing is released or deployed, so there is no earlier version to restore; the person who runs it keeps the earlier copy or does not run it again
+Fact: release and rollback steps (`.github/workflows/`, `scripts/release*`, `scripts/rollback*`, platform rollback commands in `docs/`, migrations that have a down step)
+Ask: If a release goes wrong, how fast must the previous version be back, and may a release change stored data in a way that can't be undone?
+Recommend: Recommend the rollback path the repo already documents. With none, recommend one documented command or pipeline action that restores the previous version (infra rule 5), and schema changes that the previous release can still read (data rule 5, infra rule 6).
+Writes: constraint
+
+## handoff
+Pack: core
+Visit: standard, large
+Deliverables: service, job, pipeline
+Otherwise: no one keeps it running after it ships; it is used, installed or published, so its usage notes cover what a runbook would
+Fact: runbooks and operating notes (`docs/runbook*`, `RUNBOOK.md`, `docs/operations*`, on-call or deploy notes in `README.md`)
+Ask: Who keeps this running after it ships, and what must they be able to do without asking the people who built it?
+Recommend: Recommend the runbook the repo already has, extended for this goal. With none, recommend a runbook in the repo that says how to run, deploy, roll back and diagnose it (service rule 15).
+Writes: constraint
+
 ## compliance
 Pack: core
 Visit: opened
 Fact: policy and audit documents (`docs/compliance*`, `SECURITY.md`, `PRIVACY*`, DPA or certification references)
 Ask: Does a law, contract or customer rule apply to this data, such as GDPR, HIPAA, PCI or a customer security review?
 Recommend: Recommend the regimes the repo's docs already name. Absent those, recommend GDPR when `users` includes people in the EU and "none known" otherwise.
+Writes: constraint
+
+## threat
+Pack: core
+Visit: opened
+Fact: an existing threat model or security notes (`docs/threat*`, `SECURITY.md`, security sections of `docs/` or the architecture doc)
+Ask: This builds a login, payment or personal-data path. Which of these worries you most: someone signing in as another user, data leaking to the wrong person, a payment going through twice or not at all, or a partner service being spoofed?
+Recommend: Recommend a written list of what can go wrong on each login, payment or personal-data path the goal adds, made before that path is built, with a guard named for every item or the risk the client accepts (core rule 10).
 Writes: constraint
 
 ## authz
@@ -217,6 +277,14 @@ Fact: pipeline definitions, source-to-table mappings, data catalogue entries (`d
 Ask: Do you need to trace each number or record back to where it came from?
 Recommend: Recommend "yes, record the source and run for every table" when the facts show multiple sources feeding one table; otherwise "no".
 Writes: constraint
+
+## backup
+Pack: data
+Visit: standard, large
+Fact: backup and restore settings (point-in-time recovery or snapshot settings in `*.tf` or platform config, dump jobs in `cron*` or `scripts/backup*`, restore notes in `docs/runbook*`)
+Ask: If the stored data were lost, how much of the most recent data could you afford to lose, and how soon must it be back?
+Recommend: Recommend the backup the platform or repo already runs, with its loss window and restore time. With none, recommend a nightly backup (up to 24 hours of data lost, back within 4 hours) for an internal tool and point-in-time recovery for data users enter, and a restore from it tried once (data rule 15).
+Writes: nfr
 
 ## model-choice
 Pack: ai

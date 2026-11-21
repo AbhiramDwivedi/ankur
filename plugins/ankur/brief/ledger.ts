@@ -5,9 +5,12 @@
 // the packs a branch can belong to; `core` is always a candidate
 export const PACKS = ['core', 'service', 'frontend', 'data', 'ai', 'infra', 'library'] as const
 
+// the kinds of deliverable a run can build; `other` turns the kind filter off
+export const DELIVERABLES = ['service', 'job', 'pipeline', 'cli', 'library', 'web', 'mobile', 'macro', 'script', 'other'] as const
+
 const VISITS = ['standard', 'large', 'opened']
 const WRITES = ['functional', 'nfr', 'constraint', 'non-goal']
-const FIELDS = ['Pack', 'Visit', 'Fact', 'Ask', 'Recommend', 'Writes', 'Opens']
+const FIELDS = ['Pack', 'Visit', 'Fact', 'Ask', 'Recommend', 'Writes', 'Opens', 'Deliverables', 'Otherwise']
 const REQUIRED = ['Pack', 'Visit', 'Ask', 'Recommend', 'Writes']
 const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
@@ -20,6 +23,8 @@ export type Branch = {
   recommend: string
   writes: string
   opens: string[]
+  deliverables?: string[]
+  otherwise?: string
 }
 
 export type Size = 'small' | 'standard' | 'large'
@@ -27,6 +32,7 @@ export type Size = 'small' | 'standard' | 'large'
 export type BriefState = {
   goal: string
   size: Size
+  deliverable?: string
   packs: string[]
   opened: string[]
   requirements: string[]
@@ -87,6 +93,13 @@ export const parseBranches = (md: string): Branch[] => {
     if (!WRITES.includes(f.Writes)) throw new Error(`branch ${id}: bad Writes: ${f.Writes}`)
     const b: Branch = { id, pack: f.Pack, visit, ask: f.Ask, recommend: f.Recommend, writes: f.Writes, opens: list(f.Opens ?? '') }
     if (f.Fact !== undefined && f.Fact !== '') b.fact = f.Fact
+    if (f.Deliverables !== undefined) {
+      const kinds = list(f.Deliverables)
+      if (kinds.length === 0 || kinds.some((k) => !(DELIVERABLES as readonly string[]).includes(k))) throw new Error(`branch ${id}: bad Deliverables: ${f.Deliverables}`)
+      if (f.Otherwise === undefined || f.Otherwise === '') throw new Error(`branch ${id}: Deliverables needs Otherwise`)
+      b.deliverables = kinds
+      b.otherwise = f.Otherwise
+    } else if (f.Otherwise !== undefined) throw new Error(`branch ${id}: Otherwise needs Deliverables`)
     out.push(b)
   }
   for (const b of out) {
@@ -95,12 +108,23 @@ export const parseBranches = (md: string): Branch[] => {
   return out
 }
 
-const isCandidate = (b: Branch, state: BriefState): boolean => {
+// the kind filter: a branch with a Deliverables list does not apply to a set kind (not `other`) outside that list
+const kindSkips = (b: Branch, state: BriefState): boolean =>
+  b.deliverables !== undefined && state.deliverable !== undefined && state.deliverable !== 'other' && !b.deliverables.includes(state.deliverable)
+
+// visit, size, pack and opened, with no kind filter
+const wouldAsk = (b: Branch, state: BriefState): boolean => {
   if (Object.hasOwn(state.visits, b.id)) return false
   if (state.opened.includes(b.id)) return true
   // "the size is in its Visit", read literally (a standard-only branch is not asked at large)
   return b.visit.includes(state.size) && (b.pack === 'core' || state.packs.includes(b.pack))
 }
+
+const isCandidate = (b: Branch, state: BriefState): boolean => wouldAsk(b, state) && !kindSkips(b, state)
+
+// the branches only the kind filter removed, in file order (visited ones never)
+export const skippedBranches = (branches: Branch[], state: BriefState): Branch[] =>
+  branches.filter((b) => wouldAsk(b, state) && kindSkips(b, state))
 
 // every branch still to ask, in file order, whatever `stopped` says and with no cap
 export const remainingBranches = (branches: Branch[], state: BriefState): Branch[] =>

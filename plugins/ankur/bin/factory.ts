@@ -89,6 +89,7 @@ const PLUGIN_COMMANDS: Record<string, Cmd> = {
   'queue-set': async (f) => (await import('./queue.ts')).QUEUE_COMMANDS['queue-set']!(f),
   unattended: async (f) => (await import('./queue.ts')).QUEUE_COMMANDS.unattended!(f),
   worktypes: async (f) => (await import('./worktypes.ts')).WORKTYPE_COMMANDS.worktypes!(f),
+  'audit-checks': async (f) => (await import('./audit-checks.ts')).cmdAuditChecks(f),
   'official-plugins': async (f) => (await import('./official-plugins.ts')).cmdOfficialPlugins(f),
 }
 const SHADOWED: string[] = []

@@ -188,10 +188,13 @@ export function bashRun(cwd: string, command: string, group?: { dir: string; lab
   }
 }
 
-// 0.31.0 item 1: the tests a green check runs after the acceptance test. bin/testmap.ts maps the crew's diff (merge-base with the
-// target ... HEAD) to the test files it reaches, or to the full suite when reach is unclear; --full forces the full suite (the run
-// before merge). A targeted set runs outside the heavy slot; the full suite takes the slot for exactly its own run, then records
-// its time for slotWaitMs. A slot not free within heavyWaitMs comes back as `slot: {ran: false}`, which heavy reports as busy.
+// 0.31.0 item 1: the tests a green check runs after the acceptance test. bin/testmap.ts maps the crew's diff to the test files it
+// reaches, or to the full suite when reach is unclear; --full alone forces the full suite. The run before merge passes
+// --full --skip-bounded: the selection then covers the crew's whole diff from the merge base with the target (never from the last
+// green head, which holds only the last round), the suite runs only when that selection is full, and a targeted one runs nothing
+// and carries `tests.fullSkipped` (the full suite runs once at goal check). A targeted set runs outside the heavy slot; the full
+// suite takes the slot for exactly its own run, then records its time for slotWaitMs. A slot not free within heavyWaitMs comes
+// back as `slot: {ran: false}`, which heavy reports as busy.
 // the files of --only (comma separated); a name with a character a shell would read is refused, never passed on
 // A path missing under cwd means the narrowed run could never pass: [] then, so the whole check runs and the record is not `only`.
 function onlyFiles(f: Flags, cwd: string): string[] {
@@ -211,22 +214,27 @@ function checkTests(f: Flags, dir: string, slug: string, cwd: string): { exit: n
     const r = bashRun(cwd, command)
     return { exit: r.exit, text: `\n$ ${command}\n${r.text}`, tests: { mode: 'targeted', why: ['--only: the test files the last green check failed on'], files: only, commands: [command] } }
   }
+  const skipBounded = f['skip-bounded'] === true
   let config: TestsConfig = {}
   let sel: Selection
+  let bounded: string | undefined
   try {
     const t = configOf(repoOf(f)).targetedTests
     config = isObj(t) ? (t as TestsConfig) : {}
     // 0.33.0 item 1a: from the crew's last passed green head to HEAD (that range holds what a target merge since then brought in),
-    // else from the merge base with the target
-    const green = lastGreenHead(dir, slug, cwd)
+    // else from the merge base with the target. --skip-bounded judges the whole crew diff, so it always starts at the merge base.
+    const green: { head?: string; why: string } = skipBounded ? { why: '--skip-bounded: the whole crew diff' } : lastGreenHead(dir, slug, cwd)
     const from = green.head ?? baseOf(cwd, settingsFor(f, repoOf(f)).target)
     sel = selectForCheckout(cwd, from, config)
+    if (skipBounded && sel.mode === 'targeted') bounded = `the crew diff is bounded: ${sel.why.join('; ')}; the full suite runs once at goal check`
     sel.why = [green.head !== undefined ? `diff base: the last green head ${green.head.slice(0, 12)} of crew ${slug}` : `diff base: the merge base with the target ${from.slice(0, 12)} (${green.why})`, ...sel.why]
   } catch (e) {
     sel = { mode: 'full', why: [`the diff could not be mapped: ${e instanceof Error ? e.message : String(e)}`], files: [], commands: [] }
     const full = typeof config.full === 'string' && config.full.trim() !== '' ? config.full.trim() : existsSync(`${cwd}/package.json`) ? 'npm test' : undefined
     if (full !== undefined) sel.full = full
   }
+  // the green check on this head already ran the targeted set, so a bounded crew diff runs nothing more before merge
+  if (bounded !== undefined) return { exit: 0, text: `\nfull suite skipped: ${bounded}\n`, tests: { mode: 'targeted', why: sel.why, files: sel.files, commands: [], fullSkipped: bounded } }
   if (f.full === true && sel.mode !== 'full') sel = { mode: 'full', why: ['--full: the full suite before merge'], files: [], commands: [], ...(sel.full === undefined ? {} : { full: sel.full }) }
   const tests: Obj = { mode: sel.mode, why: sel.why, files: sel.files, commands: sel.mode === 'full' ? (sel.full === undefined ? [] : [sel.full]) : sel.commands }
   if (sel.mode === 'targeted') {
@@ -431,6 +439,7 @@ export function cmdCheck(f: Flags): Obj {
   const cwd = flat(need(f, 'cwd'))
   const expect = need(f, 'expect')
   if (expect !== 'red' && expect !== 'green') throw usage('--expect must be red or green')
+  if (f['skip-bounded'] !== undefined && !(f['skip-bounded'] === true && f.full === true)) throw usage('--skip-bounded takes no value and needs --full')
   const crew = loadPlan(dir).crews.find((c: Obj) => isObj(c) && c.slug === slug)
   if (crew === undefined) throw usage(`no crew ${slug} in the plan`)
   const { command, suiteOnly } = acceptanceFor(dir, slug, crew)
