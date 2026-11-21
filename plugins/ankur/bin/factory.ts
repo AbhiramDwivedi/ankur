@@ -23,6 +23,7 @@ const CORE_COMMANDS: Record<string, Cmd> = {
   'decision-ack': async (f) => (await import('./factory/decisions.ts')).cmdDecisionAck(f),
   'decision-checkpoint': async (f) => (await import('./factory/decisions.ts')).cmdDecisionCheckpoint(f),
   'knowledge-lint': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdKnowledgeLint(f),
+  'static-check': async (f) => (await import('./factory/static-checks.ts')).cmdStaticCheck(f),
   'knowledge-config-gate': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdKnowledgeConfigGate(f),
   'gated-merge': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdGatedMerge(f),
   'knowledge-migrate': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdKnowledgeMigrate(f),
@@ -167,26 +168,38 @@ const heavyCmd = async (a: string[]): Promise<{ body: Obj; code: number }> => (a
 const heavyJobCmd = async (a: string[]): Promise<{ body: Obj; code: number }> => (await import('./factory/heavy.ts')).heavyJobMain(a)
 const goalCheckCmd = async (a: string[]): Promise<{ body: Obj; code: number }> => (await import('./factory/decide.ts')).goalCheckMain(a)
 const goalCheckJobCmd = async (a: string[]): Promise<{ body: Obj; code: number }> => (await import('./factory/decide.ts')).goalCheckJobMain(a)
+// `--help` or `-h` as a whole token anywhere before a bare `--` prints the usage and runs nothing, before any flag is taken or
+// command dispatched. Tokens after a bare `--` belong to the wrapped command, and a `--flag=value` token is one token, so neither counts.
+const wantsHelp = (argv: string[]): boolean => {
+  const end = argv.indexOf('--')
+  return argv.slice(0, end === -1 ? argv.length : end).some((a) => a === '--help' || a === '-h')
+}
+const helpBody = (argv: string[]): Obj => ({ ok: true, usage: `factory.ts <command> [flags]${argv[0] !== undefined && Object.hasOwn(COMMANDS, argv[0]) ? ` (asked about: ${argv[0]})` : ''}; every command prints one JSON line and exits 0 (ok), 1 (refused) or 2 (usage error); --help or -h prints this text and runs nothing`, commands: Object.keys(COMMANDS) })
 if (isMain) {
-  const { on, argv: plain0 } = takeStatusFlag(process.argv.slice(2))
-  const { riders, argv: plain1 } = takeRiderFlags(plain0)
-  const { admit: admitArgs, argv: plain } = await takeAdmitFlag(plain1)
-  const { slug: reapSlug, argv } = takeReapFlag(plain)
-  // an attach to a heavy job already running runs no fold
-  const attach = argv[0] === 'heavy' && (await import('./factory/heavy.ts')).heavyAttaches(argv.slice(1))
-  const first = reapSlug === null || attach ? null : await reapFirst(argv, reapSlug)
-  const admitted = admitArgs === null || attach ? null : await admitFirst(argv, admitArgs)
-  // 0.34.0: the fold riders (flags.ts takeRiderFlags); an attach runs none
-  const riderFirst = attach ? {} : await runRidersFirst(riders, argv, main)
-  const { body, code } = argv[0] === 'heavy' ? await heavyCmd(argv.slice(1)) : argv[0] === 'heavy-job' ? await heavyJobCmd(argv.slice(1)) : argv[0] === 'gates' ? await gatesMain(argv.slice(1)) : argv[0] === 'goal-check' ? await goalCheckCmd(argv.slice(1)) : argv[0] === 'goal-check-job' ? await goalCheckJobCmd(argv.slice(1)) : await main(argv)
-  Object.assign(body, riderFirst)
-  if (!attach) await runRidersAfter(riders, argv, body, code, main)
-  if (first && !Array.isArray(first.reaped)) body.reapedFirst = first
-  // an attach skipped the fold, so the caller must keep its reap due
-  if (attach && reapSlug !== null) body.reapSkipped = true
-  if (admitted) body.admittedFirst = admitted
-  // persona-install refuses with one stderr line too (ankur:init shows it), besides the JSON line every command prints
-  if (argv[0] === 'persona-install' && code !== 0) process.stderr.write(`persona-install: ${typeof body.error === 'string' ? body.error : JSON.stringify(body)}\n`.replace(/\n(?=.)/g, ' '))
-  process.stdout.write(JSON.stringify(body) + '\n' + (on ? statusLine(body) + '\n' : ''))
-  process.exitCode = code
+  if (wantsHelp(process.argv.slice(2))) {
+    process.stdout.write(JSON.stringify(helpBody(process.argv.slice(2))) + '\n')
+    process.exitCode = 0
+  } else {
+    const { on, argv: plain0 } = takeStatusFlag(process.argv.slice(2))
+    const { riders, argv: plain1 } = takeRiderFlags(plain0)
+    const { admit: admitArgs, argv: plain } = await takeAdmitFlag(plain1)
+    const { slug: reapSlug, argv } = takeReapFlag(plain)
+    // an attach to a heavy job already running runs no fold
+    const attach = argv[0] === 'heavy' && (await import('./factory/heavy.ts')).heavyAttaches(argv.slice(1))
+    const first = reapSlug === null || attach ? null : await reapFirst(argv, reapSlug)
+    const admitted = admitArgs === null || attach ? null : await admitFirst(argv, admitArgs)
+    // 0.34.0: the fold riders (flags.ts takeRiderFlags); an attach runs none
+    const riderFirst = attach ? {} : await runRidersFirst(riders, argv, main)
+    const { body, code } = argv[0] === 'heavy' ? await heavyCmd(argv.slice(1)) : argv[0] === 'heavy-job' ? await heavyJobCmd(argv.slice(1)) : argv[0] === 'gates' ? await gatesMain(argv.slice(1)) : argv[0] === 'goal-check' ? await goalCheckCmd(argv.slice(1)) : argv[0] === 'goal-check-job' ? await goalCheckJobCmd(argv.slice(1)) : await main(argv)
+    Object.assign(body, riderFirst)
+    if (!attach) await runRidersAfter(riders, argv, body, code, main)
+    if (first && !Array.isArray(first.reaped)) body.reapedFirst = first
+    // an attach skipped the fold, so the caller must keep its reap due
+    if (attach && reapSlug !== null) body.reapSkipped = true
+    if (admitted) body.admittedFirst = admitted
+    // persona-install refuses with one stderr line too (ankur:init shows it), besides the JSON line every command prints
+    if (argv[0] === 'persona-install' && code !== 0) process.stderr.write(`persona-install: ${typeof body.error === 'string' ? body.error : JSON.stringify(body)}\n`.replace(/\n(?=.)/g, ' '))
+    process.stdout.write(JSON.stringify(body) + '\n' + (on ? statusLine(body) + '\n' : ''))
+    process.exitCode = code
+  }
 }

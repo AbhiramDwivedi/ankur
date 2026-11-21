@@ -149,8 +149,10 @@ export function fragmentSections(body: string[]): { sections: Section[]; preambl
 
 // Applies one section to a doc body: replaces the doc's section with the same depth and title (to the next heading of that depth
 // or shallower), or appends it at the end; a section whose body is only REMOVE_MARK deletes the doc's section.
+const isRemoval = (s: Section): boolean => s.lines.slice(1).map((l) => l.trim()).filter(Boolean).join('\n') === REMOVE_MARK
+
 function applySection(body: string[], s: Section): string[] {
-  const remove = s.lines.slice(1).map((l) => l.trim()).filter(Boolean).join('\n') === REMOVE_MARK
+  const remove = isRemoval(s)
   const hs = headings(body)
   const at = hs.findIndex((h) => h.depth === s.depth && h.title === s.title)
   if (at < 0) {
@@ -168,17 +170,36 @@ function applySection(body: string[], s: Section): string[] {
 
 export type Fragment = { name: string; text: string }
 
+// True when the doc body holds the section exactly as its fragment wrote it: the first heading of the section's depth and title,
+// with everything under it up to the next heading of that depth or shallower, equals the section's lines (LF, trailing blanks off).
+// A removal section survives when the heading is absent.
+function intact(body: string[], s: Section): boolean {
+  const hs = headings(body)
+  const at = hs.findIndex((h) => h.depth === s.depth && h.title === s.title)
+  if (isRemoval(s)) return at < 0
+  if (at < 0) return false
+  const next = hs.slice(at + 1).find((h) => h.depth <= s.depth)
+  const text = (ls: string[]): string => lf(trimEnd(ls).join('\n'))
+  return text(body.slice(hs[at].i, next === undefined ? body.length : next.i)) === text(s.lines)
+}
+
 // Folds fragments into a doc, in byte order of their names, so the result never depends on read order. Fragment frontmatter
 // merges into the doc's: list keys gain the fragment's items, a scalar key takes the fragment's value. Idempotent: stitching the
 // result with the same fragments again changes nothing. The result ends with exactly one newline.
-export function stitchDoc(doc: string, fragments: Fragment[]): { text: string; warnings: string[] } {
+// Guarantee: no crew's text is dropped. Every section of every fragment, a fragment's own included, is in the result exactly as its
+// crew wrote it (a removal: absent). When one is not, nothing is folded: `text` is the doc as it came, and `overlaps` names each
+// section that did not survive with the fragments involved (one or two, sorted).
+// The check inside the loop only serves to name the pair; the pass after the fold decides the outcome.
+export function stitchDoc(doc: string, fragments: Fragment[]): { text: string; warnings: string[]; overlaps: { section: string; fragments: string[] }[] } {
   const warnings: string[] = []
   const front = splitFront(doc)
   let fields = front.fields
   let body = front.body
-  const seen = new Map<string, string>()
-  for (const f of [...fragments].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
-    const fr = splitFront(f.text)
+  const parsed = [...fragments].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).map((f) => ({ name: f.name, fr: splitFront(f.text) }))
+  const overlaps: { section: string; fragments: string[] }[] = []
+  const applied: { name: string; s: Section; lost: boolean }[] = []
+  for (const f of parsed) {
+    const fr = f.fr
     for (const fl of fr.fields) {
       const cur = fields.find((x) => x.key === fl.key)
       const merged = Array.isArray(fl.value) || Array.isArray(cur?.value) ? listField(fl.key, [...listOf(cur), ...listOf(fl).filter((x) => !listOf(cur).includes(x))]) : fl
@@ -187,18 +208,23 @@ export function stitchDoc(doc: string, fragments: Fragment[]): { text: string; w
     const { sections, preamble } = fragmentSections(fr.body)
     if (preamble.length) warnings.push(`${f.name}: text before the first heading is ignored`)
     for (const s of sections) {
-      const key = `${s.depth} ${s.title}`
-      if (seen.has(key)) warnings.push(`${f.name}: section "${s.title}" also comes from ${seen.get(key)}; ${f.name} wins`)
-      seen.set(key, f.name)
       body = applySection(body, s)
+      for (const prior of applied.filter((x) => x.name !== f.name && !x.lost && !intact(body, x.s))) {
+        prior.lost = true
+        overlaps.push({ section: prior.s.title, fragments: [prior.name, f.name].sort() })
+      }
+      applied.push({ name: f.name, s, lost: false })
     }
   }
-  return { text: `${trimEnd(lf(joinFront(fields, body)).split('\n')).join('\n')}\n`, warnings }
+  // the check that decides: after the whole fold every section of every fragment, a fragment's own included, is in the body as written
+  for (const x of applied.filter((y) => !y.lost && !intact(body, y.s))) overlaps.push({ section: x.s.title, fragments: [x.name] })
+  if (overlaps.length > 0) return { text: doc, warnings, overlaps }
+  return { text: `${trimEnd(lf(joinFront(fields, body)).split('\n')).join('\n')}\n`, warnings, overlaps }
 }
 
 // ==== the repo step ====
 
-export type StitchResult = { stitched: { doc: string; fragments: string[] }[]; removed: string[]; warnings: string[] }
+export type StitchResult = { stitched: { doc: string; fragments: string[] }[]; removed: string[]; warnings: string[]; overlaps: { doc: string; section: string; fragments: string[] }[] }
 
 // Stitches every fragment among `files` (repo-relative, posix) under `root` into its doc and deletes the fragment. A fragment
 // whose doc does not exist creates it. Writes only when `write`; returns what it did (or would do), sorted.
@@ -210,12 +236,16 @@ export function stitchTree(root: string, files: string[], opts: { rulesDir?: str
     if (doc === undefined) continue
     byDoc.set(doc, [...(byDoc.get(doc) ?? []), f])
   }
-  const out: StitchResult = { stitched: [], removed: [], warnings: [] }
+  const out: StitchResult = { stitched: [], removed: [], warnings: [], overlaps: [] }
   for (const [doc, frags] of [...byDoc.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     const abs = (p: string): string => path.join(root, ...p.split('/'))
     const cur = existsSync(abs(doc)) ? readFileSync(abs(doc), 'utf8') : ''
     const r = stitchDoc(cur, frags.map((f) => ({ name: f, text: readFileSync(abs(f), 'utf8') })))
     out.warnings.push(...r.warnings.map((w) => `${doc}: ${w}`))
+    if (r.overlaps.length > 0) {
+      out.overlaps.push(...r.overlaps.map((o) => ({ doc, ...o })))
+      continue
+    }
     if (opts.write) {
       if (r.text !== cur) writeFileSync(abs(doc), r.text)
       for (const f of frags) rmSync(abs(f), { force: true })

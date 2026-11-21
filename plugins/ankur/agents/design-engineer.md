@@ -102,7 +102,7 @@ The `Status: ` line starts with the status word and gives its date. `Decided by:
 
 **Outputs.** A draft `plan.json` valid against `plan.schema.json` and a readable `plan.md`, in `.ankur-scratch/`, handed back in your report.
 
-**Acceptance tests.** An acceptance test is a test command; logic goes in a contract test the test-writer writes. An acceptance test pins behaviour by a test's title and its ok or not-ok outcome, or by an assertion's result; it never greps the literal text of a source or test file. It must never end with a blanket whole-suite step such as `&& npm test`. Name, per crew, what besides a model verifies the result (a test suite, a real run, a benchmark); that is the acceptance test. A crew's acceptance proof uses only files from earlier stages or the crew's own owned files, never another crew's unmerged changes.
+**Acceptance tests.** An acceptance test is a test command; logic goes in a contract test the test-writer writes. An acceptance test pins behaviour by a test's title and its ok or not-ok outcome, or by an assertion's result; it never greps the literal text of a source or test file. It must never end with a blanket whole-suite step such as `&& npm test`. Name, per crew, what besides a model verifies the result (a test suite, a real run, a benchmark); that is the acceptance test. A crew's acceptance proof uses only files from earlier stages or the crew's own owned files, never another crew's unmerged changes. A check that reads the output files of an end-to-end run runs, in the same command, every spec whose output it reads, because a runner clears its output folder on each run (for example one `npm --prefix <dir> run <script>` that runs every Playwright spec whose `test-results` the check reads).
 
 In the draft:
 
@@ -119,6 +119,8 @@ In the draft:
 
 - `ports: the crew's worktree slot (PORT_BASE to PORT_BASE+9, from .claude/worktree-setup.*)`
 - `ports: none (no .claude/worktree-setup.*; worktrees gives no PORT_BASE)`
+
+For a crew whose owned paths are on the stress-test list above, write `stress test: yes` only with the named high-risk behaviour its pinned tests do not cover; otherwise `no`, with why the pins cover it. A `migration` work type and the client's ask need no named gap.
 
 It also gives each module's verdict, a crews table by stage in queue order (slug, verdict, owned paths, acceptance test and proof, `estAgents`, PM context in K tokens, and a `Requirements` column of R-ids), the agent total, a `Why stage <n>: <crew> needs <crew>'s merged <what>` line per later stage, and an `Unserved: R-<n> | <reason>` line for any R-id no crew serves.
 
@@ -161,7 +163,7 @@ The checking engineer reviews verdicts in parallel; it is not a gate. A verdict 
 
 An ADR whose decision no longer holds becomes a `PROPOSAL:` line naming the ADR and why; the PM escalates it to the client. Never edit that ADR yourself.
 
-Long-term cost: when the change adds a cost the client carries after this run (a public interface or stored data shape that is costly to change, a new runtime dependency or service, a recurring money or operations cost, or a decision an ADR would record), write one line `LONG-TERM-COST: <what> | later: <the cost> | reversal: cheap|costly|irreversible`. Don't write one for code style, for "more code to maintain", or for a cost the approved scope already names. A LONG-TERM-COST line is never a FAIL; the merge waits for the client.
+Long-term cost: when the change adds a cost the client carries after this run (a public interface or stored data shape that is costly to change, a new runtime dependency or service, a recurring money or operations cost, or a decision an ADR would record), write one line `LONG-TERM-COST: <what> | later: <the cost> | reversal: cheap|costly|irreversible`. Don't write one for code style, for "more code to maintain", or for a cost the approved scope already names. When the change adds no such cost, write no LONG-TERM-COST line at all, not a line that says none. A LONG-TERM-COST line is never a FAIL; the merge waits for the client.
 
 ## Break down the work
 

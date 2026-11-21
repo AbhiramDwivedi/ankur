@@ -344,7 +344,12 @@ export function cmdStitch(f: Flags): Obj {
   const frags = ls.out.split('\0').map((s) => s.trim()).filter((p) => p !== '' && sharedDocOf(p, cfg, arch) !== undefined)
   const plan = stitchTree(repo, frags, { rulesDir: cfg.rulesDir })
   const touched = [...new Set([...plan.stitched.map((s) => s.doc), ...plan.removed])].sort()
-  if (f.dry === true || touched.length === 0) return { ok: true, dry: f.dry === true, ...plan, committed: false }
+  // a section two fragments both write leaves that doc and its fragments as they are, and the command refuses after it has stitched the rest
+  const result = (body: Obj): Obj => {
+    if (body.overlaps.length > 0) throw refuse({ ...body, ok: false, why: 'a fragment section is not in the result as its crew wrote it; nothing of that doc was folded' })
+    return body
+  }
+  if (f.dry === true || touched.length === 0) return result({ ok: true, dry: f.dry === true, ...plan, committed: false })
   const dirty = run(repo, ['-c', 'core.quotepath=off', 'status', '--porcelain', '--', ...touched])
   const unclean = dirty.out.split('\n').filter((l) => l.trim() !== '' && !l.startsWith('?? '))
   if (unclean.length > 0) throw refuse({ ok: false, why: 'commit or discard the changes to these docs and fragments first', dirty: unclean })
@@ -353,5 +358,5 @@ export function cmdStitch(f: Flags): Obj {
   if (add.status !== 0) throw usage(`git add failed: ${add.err}`)
   const c = run(repo, ['commit', '-m', 'docs: stitch doc fragments', '--', ...touched])
   if (c.status !== 0) throw usage(`git commit failed: ${c.err || c.out}`)
-  return { ok: true, dry: false, ...done, committed: true, head: run(repo, ['rev-parse', 'HEAD']).out }
+  return result({ ok: true, dry: false, ...done, committed: true, head: run(repo, ['rev-parse', 'HEAD']).out })
 }

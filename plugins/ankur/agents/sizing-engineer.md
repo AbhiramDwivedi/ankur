@@ -15,7 +15,7 @@ Give each task one size:
 
 - `solo`: one agent, with no QC engineer and no red-then-green test.
 - `lean`: one or two members. The crew carries two booleans that record the proof: `qc` (a QC engineer checks the work) and `red` (a red-then-green test).
-- `full`: today's crew, with a planner, members, a red record, a QC engineer, and a stress test where the goal file says yes.
+- `full`: today's crew, with a planner, members, a red record, a QC engineer, and a stress test only when the crew is on a stress-test path (auth, money, stored data, CI or deploy config, a lockfile) and a named high-risk behaviour there is not covered by its pinned tests, or when its work type is `migration` or the client asks. When you recommend a stress test, name the uncovered risk in the reason.
 
 Limits the plan gate holds a size to:
 

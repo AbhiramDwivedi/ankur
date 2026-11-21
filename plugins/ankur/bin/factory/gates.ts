@@ -9,8 +9,8 @@ import { dirOf, FACTORY, parseFlags, repoOf } from './cli.ts'
 // ==== gates (batching) ====
 
 // The steps `gates` can run, in the order stage.js reaches them before QC: the green check (through the heavy slot), the owns
-// check, the tests check, the knowledge lint and the QC admission. stage.js sends them as one runner call instead of one each.
-export const GATE_STEPS = ['green', 'owns', 'tests', 'lint', 'admit'] as const
+// check, the tests check, the knowledge lint, the project's static checks and the QC admission. stage.js sends them as one runner call instead of one each.
+export const GATE_STEPS = ['green', 'owns', 'tests', 'lint', 'static', 'admit'] as const
 export type GateStep = (typeof GATE_STEPS)[number]
 // a lint is met when it has no failure the crew's diff caused (new: false marks one already there at the merge base), the same
 // rule stage.js uses to send the writer back (isNewFinding); predating failures and warnings go to QC, so they do not stop the gates
@@ -59,6 +59,9 @@ export async function gatesRun(argv: string[], main: (argv: string[]) => Promise
         // the whole call stays inside the runner's 600 s Bash timeout; stage.js re-runs a held admit alone, with its own wait
         const admitWait = steps.includes('green') ? '0' : (str(f, 'admit-wait-ms') ?? '0')
         r = await main(['admit', '--wait-ms', admitWait, '--slug', slug, ...(label !== undefined ? ['--label', label] : []), ...(title !== undefined ? ['--title', title] : []), ...dr])
+      } else if (s === 'static') {
+        // a call that ran green may already have spent most of its 600 s: it only reads the config, and stage.js runs the checks alone
+        r = await main(['static-check', '--slug', slug, ...(steps.includes('green') ? ['--config-only'] : []), ...dr])
       } else {
         const cmd = s === 'owns' ? 'owns-check' : s === 'tests' ? 'tests-check' : 'knowledge-lint'
         r = await main([cmd, '--slug', slug, ...dr])

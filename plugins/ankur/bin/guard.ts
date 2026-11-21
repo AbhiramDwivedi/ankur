@@ -17,7 +17,12 @@ const KIND = 'long-term-cost'
 const LINE_RE = /^\s*(?:(?:[-*+>]|\d+[.)])\s*)*[*_`]*LONG-TERM-COST[*_`]*\s*:[*_`]*\s*(.*?)[*_`\s]*$/
 // A body that is only an explicit none-word means "no cost": the line is not a cost. An empty body is NOT one: a bare marker has flagged a cost and stays (814f9f9).
 // The none-word may also lead a reason: its first word is exactly none or n/a and a separator (. ; : , " - " em-dash " (") or the end follows it ("none. no new interface").
-const NONE_RE = /^[*_`\s]*(?:-[*_`\s.]*$|(?:none|n\/a)[*_`]*(?:[*_`\s.]*$|[.;:,]|\s+(?:-|—)\s|\s+\())/i
+const NONE_TAIL = /[*_`]*(?:[*_`\s.]*$|[.;:,]|\s+(?:-|—)\s|\s+\()/.source
+const NONE_RE = new RegExp(`^[*_\`\\s]*(?:-[*_\`\\s.]*$|(?:none|n/a)${NONE_TAIL})`, 'i')
+// A body that leads with `none beyond (the) approved scope`, then ends or takes a separator as NONE_RE does, and names no `later:` or `reversal:` field is no cost either; any other lead or tail, or a body with such a field, stays a cost.
+const NONE_LEAD_RE = new RegExp(`^[*_\`\\s]*none[*_\`]*\\s+beyond\\s+(?:the\\s+)?approved\\s+scope${NONE_TAIL}`, 'i')
+const COST_FIELD_RE = /\|\s*(?:later|reversal)\s*:/i
+const isNoneBody = (body: string): boolean => NONE_RE.test(body) || (NONE_LEAD_RE.test(body) && !COST_FIELD_RE.test(body))
 const sha12 = (s: string): string => createHash('sha256').update(s).digest('hex').slice(0, 12)
 const sessionOf = (dir: string): string => path.posix.basename(flat(dir).replace(/\/+$/, ''))
 
@@ -26,7 +31,7 @@ export function ltcLines(text: string): LtcLine[] {
   const out: LtcLine[] = []
   for (const raw of String(text ?? '').split('\n')) {
     const m = LINE_RE.exec(raw.replace(/\r$/, ''))
-    if (m === null || NONE_RE.test(m[1])) continue
+    if (m === null || isNoneBody(m[1])) continue
     const parts = m[1].split('|').map((s) => s.trim())
     let later = ''
     let rev = ''

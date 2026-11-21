@@ -178,14 +178,14 @@ const FULL = /\bnpm (?:run )?test\b|\byarn test\b|\bpnpm (?:run )?test\b|\bpytes
 function testsPart(ctx: Ctx): Part {
   const M = ctx.M
   const F: (Finding | null)[] = []
-  type Run = { n: number; exit: number; head: string; command: string; full: boolean; mode: 'full' | 'targeted' | null; ms: number | null }
+  type Run = { n: number; exit: number; head: string; command: string; full: boolean; mode: 'full' | 'targeted' | null; set: string; ms: number | null }
   const by = new Map<string, Run[]>()
   for (const f of list(join(ctx.dir, 'checks'))) {
     const m = /^(.+)-(\d+)\.json$/.exec(f)
     const j = m ? readJson(join(ctx.dir, 'checks', f)) : null
     if (!m || j === null || typeof j !== 'object') continue
     const d = [...String(j.tail ?? '').matchAll(/duration_ms\s+([0-9.]+)/g)].pop()
-    const run: Run = { n: Number(m[2]), exit: Number(j.exit), head: String(j.head ?? ''), command: String(j.command ?? ''), full: FULL.test(String(j.command ?? '')), mode: j.tests?.mode === 'full' || j.tests?.mode === 'targeted' ? j.tests.mode : null, ms: d ? Number(d[1]) : null }
+    const run: Run = { n: Number(m[2]), exit: Number(j.exit), head: String(j.head ?? ''), command: String(j.command ?? ''), full: FULL.test(String(j.command ?? '')), mode: j.tests?.mode === 'full' || j.tests?.mode === 'targeted' ? j.tests.mode : null, set: Array.isArray(j.tests?.files) ? j.tests.files.map(String).sort().join(',') : '', ms: d ? Number(d[1]) : null }
     by.set(m[1], [...(by.get(m[1]) ?? []), run])
   }
   for (const [slug, all] of by) {
@@ -216,10 +216,11 @@ function testsPart(ctx: Ctx): Part {
     // only green runs of one command are compared: a red run stops early and a different command runs a different set of tests
     const byCommand = new Map<string, number[]>()
     // the group is the command and the full or targeted mode the check record stored (`tests.mode`), so a full-suite run is never
-    // compared with targeted runs of the same command; a record with no mode falls back to the command's own shape
+    // compared with targeted runs of the same command; a record with no mode falls back to the command's own shape. A run is
+    // compared only with runs of the same set of test files, so a small targeted run is never the baseline of a larger set.
     for (const r of runs) {
       if (r.exit !== 0 || r.ms === null) continue
-      const key = `${r.command}\n${r.mode ?? (r.full ? 'full' : 'targeted')}`
+      const key = `${r.command}\n${r.mode ?? (r.full ? 'full' : 'targeted')}\n${r.set}`
       byCommand.set(key, [...(byCommand.get(key) ?? []), r.ms])
     }
     const timed = [...byCommand.values()].sort((a, b) => b.length - a.length)[0] ?? []

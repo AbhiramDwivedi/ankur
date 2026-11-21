@@ -2,6 +2,31 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.39.0 (2026-11-21)
+
+Your project's own lint, type and format checks can now gate every crew before review. Also fixes: a stitch never drops a crew's text, a "no cost" note no longer holds up a merge, the retro stops reporting test growth that isn't there, and crew briefs carry a few rules learned from real runs. Update with `claude plugin marketplace update ankur`, then reinstall: `claude plugin install ankur@ankur`.
+
+### Static checks
+
+- **The lint, type and format checks you list run on each crew's work before review.** List them under the new optional `staticChecks` key of `.claude/ankur.json`, each as a `name` and a one-line `run` command that only reads. Before QC sees a crew's work, ankur runs every check on it. The list is read from the branch the crew started from, so a crew cannot change its own checks.
+- **Only failures new against the base count.** A check that fails on the crew's work runs again on the base it branched from. A new failure sends the crew to a fix round; a failure the base already has is reported and never stops the crew; a failure that only moved to another line is not new. A check whose command cannot start is reported as broken and stops the crew so you can fix the host.
+- **A project with no list is unchanged.** Without a `staticChecks` key nothing runs and nothing costs extra.
+- **`/ankur:init` proposes the list.** When `.claude/ankur.json` has no `staticChecks`, it proposes checks from your project's scripts and tooling, shows where each came from, and writes the list only when you approve it.
+
+### Fixes
+
+- **A stitch never drops a crew's text.** When two crews' fragments of one doc overlap, so that a fragment's section would not end up in the doc exactly as written, `factory stitch` folds nothing of that doc, keeps all its fragments, lists the section and the fragments under `overlaps` and exits 1. Docs with no overlap are still stitched and committed in the same run. Before, the later fragment replaced the earlier one's text and both fragments were deleted.
+- **`--help` prints the commands and runs nothing.** `factory.ts <command> --help`, `-h`, and `factory.ts --help` print one JSON line with a usage text and the command list, exit 0 and change nothing. The flag counts as a whole word anywhere before a bare `--`; what follows `--` belongs to the wrapped command. Before, `stitch --help` ran a real stitch.
+- **A "no cost" note no longer holds up a merge.** A long-term-cost line that starts `none beyond approved scope` and names no later cost or reversal is now read as no cost. Before, it opened a blocking item only you could approve. Any other line that starts with `none` still counts as a cost.
+- **Reviewers write no cost line when there is no cost.** The QC, design and checking engineers are now told to leave the line out rather than write one that says none.
+- **The retro no longer reports test growth that isn't there.** It compares a test run only with runs of the same set of test files, so a short targeted run is never the baseline for full runs.
+- **Members are told not to point git at the main checkout.** Every worktree brief now says never to pass `git -C` with the main checkout's path, and to read main's state from inside the worktree with `git show main:<path>` or `git log main`. The worktree guard refused each such call and cost the member a turn.
+- **A page rebuild splits by view.** The planner gives a task that rebuilds a whole page or screen one member task per view, each with that view's files and its own tests, instead of one member for the whole page, which could run out of context.
+- **The UX review reports every finding in its first pass.** The UX engineer checks every rule of the direction's checklist at once, including the ones a first pass tends to miss: motion limits, nothing animating on load, every open item can be acted on, and no truncated notices. Before, a review could find its defects a few at a time over several rounds.
+- **Motion rules a builder can check with a search.** The UX direction names the class names, keyframes or durations that must not appear, so a builder can search for them before the review.
+- **Checks that read a test runner's output run every spec they read.** A check that reads output files such as Playwright's `test-results` runs every spec whose output it reads in the same command, because the runner clears its output folder on each run.
+- **Stress tests need a named risk.** A crew whose paths touch auth, money, a migration, stored-data deletes, CI or a lockfile gets a stress test only when a named high-risk behaviour there is not covered by its pinned tests. The goal file's `## Stress test` section names that behaviour, or says `no` and why the pins cover it. A `migration` work type, or a stress test you ask for, still needs no named gap.
+
 ## 0.38.0 (2026-11-21)
 
 The ankur page now runs several workspaces at once, each with its own session, and has a new look. Crews run with better plans, a quality bar in every builder's brief, and fewer stops on the host. Update with `claude plugin marketplace update ankur`, then reinstall: `claude plugin install ankur@ankur`.

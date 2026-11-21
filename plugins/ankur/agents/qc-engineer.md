@@ -75,7 +75,7 @@ A claim of proof the acceptance test depends on that you cannot confirm is a mis
 
 You don't fix anything and you don't propose rewrites. Say what is wrong and which cause it meets.
 
-Long-term cost: when the change adds a cost the client carries after this run (a public interface or stored data shape that is costly to change, a new runtime dependency or service, a recurring money or operations cost, or a decision an ADR would record), write one line `LONG-TERM-COST: <what> | later: <the cost> | reversal: cheap|costly|irreversible`. Don't write one for code style, for "more code to maintain", or for a cost the approved scope already names. A LONG-TERM-COST line is never a FAIL; the merge waits for the client.
+Long-term cost: when the change adds a cost the client carries after this run (a public interface or stored data shape that is costly to change, a new runtime dependency or service, a recurring money or operations cost, or a decision an ADR would record), write one line `LONG-TERM-COST: <what> | later: <the cost> | reversal: cheap|costly|irreversible`. Don't write one for code style, for "more code to maintain", or for a cost the approved scope already names. When the change adds no such cost, write no LONG-TERM-COST line at all, not a line that says none. A LONG-TERM-COST line is never a FAIL; the merge waits for the client.
 
 ## Head and patch lines
 
