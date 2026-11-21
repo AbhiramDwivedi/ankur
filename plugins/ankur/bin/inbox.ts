@@ -45,10 +45,12 @@ const SLUG_RE = /^[A-Za-z0-9._-]+$/
 const sessionOf = (dir: string): string => path.posix.basename(flat(dir).replace(/\/+$/, ''))
 const codeHashOf = (id: string, code: string): string => createHash('sha256').update(id + code).digest('hex')
 
-// An item folded from its ops, in file order. resolve is the first resolve row that counts (see verifiedItems), else null; a row that did not
+// An item folded from its ops, in file order. resolve is the first resolve row that counts, or the client's later correction of a
+// reply-proved one (see verifiedItems), else null; a row that did not
 // count leaves reopened (why, and the row's by, ts and decision); a client resolve counted by proof carries the typed text as its note; noteUnbound marks one whose stored note differed.
 export type Item = { open: Obj; crews: string[]; blocking: boolean; held: Set<string>; resolve: Obj | null; applied: string[]; reopened?: { reason: string; by: unknown; ts: unknown; decision: unknown }; noteUnbound?: boolean }
-type RawItem = Item & { rows: Obj[] }
+// rows: the resolve rows in file order; ranBefore[i]: an applied op comes before rows[i] in the file (a correction after it never counts)
+type RawItem = Item & { rows: Obj[]; ranBefore: boolean[] }
 const heldKey = (session: string, slug: string): string => `${session}\n${slug}`
 
 function fold(rows: Obj[]): Map<string, RawItem> {
@@ -58,7 +60,7 @@ function fold(rows: Obj[]): Map<string, RawItem> {
     if (r.op === 'open') {
       if (items.has(r.id)) continue
       const crews: string[] = Array.isArray(r.crews) ? r.crews.map(String) : []
-      const it: RawItem = { open: r, crews: [...crews], blocking: r.blocking === true, held: new Set(), resolve: null, applied: [], rows: [] }
+      const it: RawItem = { open: r, crews: [...crews], blocking: r.blocking === true, held: new Set(), resolve: null, applied: [], rows: [], ranBefore: [] }
       if (it.blocking) for (const c of crews) it.held.add(heldKey(String(r.session), c))
       items.set(r.id, it)
       continue
@@ -74,6 +76,7 @@ function fold(rows: Obj[]): Map<string, RawItem> {
       }
     } else if (r.op === 'resolve') {
       it.rows.push(r)
+      it.ranBefore.push(it.applied.length > 0)
     } else if (r.op === 'applied') {
       it.applied.push(String(r.session))
     }
@@ -148,22 +151,172 @@ function chainOk(buf: Buffer, ls: number, row: Obj): boolean {
     return before.indexOf('"type":"user"') === -1 && before.indexOf('"type":"assistant"') === -1
   }
   if (typeof parent !== 'string' || parent === '') return false
-  const needle = Buffer.from(`"uuid":${JSON.stringify(parent)}`)
+  return rowBefore(buf, ls, parent) !== null
+}
+
+// The row whose uuid is `uuid` on a line before the line starting at `ls`, with its line start; null when there is none.
+function rowBefore(buf: Buffer, ls: number, uuid: string): { row: any; ls: number } | null {
+  const needle = Buffer.from(`"uuid":${JSON.stringify(uuid)}`)
   let from = ls - needle.length
   while (from >= 0) {
     const p = buf.lastIndexOf(needle, from)
-    if (p === -1) return false
+    if (p === -1) return null
     const s = buf.lastIndexOf(10, p) + 1
     let e = buf.indexOf(10, p)
     if (e === -1) e = buf.length
     try {
-      if (JSON.parse(buf.toString('utf8', s, e)).uuid === parent) return true
+      const row = JSON.parse(buf.toString('utf8', s, e))
+      if (row !== null && typeof row === 'object' && row.uuid === uuid) return { row, ls: s }
     } catch {
       // a match inside a line that is not a row
     }
     from = p - 1
   }
-  return false
+  return null
+}
+
+// ---- the reply proof: a typed reply to an assistant message that showed the item ----
+
+// A typed row of a main transcript and the assistant text of the turn just before it (each part with its time): the rows its parentUuid
+// chain passes through back to the previous typed row. What the client read on screen when they typed the reply. shown is null when
+// the chain breaks: the row is still the client's newest typed row, so it still hides every reply before it.
+type Reply = { row: Obj; text: string; at: number; shown: { text: string; at: number }[] | null }
+type ReplyScan = { sig: string; after: number; replies: Reply[] }
+// One reply scan per file and process, like scans: valid while the file signature is the same and it covers rows from `after` on.
+const replyScans = new Map<string, ReplyScan>()
+// How many rows the walk back from a reply may pass; a longer turn proves nothing (fails closed).
+const WALK_MAX = 20000
+
+const escRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+// `id` as a whole name in `text`: not inside a longer name (`foo` is not named by `foo-2` or `x-foo`).
+const namesId = (text: string, id: string): boolean => new RegExp(`(?<![A-Za-z0-9]|[A-Za-z0-9]-)${escRe(id)}(?![A-Za-z0-9]|-[A-Za-z0-9])`).test(text)
+// The parts of the turn before reply `k` that show `open`: newer than the item, naming its id.
+const showsItem = (k: Reply, open: Obj): { text: string; at: number }[] => (k.shown ?? []).filter((s) => s.at > Date.parse(open.ts) && namesId(s.text, String(open.id)))
+// The dollar amounts the message proposed for `open`, distinct: `$20`, `$ 7.50`, `20 USD` on a line that names the item. A bare "ok"
+// approves a budget raise at the amount the client read, so the amount comes from the message, never from the agent's flag alone.
+function shownAmounts(k: Reply, open: Obj): number[] {
+  const out = new Set<number>()
+  for (const s of showsItem(k, open)) {
+    for (const line of s.text.split('\n')) {
+      if (!namesId(line, String(open.id))) continue
+      for (const m of line.matchAll(/\$\s?(\d+(?:\.\d+)?)(?![\d.]*\d)|(?<![\d.])(\d+(?:\.\d+)?)\s?(?:USD|usd|dollars)\b/g)) {
+        const n = Number(m[1] ?? m[2])
+        if (Number.isFinite(n) && n > 0) out.add(n)
+      }
+    }
+  }
+  return [...out]
+}
+
+// The assistant text of the turn before the typed row at `ls`: walk its parentUuid chain back until the previous typed row or the start
+// of the chain. Null when the chain breaks or runs past WALK_MAX rows. Only main-thread assistant text blocks count; tool input,
+// thinking, tool results and task notifications are passed over.
+function shownBefore(buf: Buffer, ls: number, row: Obj): { text: string; at: number }[] | null {
+  const parts: { text: string; at: number }[] = []
+  let parent = row.parentUuid
+  let from = ls
+  for (let step = 0; step < WALK_MAX; step++) {
+    if (parent === null) return parts
+    if (typeof parent !== 'string' || parent === '') return null
+    const found = rowBefore(buf, from, parent)
+    if (found === null) return null
+    const r = found.row
+    if (r.type === 'user' && typedText(r) !== null) return parts
+    if (r.type === 'assistant' && !r.isSidechain && Array.isArray(r.message?.content)) {
+      const text = r.message.content.filter((b: any) => b?.type === 'text' && typeof b.text === 'string').map((b: any) => b.text).join('\n')
+      if (text !== '') parts.push({ text, at: Date.parse(r.timestamp) })
+    }
+    parent = r.parentUuid
+    from = found.ls
+  }
+  return null
+}
+
+// Every typed row of `session` in `main` newer than `after`, with the text shown before it. The file is read once.
+function replyScanFile(main: string, session: string, after: number): ReplyScan | null {
+  let st: { size: number; mtimeMs: number; ctimeMs: number; ino: number }
+  try {
+    st = statSync(main)
+  } catch {
+    return null
+  }
+  const sig = `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`
+  const had = replyScans.get(main)
+  if (had !== undefined && had.sig === sig && had.after <= after) return had
+  let buf: Buffer
+  try {
+    buf = readProofFile(main)
+  } catch {
+    return null
+  }
+  const replies: Reply[] = []
+  const typed = Buffer.from('"type":"user"')
+  let seenLine = -1
+  for (let p = buf.indexOf(typed); p !== -1; p = buf.indexOf(typed, p + typed.length)) {
+    const ls = buf.lastIndexOf(10, p) + 1
+    if (ls === seenLine) continue
+    seenLine = ls
+    let le = buf.indexOf(10, p)
+    if (le === -1) le = buf.length
+    const line = buf.subarray(ls, le)
+    if (!line.includes('"promptSource":"') && !line.includes('<command-name>')) continue // no typed row lacks both
+    let row: any
+    try {
+      row = JSON.parse(line.toString('utf8'))
+    } catch {
+      continue
+    }
+    if (row === null || typeof row !== 'object' || typeof row.uuid !== 'string' || row.sessionId !== session) continue
+    const at = Date.parse(row.timestamp)
+    if (!Number.isFinite(at) || !(at > after)) continue
+    const text = typedText(row)
+    if (text === null) continue
+    replies.push({ row, text, at, shown: shownBefore(buf, ls, row) })
+  }
+  replies.sort((x, y) => x.at - y.at)
+  const scan: ReplyScan = { sig, after, replies }
+  replyScans.set(main, scan)
+  return scan
+}
+
+// Why `k` does not prove a --reply resolve of `open` with `c`, or '' when it does.
+function replyFails(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unknown; quote?: unknown }, k: Reply): string {
+  const id = String(open.id)
+  const after = Date.parse(open.ts)
+  if (!(k.at > after)) return `the reply is older than ${id}`
+  if (k.shown === null) return "the client's reply does not follow a message in this transcript (its parentUuid chain breaks)"
+  if (c.quote !== undefined && !(typeof c.quote === 'string' && c.quote !== '' && (k.text.startsWith(c.quote) || String(maskCode(k.text, open.id, open.codeHash)).startsWith(c.quote)))) return 'the reply is not the stored quote'
+  if (showsItem(k, open).length === 0) return `the message just before the client's reply does not show ${id}`
+  if (String(open.kind) === 'budget' && c.decision === 'approve' && c.raiseUsd === undefined) return `a budget approve by reply needs the amount the message that showed ${id} proposed`
+  if (c.raiseUsd !== undefined && !shownAmounts(k, open).includes(Number(c.raiseUsd))) return `the message that showed ${id} does not propose the amount $${String(c.raiseUsd)} on the line that names it`
+  if (!ownsCwd(repo, k.row.cwd)) return 'the reply was typed in another repo'
+  return ''
+}
+
+// The client's newest typed reply at or before `before` (ms): the only one a --reply resolve made then could rest on. An older reply
+// answered an older message, so a reply the client has since typed past ("what else?") never proves a later resolve.
+const newestReply = (replies: Reply[], before: number): Reply | null => {
+  let found: Reply | null = null
+  for (const k of replies) if (k.at <= before) found = k
+  return found
+}
+
+// Why a --reply resolve of `open` with `c`, made at `before`, is not proved by the client's newest reply then, or '' when it is.
+function replyProof(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unknown; quote?: unknown }, replies: Reply[], before: number): { k: Reply | null; why: string } {
+  if (typeof c.decision !== 'string' || !DECISIONS.includes(c.decision)) return { k: null, why: 'the decision is not one of ' + DECISIONS.join(', ') }
+  if (c.raiseUsd !== undefined && typeof c.raiseUsd !== 'number') return { k: null, why: 'raiseUsd is not a number' }
+  const k = newestReply(replies, before)
+  if (k === null || !(k.at > Date.parse(open.ts))) return { k: null, why: `the client has typed no reply since ${String(open.id)} was opened` }
+  const why = replyFails(repo, open, c, k)
+  return why === '' ? { k, why } : { k: null, why }
+}
+
+// The note a reply-proved row carries: the stored note when it is the client's own words (a part of the reply), else the whole reply.
+const replyNote = (reply: string, note: unknown): { note: string; unbound: boolean } => {
+  const n = norm(String(note ?? ''))
+  const all = norm(reply).slice(0, 4000)
+  if (n === '') return { note: all, unbound: false }
+  return norm(reply).includes(n) ? { note: n.slice(0, 4000), unbound: false } : { note: all, unbound: true }
 }
 
 // The main transcript of `session` under the proof root, or null.
@@ -245,22 +398,42 @@ export const typedAtOf = (resolve: Obj): number | undefined => TYPED_AT.get(reso
 /**
  * The items of the shared inbox with their resolve rows verified at read time. A resolve row counts when its kind allows `by: any` and the
  * row says pm or client, or when the row is `by: client` and a typed row of the main transcript of the session it names proves it (see
- * proof). An unverified row counts as absent: the item is open, with `reopened` saying why. The first verified row wins.
+ * proof). An unverified row counts as absent: the item is open, with `reopened` saying why. The first verified row wins, except that a
+ * reply-proved winner is replaced by a later reply-proved row on a newer reply written before any applied op (the client's correction).
  */
 export function verifiedItems(repo: string): Map<string, Item> {
   // (the time of the typed line behind a counted resolve row is kept in typedAtOf, never in the row)
   const items = fold(readJsonl(`${sharedDir(repo)}/inbox.jsonl`).rows)
   const ask = new Map<string, Set<string>>() // session -> ids whose client rows need a transcript
-  const needsProof = (_it: RawItem, r: Obj): boolean => r.by === 'client'
-  for (const [id, it] of items) for (const r of it.rows) if (needsProof(it, r) && typeof r.session === 'string') (ask.get(r.session) ?? ask.set(r.session, new Set()).get(r.session)!).add(id)
+  const askReply = new Map<string, number>() // session -> the oldest open time of an item a reply row of it resolves
+  for (const [id, it] of items) {
+    for (const r of it.rows) {
+      if (r.by !== 'client' || typeof r.session !== 'string') continue
+      if (r.proof === 'reply') {
+        const after = Date.parse(it.open.ts)
+        if (Number.isFinite(after)) askReply.set(r.session, Math.min(askReply.get(r.session) ?? Infinity, after))
+      } else (ask.get(r.session) ?? ask.set(r.session, new Set()).get(r.session)!).add(id)
+    }
+  }
   const scanned = new Map<string, { scan: FileScan | null; main: string | null }>()
   for (const [session, ids] of ask) {
     const main = proofMain(session)
     scanned.set(session, { main, scan: main === null ? null : scanFile(main, session, ids) })
   }
+  const replied = new Map<string, { scan: ReplyScan | null; main: string | null }>()
+  for (const [session, after] of askReply) {
+    const main = proofMain(session)
+    replied.set(session, { main, scan: main === null ? null : replyScanFile(main, session, after) })
+  }
   for (const it of items.values()) {
     const kind = String(it.open.kind)
-    for (const r of it.rows) {
+    // the winning row's typed reply time when it is reply-proved: only a later reply-proved row on a newer reply, written before any
+    // applied op, replaces it (a correction); any other counted row is final
+    let wonReplyAt: number | null = null
+    let won = false
+    for (const [i, r] of it.rows.entries()) {
+      if (won && (wonReplyAt === null || r.proof !== 'reply' || r.by !== 'client' || it.ranBefore[i])) continue
+      let unbound = false
       let why = ''
       let proven: string | null = null
       let typedAt: number | null = null
@@ -269,30 +442,54 @@ export function verifiedItems(repo: string): Map<string, Item> {
       else if (r.by === 'pm') why = ''
       else {
         const anyKind = KINDS[kind]?.by === 'any' // the row counts either way; an unproven note is flagged, never shown as the client's
-        const s = typeof r.session === 'string' ? scanned.get(r.session) : undefined
+        const s = typeof r.session === 'string' ? (r.proof === 'reply' ? replied : scanned).get(r.session) : undefined
         if (s === undefined) why = 'the row names no session'
+        else if (r.proof === 'reply') {
+          // a reply-proved row is re-verified the same way: the client's newest typed reply when the row was written answers a message
+          // that showed the item, and its quote is the stored one
+          const rs = s.scan as ReplyScan | null
+          const at = Date.parse(String(r.ts))
+          const k = rs === null || !Number.isFinite(at) ? null : replyProof(repo, it.open, r, rs.replies, at).k
+          if (s.main === null) why = `no transcript of session ${r.session} under ${proofTranscriptRoot()}`
+          else if (rs === null) why = `the transcript of session ${r.session} cannot be read`
+          else if (k === null) why = `no reply typed by the client in session ${r.session} to a message that showed ${String(it.open.id)} backs this ${String(r.decision)}`
+          else {
+            const n = replyNote(k.text, r.note)
+            proven = n.note
+            typedAt = k.at
+            unbound = n.unbound
+          }
+        }
         else if (s.main === null) why = `no transcript of session ${r.session} under ${proofTranscriptRoot()}`
         else if (s.scan === null) why = `the transcript of session ${r.session} cannot be read`
         else {
-          const p = proof(repo, it.open, r, s.scan.cands.get(String(it.open.id)) ?? [], false)
+          const p = proof(repo, it.open, r, (s.scan as FileScan).cands.get(String(it.open.id)) ?? [], false)
           if (p === null) why = `no line typed by the client in session ${r.session} backs this ${String(r.decision)}`
           else {
             proven = p.rest.slice(0, 4000)
             typedAt = p.at
-            if (norm(String(r.note ?? '')) !== '' && norm(String(r.note)).slice(0, 4000) !== proven) it.noteUnbound = true
+            if (norm(String(r.note ?? '')) !== '' && norm(String(r.note)).slice(0, 4000) !== proven) unbound = true
           }
         }
         if (anyKind && why !== '') {
           why = ''
-          if (norm(String(r.note ?? '')) !== '') it.noteUnbound = true
+          if (norm(String(r.note ?? '')) !== '') unbound = true
         }
+      }
+      if (won) {
+        // a correction counts only on its own proof, on a reply newer than the one behind the row it replaces (one use per reply)
+        if (why !== '' || proven === null || typedAt === null || !(typedAt > (wonReplyAt as number))) continue
       }
       if (why === '') {
         // a row counted by proof carries the client's typed text as its note, never the stored one, for every reader of the fold
         it.resolve = proven === null ? r : { ...r, note: proven }
         if (typedAt !== null) TYPED_AT.set(it.resolve, typedAt)
+        if (unbound) it.noteUnbound = true
+        else delete it.noteUnbound
         it.reopened = undefined
-        break
+        won = true
+        wonReplyAt = r.proof === 'reply' && r.by === 'client' && proven !== null && typedAt !== null ? typedAt : null
+        continue
       }
       it.reopened ??= { reason: why, by: r.by, ts: r.ts, decision: r.decision }
     }
@@ -494,6 +691,53 @@ function typedProof(repo: string, session: string, open: Obj, decision: string, 
   return { missing: '' }
 }
 
+// The client's newest typed reply in this session, when it proves a --reply resolve of `open` (see replyFails): its quote (the whole
+// reply, the code masked, at most 1000 characters) and text; else why it does not.
+// A budget approve with no --raise-usd takes the one amount that message proposed for the item.
+function replyTypedProof(repo: string, session: string, open: Obj, decision: string, raiseUsd?: number): { quote: string; text: string; at: number; raiseUsd?: number } | { missing: string } {
+  const main = proofMain(session)
+  if (main === null) return { missing: `no transcript of session ${session} under ${proofTranscriptRoot()}` }
+  const scan = replyScanFile(main, session, Date.parse(open.ts))
+  if (scan === null) return { missing: `the transcript of session ${session} cannot be read` }
+  let usd = raiseUsd
+  const newest = newestReply(scan.replies, Infinity)
+  if (usd === undefined && String(open.kind) === 'budget' && decision === 'approve' && newest !== null) {
+    const amounts = shownAmounts(newest, open)
+    if (amounts.length === 1) usd = amounts[0]
+    else if (amounts.length > 1) return { missing: `the message that showed ${String(open.id)} proposes several amounts (${amounts.map((a) => `$${a}`).join(', ')}): pass --raise-usd with the one the client approved` }
+  }
+  const { k, why } = replyProof(repo, open, { decision, raiseUsd: usd }, scan.replies, Infinity)
+  if (k !== null) return { quote: String(maskCode(k.text, open.id, open.codeHash)).slice(0, 1000), text: k.text, at: k.at, ...(usd === undefined ? {} : { raiseUsd: usd }) }
+  return { missing: why }
+}
+
+// Why the action an approved item stood for has already run, so a correcting reply cannot undo it; '' when nothing ran. Applied
+// (mark-applied, or a confirmed plan approval), the plan this dir's approval item approved, or the persona its approve installed.
+function actionRan(repo: string, dir: string, it: Item, session: string): string {
+  const id = String(it.open.id)
+  if (it.applied.length > 0) return `the approved action already ran: ${id} was applied`
+  const r = it.resolve
+  if (r === null || r.decision !== 'approve') return ''
+  const ref = String(it.open.ref ?? '')
+  if (it.open.kind === 'client-trigger' && ref === 'run' && it.open.session === session) {
+    try {
+      const plan = JSON.parse(readFileSync(`${dir}/plan.json`, 'utf8'))
+      if (plan !== null && typeof plan === 'object' && typeof plan.approvedAt === 'string') return `the approved action already ran: the plan ${id} approved is approved (${plan.approvedAt})`
+    } catch {
+      // no plan, or unreadable: nothing was approved through it
+    }
+  }
+  const persona = /^persona:([A-Za-z0-9._-]+)$/.exec(ref)
+  if (persona !== null) {
+    try {
+      if (statSync(`${repo}/.claude/agents/${persona[1]}.md`).mtimeMs >= Math.floor(Date.parse(String(r.ts)))) return `the approved action already ran: the persona ${persona[1]} is installed`
+    } catch {
+      // not installed
+    }
+  }
+  return ''
+}
+
 /**
  * The typed client proof `approve --by client` needs: null when `item` is a client-trigger item of this session (`dir`) whose ref is
  * `run`, resolved approve by the client in this same session with a typed line that verifiedItems holds, and not superseded by a later
@@ -592,7 +836,12 @@ function resolveItem(f: Flags): Obj {
   const id = need(f, 'id')
   const decision = need(f, 'decision')
   const by = need(f, 'by')
-  const code = need(f, 'code')
+  // --reply: the client answered in their own words, in a typed reply to a message that showed the item; no code is typed
+  const reply = f.reply === true || f.reply === 'true'
+  if (f.reply !== undefined && !reply) throw usage('--reply takes no value: put the item id first, as resolve <id> --reply ...')
+  if (reply && by !== 'client') throw usage('--reply is for --by client')
+  if (reply && f.code !== undefined) throw usage('--reply takes no --code: the reply proves the item without one')
+  const code = reply ? '' : need(f, 'code')
   if (!DECISIONS.includes(decision)) throw usage(`--decision must be one of ${DECISIONS.join(', ')}`)
   if (by !== 'client' && by !== 'pm') throw usage('--by must be client or pm')
   const noteGiven = textOf(f, 'note')
@@ -609,18 +858,35 @@ function resolveItem(f: Flags): Obj {
   let quote: string | null = null
   let firstCrew = 'main'
   let planItem = false as boolean
+  let corrects: string | null = null
   withLock(S, 'inbox', () => {
     const it = verifiedItems(repo).get(id)
     if (it === undefined) throw refuse({ error: `no such item: ${id}` })
-    if (it.resolve !== null) throw refuse({ error: `${id} is already resolved` })
+    // a reply-proved resolve can be corrected by a later reply to a later message that names the item, until its action runs
+    const before = it.resolve
+    if (before !== null && !(reply && before.proof === 'reply' && before.by === 'client' && typedAtOf(before) !== undefined)) throw refuse({ error: `${id} is already resolved` })
+    if (before !== null) {
+      const ran = actionRan(repo, dir, it, session)
+      if (ran !== '') throw refuse({ error: `${id} cannot be corrected: ${ran}` })
+      corrects = String(before.decision)
+    }
     const kind = String(it.open.kind)
     planItem = kind === 'client-trigger' && it.open.ref === 'run' && it.open.session === session
     firstCrew = it.crews[0] ?? 'main'
     if (by === 'pm' && KINDS[kind]?.by !== 'any') throw refuse({ error: `${kind} is resolved by the client, not by pm` })
     if (by === 'pm' && KINDS[kind]?.evidence === true && note.trim() === '') throw refuse({ error: `a --by pm resolve of ${kind} needs its evidence in --note` })
     if (raiseUsd !== undefined && kind !== 'budget') throw refuse({ error: '--raise-usd is for the budget kind only' })
-    if (codeHashOf(id, code) !== it.open.codeHash) throw refuse({ error: 'wrong code' })
-    if (by === 'client') {
+    if (reply) {
+      const p = replyTypedProof(repo, session, it.open, decision, raiseUsd)
+      if ('missing' in p) throw refuse({ error: `no reply typed by the client resolves ${id}: ${p.missing || 'no reply proves it'}. Show the client the item by its name in your message, and resolve it from the reply they type next; or the client types /ankur:inbox ${decision} ${id} <code>` })
+      // one typed reply resolves an item once: a correction needs a newer reply, to a newer message that names the item
+      if (before !== null && !(p.at > (typedAtOf(before) as number))) throw refuse({ error: `${id} is already resolved from the client's reply ${JSON.stringify(String(before.quote ?? '').slice(0, 200))}: a correction needs a newer reply, to a message of yours that names ${id} again` })
+      raiseUsd = p.raiseUsd
+      // a note the agent passes must be the client's own words: a part of the reply
+      if (noteGiven !== undefined && norm(note) !== '' && !norm(p.text).includes(norm(note))) throw refuse({ error: `--note is not part of what the client typed (${JSON.stringify(norm(p.text).slice(0, 200))}): pass a part of that text as the note, or none` })
+      quote = p.quote
+    } else if (codeHashOf(id, code) !== it.open.codeHash) throw refuse({ error: 'wrong code' })
+    if (by === 'client' && !reply) {
       const p = typedProof(repo, session, it.open, decision, raiseUsd)
       if ('missing' in p) {
         if (p.raiseTyped !== undefined) throw refuse({ error: `the client typed raise ${p.raiseTyped} for ${id}: pass --raise-usd ${p.raiseTyped}, a resolve without it cannot stand for a typed raise` })
@@ -635,6 +901,7 @@ function resolveItem(f: Flags): Obj {
     }
     const op: Obj = { v: 1, op: 'resolve', id, ts: new Date().toISOString(), session, decision, by, note, quote }
     if (raiseUsd !== undefined) op.raiseUsd = raiseUsd
+    if (reply) op.proof = 'reply'
     appendFileSync(file, JSON.stringify(op) + '\n')
     // the resolving session may differ from the one that raised the item: its sidecar is under the open row's session
     const raised = String(it.open.session)
@@ -648,6 +915,8 @@ function resolveItem(f: Flags): Obj {
   })
   event(dir, { event: 'resolve', crew: firstCrew, id, decision, by })
   const out: Obj = { id, state: 'resolved', decision, quote }
+  if (reply && raiseUsd !== undefined) out.raiseUsd = raiseUsd // the amount the reply approved, read from the message that showed it
+  if (corrects !== null) out.corrects = corrects // the decision this reply replaced
   // the client's typed approve of this dir's plan-approval item approves the plan itself, outside the inbox lock. A refusal
   // (open long-term cost, already approved) leaves the resolve standing and rides in the output.
   if (by === 'client' && decision === 'approve' && planItem && planApprover !== null) {

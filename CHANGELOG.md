@@ -2,6 +2,19 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.40.0 (2026-11-21)
+
+You can now approve open requests in your own words, and one reply can answer several of them. Nothing else changes. Update with `claude plugin marketplace update ankur`, then reinstall: `claude plugin install ankur@ankur`.
+
+### Approve in plain words
+
+- **Reply in your own words, no code needed.** When the program manager shows you open requests by name, answer with a plain reply such as "ok", "go ahead" or "yes to the persona, dismiss the other". One reply can approve some requests and dismiss others.
+- **A bare "ok" approves every request the message showed.** That includes a production deploy or a budget raise; a budget raise takes the amount the message proposed.
+- **You are told what your reply was taken to mean.** After resolving, the program manager says in plain words what it took your reply to mean for each request, for example "I took "ok" to approve the export page and the persona".
+- **A later reply can correct a decision.** Reply again, for example "no, reject the persona", and that request is resolved again with the corrected decision. This works until the approved action has run: an applied item, an approved plan or an installed persona can no longer be changed this way.
+- **Only your own typing counts.** Ankur checks that you typed the reply yourself, right after the message that named the request, and keeps the whole reply as the quote. A request the message did not show, an agent's message, a pasted block or a task notification is refused.
+- **The old way still works.** The `/ankur:inbox <decision> <item> <code>` line still resolves a request from another session or from the page.
+
 ## 0.39.0 (2026-11-21)
 
 Your project's own lint, type and format checks can now gate every crew before review. Also fixes: a stitch never drops a crew's text, a "no cost" note no longer holds up a merge, the retro stops reporting test growth that isn't there, and crew briefs carry a few rules learned from real runs. Update with `claude plugin marketplace update ankur`, then reinstall: `claude plugin install ankur@ankur`.

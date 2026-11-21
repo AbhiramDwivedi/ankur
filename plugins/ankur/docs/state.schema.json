@@ -60,7 +60,8 @@
         "by": { "enum": ["client", "pm"] },
         "note": { "type": "string", "maxLength": 4000 },
         "quote": { "type": ["string", "null"], "maxLength": 1000 },
-        "raiseUsd": { "type": "number" }
+        "raiseUsd": { "type": "number" },
+        "proof": { "const": "reply", "description": "The client resolved it in their own words: a typed reply to a message that showed the item, with no code (resolve --reply). The quote is the whole reply." }
       }
     },
     "inboxApplied": {
