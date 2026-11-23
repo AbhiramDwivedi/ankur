@@ -115,8 +115,18 @@ export const answeredLine = (choice: string) => `Answered: ${choice}. Sent to th
 /** The status line of an approved ADR; `n` is its number, "0067". */
 export const adrAccepted = (n: string) => `Approved. ADR-${n} is accepted.`
 
-/** The count in the card's head: what waits on the person. */
+/** The count in the card's head: what waits on the person. Only for a workspace that has work (see hasWork): 0 of nothing is not "All answered". */
 export const needWords = (n: number) => (n === 0 ? 'All answered' : n === 1 ? '1 needs you' : `${n} need you`)
+
+/** The Your move line of a workspace with no run, no request and no open inbox item: nothing was ever asked. */
+export const NO_WORK = 'No work yet. Send a goal to start a run.'
+
+/**
+ * Whether the workspace has any work Your move can speak for: a run, a request (open or settled) or an open inbox
+ * item. A fresh repository has none, and an empty list must not read as "All answered".
+ */
+export const hasWork = (state: Pick<RunState, 'run' | 'requests'>, openItems: number): boolean =>
+  state.run !== null || state.requests.length > 0 || openItems > 0
 
 /** Why an answer did not go through, in words that say the session did not get it and pressing again is safe. */
 export const NOT_REACHED = 'The answer did not reach the session.'

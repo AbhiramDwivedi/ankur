@@ -1,7 +1,7 @@
 // The page's workspace store: the workspace list, the one selected workspace's stream and the last
 // snapshot of each workspace seen. One stream at a time: select() closes the old stream and opens
 // /api/workspaces/<id>/events. A workspace shows only its own state, or null while loading (never another's).
-import { getWorkspaces, openWorkspace, stopWorkspace } from './api.ts'
+import { cloneWorkspace, getWorkspaces, openWorkspace, stopWorkspace } from './api.ts'
 import { createStore } from './store.ts'
 import type { Store, StoreDeps } from './store.ts'
 import type { Connection, ListResult, OpenResult, RunState, StopResult, WorkspaceItem } from './types.ts'
@@ -32,6 +32,7 @@ export interface ListView {
 export interface WorkspaceDeps extends StoreDeps {
   fetchList?: () => Promise<ListResult>
   openDir?: (path: string) => Promise<OpenResult>
+  cloneDir?: (url: string, parent: string) => Promise<OpenResult>
   stopWorkspace?: (id: string) => Promise<StopResult>
 }
 
@@ -47,6 +48,8 @@ export interface WorkspaceStore {
   refreshList(): Promise<void>
   /** Opens a directory (15 s abort). On success the list holds the workspace. */
   openDirectory(path: string): Promise<OpenResult>
+  /** Clones a repository into <parent>/<name> and opens it. On success the list holds the workspace. */
+  cloneRepository(url: string, parent: string): Promise<OpenResult>
   /** Stops a workspace's session and puts the answer's item in the list. */
   stopSession(id: string): Promise<StopResult>
   subscribe(fn: () => void): () => void
@@ -64,6 +67,7 @@ export function createWorkspaceStore(deps: WorkspaceDeps): WorkspaceStore {
   let polling = false
   const fetchList = deps.fetchList ?? getWorkspaces
   const doOpen = deps.openDir ?? openWorkspace
+  const doClone = deps.cloneDir ?? cloneWorkspace
   const doStop = deps.stopWorkspace ?? stopWorkspace
   const usingDefaultTimer = deps.setTimer === undefined
   const setTimer = deps.setTimer ?? ((fn: () => void, ms: number): unknown => setTimeout(fn, ms))
@@ -156,6 +160,14 @@ export function createWorkspaceStore(deps: WorkspaceDeps): WorkspaceStore {
     refreshList,
     async openDirectory(path) {
       const r = await doOpen(path)
+      if (r.ok) {
+        putItem(r.workspace)
+        notify()
+      }
+      return r
+    },
+    async cloneRepository(url, parent) {
+      const r = await doClone(url, parent)
       if (r.ok) {
         putItem(r.workspace)
         notify()

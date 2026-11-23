@@ -68,7 +68,13 @@ npm --prefix ui start
 
 3. Open that whole URL, token included, in your browser. The server sets a cookie for the token and redirects to the same page without it, so the token doesn't stay in the address bar.
 
-4. Open a directory. The page asks for a path in the "Repo path" field. Type the full path of a git repo (`~` at the start means your home directory; other relative paths are refused) and open it. Any folder inside a repo opens that repo's workspace, and opening it again returns the workspace that is already open. A path that isn't a git repo or doesn't exist is refused with the reason. You can open several repos: each is a workspace, listed with its status and its open-request count, and you switch between them in the page.
+4. Open a directory. The page asks for a path in the "Repo path" field. Type the full path of a git repo (`~` at the start means your home directory; other relative paths are refused) and open it. Any folder inside a repo opens that repo's workspace, and opening it again returns the workspace that is already open. A path that isn't a git repo or doesn't exist is refused with the reason.
+
+   "Browse…" beside the field opens a folder browser instead of typing. It starts in your home folder, lists only folders, marks the ones that are git repos and has an "Up" row. On Windows the drives are listed at the top. Folders whose names start with a dot are hidden until you tick "Show hidden folders". "Use this folder" puts the path in the field and "Open this folder" opens it at once. The server does the listing, because a browser's own folder picker never gives a page the folder's full path.
+
+   "Or clone a repository" takes a URL (`https://…`, `ssh://…` or `git@host:owner/repo`, from any git host) and an optional "Clone into" folder, which you can also pick with "Browse…". When that folder is left empty, the clone goes into `~/code`, or into your home folder when `~/code` doesn't exist. The server runs `git clone` into `<folder>/<repo name>` with your own git and its credentials, then opens the clone as a workspace. A target that already exists and isn't empty is refused, and so are local paths and `ext::` or `file::` URLs. Git gets 5 minutes. Git never prompts for a password in this mode, so a private repo needs a credential helper or an SSH key that is already set up. A sign-in failure, a repo that doesn't exist, a network failure and the timeout are each refused with what to do next.
+
+   You can open several repos: each is a workspace, listed with its status and its open-request count, and you switch between them in the page.
 
 5. Type your goal in the message box of a workspace and send it. That workspace's Claude Code session starts with its first message, not when the server starts or when you open the directory. Each workspace has its own conversation, crews and decisions, and its own session with the Ankur plugin loaded.
 
@@ -76,7 +82,7 @@ npm --prefix ui start
 
 - Each workspace has its own store and its own Claude Code session. Stopping a workspace ends only its session and the Claude Code process tree under it (its agents, workflows and heavy jobs), on Windows too. A later message to a stopped workspace starts a fresh session.
 - Open workspaces live in the server's memory only. Restarting the server closes them all, and the UI stores nothing.
-- The routes are `GET` and `POST /api/workspaces`, `POST /api/workspaces/<id>/stop`, and `/events`, `/message`, `/requests/<id>/answer` and `/image` under `/api/workspaces/<id>/`. The token, `Host` and `Origin` checks apply to every one. When the server was started with a first workspace (see Flags), the un-scoped `/api/events`, `/api/message`, `/api/requests/<id>/answer` and `/api/image` act on that first workspace.
+- The routes are `GET` and `POST /api/workspaces`, `POST /api/workspaces/clone` (`{url, parent}`: clone, then open), `GET /api/fs/dirs?path=<dir>&hidden=1` (the folder browser's listing), `POST /api/workspaces/<id>/stop`, and `/events`, `/message`, `/requests/<id>/answer` and `/image` under `/api/workspaces/<id>/`. The token, `Host` and `Origin` checks apply to every one. When the server was started with a first workspace (see Flags), the un-scoped `/api/events`, `/api/message`, `/api/requests/<id>/answer` and `/api/image` act on that first workspace.
 
 ### Flags
 
@@ -92,7 +98,7 @@ Every flag takes a value. An unknown flag or a missing value exits with code 2 a
 ### What the UI does and doesn't do
 
 - It listens on `127.0.0.1` only, so other machines can't reach it. Every request needs the token, from the URL or the cookie, and a `Host` of `127.0.0.1:<port>` or `localhost:<port>`.
-- It stores nothing. The UI's own code writes no file: no database, log or cache. It reads Ankur's files and git, and shows them. The Ankur plugin's hooks in the session still write the Ankur dir, as they do in a terminal.
+- It stores nothing. The UI's own code writes no file: no database, log or cache. It reads Ankur's files and git, and shows them. The one exception you start yourself is "Clone a repository": git then contacts the host in the URL you gave and writes the clone into the folder you chose, as `git clone` in a terminal would. The Ankur plugin's hooks in the session still write the Ankur dir, as they do in a terminal.
 - It sets no model and no spending limit. The session runs on Claude Code's default model, and the header shows the run's cost and usage with no ceiling.
 
 ## Stop the UI

@@ -415,7 +415,29 @@ export type OpenError = 'path' | 'relative' | 'missing' | 'notgit' | 'timeout' |
 /** The answer to opening a directory: the workspace, and whether it was already open; or the refusal. */
 export type OpenResult =
   | { ok: true; workspace: WorkspaceItem; existed: boolean }
-  | { ok: false; error: OpenError | (string & {}); status: number }
+  | { ok: false; error: OpenError | (string & {}); status: number; target?: string } // target: the folder a clone was for
+
+/** One subfolder in the Open screen's folder browser (GET /api/fs/dirs). */
+export interface DirEntry {
+  name: string
+  path: string
+  /** The folder holds .git. */
+  git: boolean
+}
+
+/** A folder's listing: its subfolders, the folder above (null at a root) and, on Windows, the drive roots. */
+export interface DirListing {
+  path: string
+  parent: string | null
+  git: boolean
+  entries: DirEntry[]
+  roots: string[]
+  sep: string
+  home: string
+  truncated: boolean
+}
+
+export type DirsResult = { ok: true; listing: DirListing } | { ok: false; error: string; status: number }
 
 /** The answer to a workspace list request. expired is true on 401 or 403 (the page link is gone): no retry. */
 export type ListResult =

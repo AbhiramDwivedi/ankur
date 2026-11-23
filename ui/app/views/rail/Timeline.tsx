@@ -56,7 +56,8 @@ function stepsOf(state: RunState | null): Step[] {
     {
       key: 'plan',
       label: 'Plan',
-      meta: planDone ? (approvedAt !== null ? `Done ${hhmm(approvedAt)}`.trim() : 'Done') : 'Waiting for approval',
+      // A conversation with no run has no plan to approve yet: it never reads "Waiting for approval".
+      meta: planDone ? (approvedAt !== null ? `Done ${hhmm(approvedAt)}`.trim() : 'Done') : state.run === null ? 'No plan yet' : 'Waiting for approval',
       done: planDone,
     },
     ...stages.map((n) => {

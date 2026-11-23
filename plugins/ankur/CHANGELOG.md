@@ -2,6 +2,24 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.42.0 (2026-11-23)
+
+The UI's Open screen can now browse your folders and clone a repository, and a new workspace no longer claims everything is answered before any work has started. The plugin itself is unchanged.
+
+To update an existing install, run `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code. To update the UI, stop it, run `git pull` in your clone of the ankur repo, then `npm --prefix ui ci` and `npm --prefix ui run build`, and start it again with `npm --prefix ui start`.
+
+### Open a repo without typing its path
+
+- **Browse… picks a folder.** Beside the "Repo path" field, "Browse…" opens a folder browser. It starts in your home folder, lists only folders, marks the ones that are git repos and has an "Up" row. On Windows the drives are listed at the top. Folders whose names start with a dot stay hidden until you tick "Show hidden folders". "Use this folder" puts the path in the field, and "Open this folder" opens it at once.
+- **Or clone a repository.** Give a URL (`https://…`, `ssh://…` or `git@host:owner/repo`, from any git host) and, if you like, a "Clone into" folder, which "Browse…" can pick too. Left empty, the clone goes into a `code` folder in your home folder, or into your home folder when there is none. The page runs `git clone` with your own git and its credentials into `<folder>/<repo name>`, then opens the clone as a workspace.
+- **Private repos need credentials already set up.** Git is never asked to prompt for a password here, so a private repo needs an SSH key or a git credential helper that already works in your terminal.
+- **Each failure says what to do next.** A sign-in failure, a repo that doesn't exist, a network failure and a clone that runs past 5 minutes are each refused with the next step. A target folder that already exists and isn't empty is refused, and so are local paths and `ext::` or `file::` URLs. A folder git made for a failed clone is removed.
+- **The clone is the one thing that leaves your machine.** The UI still stores nothing of its own and sends nothing off the machine, except the `git clone` you start, which contacts the host in the URL you gave and writes into the folder you chose, as git in a terminal would.
+
+### Fixed
+
+- **A new workspace says "No work yet".** A repo you have just opened, with no run and no request, used to read "All answered" under Your move. It now shows no count and says "No work yet. Send a goal to start a run." The timeline's Plan step reads "No plan yet" once you have sent a message but no run exists, instead of "Waiting for approval".
+
 ## 0.41.0 (2026-11-21)
 
 The client brief now asks about production readiness, fitted to the kind of thing you build. Set-up proposes your stack's dependency audit as a static check. The full test suite now runs once per goal at the goal check instead of before every crew merge, and a version bump or a price edit no longer runs the whole suite.

@@ -1,6 +1,6 @@
 // POSTs to the server. Neither function rejects, neither touches the
 // store, and the caller's text goes out exactly as given.
-import type { Intent, ListResult, OpenResult, PostResult, StopResult, WorkspaceItem } from './types.ts'
+import type { DirListing, DirsResult, Intent, ListResult, OpenResult, PostResult, StopResult, WorkspaceItem } from './types.ts'
 
 /** A POST that has not answered in this long resolves {status: 0, error: 'timeout'}. */
 export const POST_TIMEOUT_MS = 15_000
@@ -41,10 +41,13 @@ export function postAnswer(id: string, body: unknown): Promise<PostResult> {
   return post(`/api/requests/${encodeURIComponent(id)}/answer`, body)
 }
 
-/** Runs a request with the same 15 s abort; resolves the status and the parsed JSON body (null when it is not JSON). */
-async function request(url: string, init: RequestInit): Promise<{ status: number; data: Record<string, unknown> | null; failed: "timeout" | "network" | null }> {
+/** A clone may take minutes: the page waits a minute longer than the server's 5 min git timeout. */
+export const CLONE_WAIT_MS = 6 * 60_000
+
+/** Runs a request with the 15 s abort (or `waitMs`); resolves the status and the parsed JSON body (null when it is not JSON). */
+async function request(url: string, init: RequestInit, waitMs = POST_TIMEOUT_MS): Promise<{ status: number; data: Record<string, unknown> | null; failed: "timeout" | "network" | null }> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), POST_TIMEOUT_MS)
+  const timer = setTimeout(() => controller.abort(), waitMs)
   try {
     const res = await fetch(url, { ...init, signal: controller.signal })
     let data: Record<string, unknown> | null = null
@@ -81,6 +84,29 @@ export async function openWorkspace(path: string): Promise<OpenResult> {
   }
   const error = r.failed === 'timeout' ? 'stuck' : r.failed ?? (typeof r.data?.error === 'string' ? r.data.error : 'http')
   return { ok: false, error, status: r.status }
+}
+
+/** POST /api/workspaces/clone {url, parent}: clones into <parent>/<name>, then opens it. Waits CLONE_WAIT_MS. Never rejects. */
+export async function cloneWorkspace(url: string, parent: string): Promise<OpenResult> {
+  const r = await request('/api/workspaces/clone', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url, parent }) }, CLONE_WAIT_MS)
+  const w = r.data?.workspace
+  if ((r.status === 200 || r.status === 201) && r.data?.ok === true && w !== null && typeof w === 'object') {
+    return { ok: true, workspace: w as WorkspaceItem, existed: r.data.existed === true }
+  }
+  const error = r.failed === 'timeout' ? 'stuck' : r.failed ?? (typeof r.data?.error === 'string' ? r.data.error : 'http')
+  const target = typeof r.data?.target === 'string' ? r.data.target : undefined
+  return target === undefined ? { ok: false, error, status: r.status } : { ok: false, error, status: r.status, target }
+}
+
+/** GET /api/fs/dirs: the subfolders of `path` (the home folder when empty). Never rejects. */
+export async function listDirs(path: string, hidden: boolean): Promise<DirsResult> {
+  const q = new URLSearchParams()
+  if (path !== '') q.set('path', path)
+  if (hidden) q.set('hidden', '1')
+  const qs = q.toString()
+  const r = await request(`/api/fs/dirs${qs ? '?' + qs : ''}`, { method: 'GET' })
+  if (r.status === 200 && r.data !== null && Array.isArray(r.data.entries)) return { ok: true, listing: r.data as unknown as DirListing }
+  return { ok: false, status: r.status, error: r.failed ?? (typeof r.data?.error === 'string' ? r.data.error : 'http') }
 }
 
 /** POST /api/workspaces/<id>/stop. Never rejects. */

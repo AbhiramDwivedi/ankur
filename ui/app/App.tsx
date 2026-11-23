@@ -302,6 +302,7 @@ export default function App() {
           <main id="main" tabIndex={-1} className="min-h-0 min-w-0 overflow-y-auto outline-none lg:col-span-2">
             <OpenDirectory
               open={store.openDirectory}
+              clone={store.cloneRepository}
               onOpened={(w, existed, typed) => {
                 focusComposer.current = 'always'
                 setShowOpen(false)

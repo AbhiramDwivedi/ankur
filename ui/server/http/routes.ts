@@ -3,6 +3,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SessionControl, StateSource, WorkspaceSource } from './index.ts';
 import type { SseHub } from './sse.ts';
 import { serveImage, serveMarked, serveStatic } from './static.ts';
+import { listDirs } from '../workspaces/browse.ts';
+import { cloneRepo } from '../workspaces/clone.ts';
 
 const MAX_BODY = 1024 * 1024;
 
@@ -99,6 +101,28 @@ async function openWorkspace(ws: WorkspaceSource, req: IncomingMessage, res: Ser
   return sendJson(res, r.error === 'timeout' ? 504 : 400, { error: r.error });
 }
 
+// A clone refusal's status. Never 401 or 403: the page reads those as an expired link.
+const CLONE_STATUS: Record<string, number> = { url: 400, relative: 400, parent: 400, exists: 409, timeout: 504, auth: 502, notfound: 502, network: 502, nogit: 500, git: 502 };
+
+// POST /api/workspaces/clone {url, parent?}: clones, then opens the clone as POST /api/workspaces does.
+async function cloneWorkspace(ws: WorkspaceSource, disk: DiskOps, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJson(req, res);
+  if (!body) return;
+  const c = await disk.clone(body.value?.url, body.value?.parent);
+  if (!c.ok) return sendJson(res, CLONE_STATUS[c.error] ?? 400, c.target ? { error: c.error, target: c.target } : { error: c.error });
+  const r = await ws.open(c.path);
+  if (!r.ok) return sendJson(res, r.error === 'timeout' ? 504 : 400, { error: r.error, target: c.path });
+  const workspace = { ...(r.workspace as object), session: (r.workspace as { session?: boolean }).session === true };
+  return sendJson(res, 201, { ok: true, workspace, existed: r.existed, cloned: c.path });
+}
+
+// GET /api/fs/dirs?path=<abs>&hidden=1: the subfolders of one folder (the home folder without a path).
+async function listFolders(disk: DiskOps, params: URLSearchParams, res: ServerResponse): Promise<void> {
+  const r = await disk.list(params.get('path') ?? '', params.get('hidden') === '1');
+  if (r.ok) return sendJson(res, 200, r.listing);
+  return sendJson(res, 400, { error: r.error });
+}
+
 // The /api/workspaces routes. A known sub-route on an unknown workspace is 404 `workspace`.
 async function workspaceRoute(
   opts: RouteOpts & { workspaces: WorkspaceSource; hubFor: (state: StateSource) => SseHub },
@@ -113,6 +137,10 @@ async function workspaceRoute(
     if (method === 'GET') return sendJson(res, 200, { workspaces: ws.list() });
     if (method === 'POST') return openWorkspace(ws, req, res);
     return sendJson(res, 405, { error: 'method' });
+  }
+  if (path === '/api/workspaces/clone') {
+    if (method !== 'POST') return sendJson(res, 405, { error: 'method' });
+    return cloneWorkspace(ws, opts.disk ?? DISK, req, res);
   }
   const m = /^\/api\/workspaces\/([^/]+)\/(stop|events|message|image|requests\/([^/]+)\/answer)$/.exec(path);
   if (!m) return sendJson(res, 404, { error: 'notfound' });
@@ -142,7 +170,15 @@ export interface RouteOpts {
   webDir: string;
   workspaces?: WorkspaceSource;
   hubFor?: (state: StateSource) => SseHub; // the SSE hub of one workspace's state; createServer makes it
+  disk?: DiskOps; // the folder browser and clone of the Open screen; tests inject them
 }
+
+/** What the Open screen's folder browser and clone routes call. */
+export interface DiskOps {
+  list: typeof listDirs;
+  clone: (url: unknown, parent: unknown) => ReturnType<typeof cloneRepo>;
+}
+const DISK: DiskOps = { list: listDirs, clone: (url, parent) => cloneRepo(url, parent) };
 
 export async function route(
   opts: RouteOpts,
@@ -159,6 +195,11 @@ export async function route(
   const isApi = path === '/api' || path.startsWith('/api/');
   if (opts.workspaces && opts.hubFor && (path === '/api/workspaces' || path.startsWith('/api/workspaces/'))) {
     return workspaceRoute({ ...opts, workspaces: opts.workspaces, hubFor: opts.hubFor }, path, params, req, res);
+  }
+  // The Open screen's folder browser; only a server with a registry has an Open screen.
+  if (opts.workspaces && path === '/api/fs/dirs') {
+    if (method !== 'GET') return sendJson(res, 405, { error: 'method' });
+    return listFolders(opts.disk ?? DISK, params, res);
   }
   // The single-repo server (no registry) says so, so the page takes it as one repository without a failed request.
   if (!opts.workspaces && opts.state && path === '/api/workspaces' && method === 'GET') {

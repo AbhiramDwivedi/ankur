@@ -4,6 +4,7 @@ import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { createGuard } from './guard.ts';
 import { route, sendJson } from './routes.ts';
+import type { DiskOps } from './routes.ts';
 import { createSse } from './sse.ts';
 import type { SseHub } from './sse.ts';
 
@@ -37,7 +38,7 @@ export interface WorkspaceSource {
 
 // With `workspaces`, the /api/workspaces routes work and the un-scoped routes act on its primary (--repo) workspace.
 // With `state` and `session` only, the server is the single-repo server it always was.
-export function createServer(opts: { state?: StateSource; session?: SessionControl; webDir: string; workspaces?: WorkspaceSource }): {
+export function createServer(opts: { state?: StateSource; session?: SessionControl; webDir: string; workspaces?: WorkspaceSource; disk?: DiskOps }): {
   listen(port: number): Promise<{ port: number; token: string; url: string }>;
   close(): Promise<void>;
 } {

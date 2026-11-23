@@ -19,7 +19,9 @@ import {
   NOT_REACHED,
   SESSION_ENDED,
   cardName,
+  hasWork,
   hhmm,
+  NO_WORK,
   needWords,
   noteResult,
   notSent,
@@ -137,7 +139,9 @@ export function YourMove({ state, now, workspace }: YourMoveProps) {
       <h2 id="your-move-title" className="text-lead font-semibold text-move-fg">
         Your move
       </h2>{' '}
-      {state !== null && <span className="shrink-0 text-meta font-medium text-move-muted tabular-nums">{needWords(openCount)}</span>}{' '}
+      {state !== null && hasWork(state, items.length) && (
+        <span className="shrink-0 text-meta font-medium text-move-muted tabular-nums">{needWords(openCount)}</span>
+      )}{' '}
     </div>
   )
 
@@ -222,7 +226,11 @@ export function YourMove({ state, now, workspace }: YourMoveProps) {
 
       {flags.ended && <Notice tone="fail">{SESSION_ENDED}</Notice>}
 
-      {openCount === 0 && !flags.ended && <p className="text-ui text-move-muted">Nothing needs you in {name}.</p>}
+      {openCount === 0 && !flags.ended && (
+        <p className="text-ui text-move-muted">
+          {hasWork(state, items.length) || state.transcript.length > 0 ? `Nothing needs you in ${name}.` : NO_WORK}
+        </p>
+      )}
 
       {/* Every block is keyed under one list, so when an ask is settled the next one moves up in place and keeps what was typed in it. */}
       {hasBlocks && (
