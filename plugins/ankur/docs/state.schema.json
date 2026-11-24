@@ -61,7 +61,8 @@
         "note": { "type": "string", "maxLength": 4000 },
         "quote": { "type": ["string", "null"], "maxLength": 1000 },
         "raiseUsd": { "type": "number" },
-        "proof": { "const": "reply", "description": "The client resolved it in their own words: a typed reply to a message that showed the item, with no code (resolve --reply). The quote is the whole reply." }
+        "proof": { "enum": ["reply", "card"], "description": "reply: the client resolved it in their own words, a typed reply to a message that showed the item, with no code (resolve --reply); the quote is the whole reply. card: the client answered a question card (AskUserQuestion) on the main chain that named the item (resolve --card); the quote is the question and the chosen answer." },
+        "card": { "type": "string", "minLength": 1, "description": "With proof card: the AskUserQuestion tool_use id whose answer proves the resolve." }
       }
     },
     "inboxApplied": {

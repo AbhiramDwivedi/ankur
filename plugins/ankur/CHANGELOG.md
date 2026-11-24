@@ -2,6 +2,28 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.44.0 (2026-11-24)
+
+You now approve a request by clicking Approve on a question card, in the web UI and in the terminal. A line typed in the UI no longer approves by itself. The UI can resume your last session with one click, and the first worktree agent of a session is no longer refused.
+
+To update an existing install, run `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code. To update the UI, stop it, run `git pull` in your clone of the ankur repo, then `npm --prefix ui ci` and `npm --prefix ui run build`, and start it again with `npm --prefix ui start`.
+
+### Approve with one click
+
+- **Approve a request by clicking it.** When a request waits for you, the program manager asks with a question card that names the request, with Approve and Reject buttons. One click approves it, in the terminal and in the web UI. You no longer need to type the request's name, a decision and a code. Typing `/ankur:inbox approve <name> <code>` in a terminal still works, as does a plain "ok" there.
+- **While crews are running, the card waits.** With a crew at work, the program manager asks in plain words instead, and the card comes once no crew runs.
+- **Your own words in a card are a reply, not a yes.** If you write in the card instead of picking a button, nothing is approved: the program manager reads what you wrote and asks again.
+- **A line typed in the web UI no longer approves by itself.** The UI sends your messages through the Agent SDK, and a `claude -p --resume` run that an agent starts writes the same kind of line, so ankur can't tell your line from an agent's. In the UI you approve by the card, which only you can answer. This replaces the 0.43.0 change that counted those lines.
+- **The command guard is simpler.** While a request waits for you, ankur still refuses an agent command that starts a second claude session or uses the Agent SDK, and it still refuses hand-writing a transcript or the inbox. It no longer reads the script files a command runs. The approval check stops an agent from approving its own work by a shortcut; it does not protect against a program that controls your user account.
+
+### Resume from the workspace row
+
+- **One-click Resume on the workspace row.** After you stop a session in the UI, the workspace row shows "Resume session" where "Stop session" was, and one click continues the repository's newest earlier session. While it resumes the button reads "Resuming…". If another Claude Code process holds that session, the button reads "Resume anyway" under the same two-writers warning as the Resume list.
+
+### The first worktree agent of a session is no longer refused
+
+- **Ankur tells the main session the worktree brief rule when the session starts.** Every session's first Agent call with `isolation: "worktree"` used to be refused once with "[ankur] Refused: an Agent in a worktree needs the shell rules in its brief", costing a turn, because the session learned the rule only from the refusal. The session-start context now carries the rule and the shell rules block, word for word, on every start, resume, clear and compact, even outside an ankur run. The refusal stays as a backstop: ankur cannot add the block to the call itself, because Claude Code's auto mode gives no verdict on an Agent call a hook changed, nor on the calls sent beside it.
+
 ## 0.43.0 (2026-11-23)
 
 An "ok" typed in the UI approves again, a crew follows your repository's own rules over ankur's brief, and the UI can resume an earlier Claude Code session or give you the command to resume it in a terminal.

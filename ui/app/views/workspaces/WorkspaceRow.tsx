@@ -2,13 +2,14 @@
 // open-request chip. On the current row only, a "Stop session" button opens the inline confirm (S4).
 import { useEffect, useRef, useState } from 'react'
 import { Square } from 'lucide-react'
-import type { WorkspaceItem } from '../../store/types.ts'
+import type { PriorSession, ResumeResult, WorkspaceItem } from '../../store/types.ts'
 import { Button } from '../../components/ui/button.tsx'
 import { StatusGlyph, type Glyph } from '../../components/ui/dot.tsx'
 import { Notice } from '../../components/ui/notice.tsx'
 import { cn } from '../../lib/utils.ts'
 import { noSessionWord, workspaceStatusLabel } from '../status/status.ts'
 import { countChip, fitPath, homeRelative } from './format.ts'
+import { RowResume } from './RowResume.tsx'
 import { STOP_CONFIRM_ID, StopConfirm } from './StopConfirm.tsx'
 
 /** What the page knows of a stop it started: under way, no answer in 15 s, or refused. */
@@ -27,6 +28,10 @@ export interface WorkspaceRowProps {
   stop: StopLocal | undefined
   onSelect: (id: string) => void
   onStop: (id: string) => void
+  /** Continues a session in this workspace; the page store's resumeSession. Without it the row has no Resume button. */
+  onResume?: (id: string, sessionId: string, force: boolean) => Promise<ResumeResult>
+  /** The earlier sessions when already known (tests); otherwise the row reads them from the server. */
+  sessions?: PriorSession[] | null
 }
 
 const RUN_MARK = {
@@ -55,7 +60,7 @@ export const rowCount = (item: WorkspaceItem): number => (item.status === 'stopp
 
 const canStop = (item: WorkspaceItem) => item.session && (item.status === 'working' || item.status === 'waiting' || item.status === 'finished')
 
-export function WorkspaceRow({ item, current, stale, stage, stop, onSelect, onStop }: WorkspaceRowProps) {
+export function WorkspaceRow({ item, current, stale, stage, stop, onSelect, onStop, onResume, sessions }: WorkspaceRowProps) {
   const [confirm, setConfirm] = useState(false)
   const stopBtn = useRef<HTMLButtonElement>(null)
   const refocus = useRef(false)
@@ -170,6 +175,7 @@ export function WorkspaceRow({ item, current, stale, stage, stop, onSelect, onSt
           )}
         </div>
       )}
+      {current && onResume && !stopping && !canStop(item) && <RowResume item={item} resume={onResume} initial={sessions} />}
       {current && stop?.phase === 'error' && (
         <Notice tone="fail" className="mt-2">
           Could not stop {item.name}: {stop.error}. Try again.

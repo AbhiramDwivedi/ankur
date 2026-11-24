@@ -973,8 +973,15 @@ export const DECISION_LOG_REFUSAL = `${MARK} Refused: decisions.md is written on
 export const SHELL_RULES =
   "Your worktree is guarded by Claude Code: it refuses a Bash command it can't show stays inside the worktree, and each refusal costs a turn. Write and change files with the Write and Edit tools, never a shell heredoc (`cat > f <<'EOF'`). Run one plain command per Bash call: no `&&`, `;`, `cd`, for-loop or `$VAR` argument; give paths in full. Put a script in a file and run that, rather than feeding python or node inline text that names git. Quote a git format that holds parentheses. Never cd into the main checkout. Never pass `git -C` with the main checkout's path; read main's state from inside the worktree with `git show main:<path>` or `git log main`. Run tests and builds in the foreground with an explicit Bash timeout up to 600000; never sleep-poll a background task or misuse Monitor (pass its documented arguments only). Start a long-running process (a server, a watcher) only with Bash `run_in_background`, never `&`, `nohup`, `setsid` or `disown`: those escape the session and nothing can stop them. Stop it with TaskStop when you are done. Stop only a process you started, by its pid; never pkill or kill by pattern."
 
+// What the main session is told at every start, resume, clear and compact, so its first worktree brief carries the rules
+// and the refusal below does not fire.
+export const SHELL_RULES_NOTE = `${MARK} Every Agent call with isolation "worktree" must include this block in its prompt, word for word: "${SHELL_RULES}"`
+
 // Retro F-10. An Agent call with isolation "worktree" whose prompt lacks the shell rules is refused, with the block quoted.
 // Refused, not rewritten: a rewritten input gets no auto-mode verdict (F-9), and neither do the Agent calls beside it.
+// Re-checked on Claude Code 2.1.331 (2026-11-24): a hook that appended text to a worktree Agent prompt got "auto mode
+// classifier gave no verdict ... a hook changed this call's input" for that call and "another call in this response was
+// changed" for the parallel Agent call. SessionStart carries SHELL_RULES_NOTE instead, so the refusal is a backstop.
 // A prompt that opens the rules with their first sentence (the Workflow scripts' own copy) passes.
 export function worktreeBriefVerdict(input: { isolation?: unknown; prompt?: unknown }): { deny: string } | undefined {
   if (input.isolation !== 'worktree' || typeof input.prompt !== 'string') return undefined
@@ -1315,14 +1322,13 @@ export function decisionLogBashVerdict(command: unknown): { deny: string } | und
   return writesDecisionLogByHand(command) ? { deny: DECISION_LOG_REFUSAL } : undefined
 }
 
-// The inbox proof counts a main-chain user row an SDK host sent as the client's reply. `claude -p --resume <id> "ok"` and a script calling
-// the Agent SDK's query() with resume write the same row, so an agent must never start either: it would approve its own request.
-export const SDK_REPLY_REFUSAL = `${MARK} Refused: do not start claude with -p, --print, --resume, --continue or --session-id, or run a script that uses @anthropic-ai/claude-agent-sdk. A session started that way writes a line the approval proof counts as the client's own reply. Ask the client to answer in the UI or the terminal.`
+// The inbox proof counts the client's answer to a question card on the main chain. A session the agent starts on the client's transcript
+// (`claude --resume <id>`, or an Agent SDK host with its own canUseTool) could answer that card itself, so while a client item is open an agent
+// never starts one. A lexical guard against the agent's shortcut, not a lock against someone with the client's account.
+export const SDK_REPLY_REFUSAL = `${MARK} Refused: do not start claude with -p, --print, --resume, --continue or --session-id, or the Agent SDK (@anthropic-ai/claude-agent-sdk), while a client item is open. A session started that way could answer the approval card in the client's name. Ask the client to answer the card in the UI or the terminal.`
 const SDK_PACKAGE = /claude[-_]agent[-_]sdk/i // the npm package, with or without its scope, and the Python one
 const CLAUDE_SESSION_FLAG = /^(?:--print|--resume|--continue|--session-id|-[a-zA-Z]*[pcr][a-zA-Z]*)(?:=|$)/
 const SHELL_LIKE = new Set(['bash', 'sh', 'zsh', 'dash', 'eval', 'xargs', 'timeout', 'npx', 'pwsh', 'powershell', 'cmd', 'cmd.exe'])
-const SCRIPT_RUNNERS = new Set(['node', 'tsx', 'bun', 'deno', 'ts-node', 'python', 'python3', 'py'])
-const isRunner = (w: string): boolean => SCRIPT_RUNNERS.has(w) || /^python[\d.]+$/.test(w)
 
 export function startsClaudeSession(command: unknown, depth = 0): boolean {
   if (typeof command !== 'string' || depth > 3) return false
@@ -1365,10 +1371,9 @@ export function commandDirs(command: unknown, cwd: string): string[] {
   return dirs
 }
 
-// Does the shared inbox of any of `dirs` hold an open item of a kind the client resolves? No repo or no inbox file: false. Cheap step: an inbox
-// with no client-kind `open` row at all: false, with only the inbox read. Otherwise the answer is the verified fold the approval proof uses
-// (`verifiedItems` in the inbox module), so a forged resolve row in the inbox file cannot switch the guard off: an item is open there until a
-// resolve row passes its proof. An inbox that exists but cannot be read, or a fold that throws: true.
+// Does the shared inbox of any of `dirs` hold an open item of a kind the client resolves: a client-kind `open` row whose id no `resolve` row
+// names? No repo or no inbox file: false. An inbox that exists but cannot be read: true. A read of one file, no fold: an agent never writes the
+// inbox by hand (the transcript-write guard refuses it), and the guard stops a shortcut, not a forger.
 export async function clientItemOpen($: $, dirs: string[]): Promise<boolean> {
   for (const dir of dirs) {
     const common = await gitCommonDir($, dir)
@@ -1381,66 +1386,25 @@ export async function clientItemOpen($: $, dirs: string[]): Promise<boolean> {
     } catch {
       return true
     }
-    let anyClientOpen = false
+    const open = new Set<string>()
+    const resolved = new Set<string>()
     for (const line of text.split('\n')) {
       if (line.trim() === '') continue
       try {
         const row = JSON.parse(line)
-        if (isRecord(row) && row.op === 'open' && CLIENT_KINDS.has(String(row.kind))) anyClientOpen = true
+        if (!isRecord(row) || typeof row.id !== 'string') continue
+        if (row.op === 'open' && CLIENT_KINDS.has(String(row.kind))) open.add(row.id)
+        else if (row.op === 'resolve') resolved.add(row.id)
       } catch {
-        // an unparsable line is not an open row
+        // an unparsable line is not a row
       }
     }
-    if (!anyClientOpen) continue
-    // A hook reaches no node module, so the fold runs through the plugin's own CLI. No plugin root, a failed run or unreadable output: on.
-    try {
-      const root = await $.env.get('CLAUDE_PLUGIN_ROOT')
-      if (root === undefined || root === '') return true
-      const r = await $.process.run(['node', `${slashed(root)}/bin/${'factory'}.ts` /* the name in parts: a literal would link every test that loads this hook to the CLI (select-bar-033) */, 'inbox', '--repo', dir, '--open'], { cwd: dir, timeoutMs: 20_000 })
-      if (r.exitCode !== 0) return true
-      const items = JSON.parse(r.stdout.trim().split('\n').pop() ?? '').items
-      if (!Array.isArray(items)) return true
-      if (items.some((it: any) => isRecord(it) && it.state === 'open' && CLIENT_KINDS.has(String(it.kind)))) return true
-    } catch {
-      return true
-    }
+    for (const id of open) if (!resolved.has(id)) return true
   }
   return false
 }
 
 const absPath = (cwd: string, p: string): string => (/^(?:[\\/]|[A-Za-z]:[\\/])/.test(p) ? p : `${cwd.replace(/[\\/]+$/, '')}/${p.replace(/^\.[\\/]/, '')}`)
-const WRAPPERS = new Set(['npx', 'bunx', 'pnpm', 'npm', 'yarn']) // npx tsx f.ts, npm exec tsx f.ts, pnpm dlx tsx f.ts
-const PY_WRAPPERS = new Set(['uv', 'pipx', 'poetry'])
-const SHELL_RUNNERS = new Set(['bash', 'sh', 'zsh', 'dash'])
-
-// The script files a command runs, each resolved against `cwd` (a `cd <dir>` earlier in the command moves it): `scripts` are the files of
-// node, tsx, bun or deno (also behind npx, npm exec, pnpm dlx) whose text may use the Agent SDK, `shells` the files given to sh, bash or zsh
-// whose text may start a claude session.
-export function scriptOperands(command: unknown, cwd = '.'): { scripts: string[]; tests: string[]; shells: string[] } {
-  const out = { scripts: [] as string[], tests: [] as string[], shells: [] as string[] }
-  if (typeof command !== 'string') return out
-  for (const words of shellWords(command)) {
-    let n = 0
-    while (n < words.length && (/^\w+=/.test(words[n]) || SKIPPED_PREFIX.has(words[n]))) n++
-    let cmd = (words[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
-    let args = words.slice(n + 1)
-    if (cmd === 'cd' && args[0] !== undefined) cwd = absPath(cwd, args[0])
-    if (WRAPPERS.has(cmd)) {
-      const at = args.findIndex(isRunner)
-      if (at < 0) continue
-      cmd = args[at]
-      args = args.slice(at + 1)
-    } else if (PY_WRAPPERS.has(cmd) && args[0] === 'run') {
-      cmd = 'python' // uv run f.py, pipx run f.py, poetry run python f.py
-      args = args.slice(1)
-    }
-    // a file under `node --test` is a test the runner loads: it may name the SDK to stub it, so only an unreadable one is refused
-    const into = cmd === 'node' && args.some((w) => w === '--test' || w.startsWith('--test-')) ? out.tests : out.scripts
-    if (isRunner(cmd)) for (const w of args) if (/\.(?:[cm]?[jt]s|tsx?|py)$/.test(w) && !w.startsWith('-') && !/[*?[\]{}]/.test(w)) into.push(absPath(cwd, w))
-    if (SHELL_RUNNERS.has(cmd) && !args.includes('-c')) for (const w of args) if (!w.startsWith('-')) { out.shells.push(absPath(cwd, w)); break }
-  }
-  return out
-}
 
 // A Write or Edit of a Claude Code transcript, and a shell command that writes one: the inbox proof reads these files as what the client typed.
 const TRANSCRIPT_FILE = /(?:(?:^|[\\/])\.claude[\\/]|CLAUDE_CONFIG_DIR\}?[\\/])(?:[^\\/]*[\\/])*projects[\\/](?:[^\\/]*[\\/])*[^\\/]*\.jsonl$/i
@@ -2703,33 +2667,15 @@ export const register: Register = on => {
       const command = typeof input.command === 'string' ? input.command : isRecord(input.args) ? input.args.command : undefined
       // An agent never writes a transcript or the shared inbox by hand: no scope, there is no legitimate use.
       if (writesTranscriptByHand(command)) return refuse($, state, refusalsLogged, e, { deny: TRANSCRIPT_WRITE_REFUSAL })
-      // The claude-session and SDK guard applies only while the shared inbox of the session cwd, or of a directory a `cd` in the command names,
-      // holds an open item the client resolves: that is the only time a forged reply has a use. The inbox is asked only when the command looks
-      // like a route, and no operand is read before it says so.
-      const cwd = (await safely($, 'sdk reply guard cwd', async () => $.session.cwd())) ?? '.'
-      const scoped = await safely($, 'sdk reply guard scope', async () => {
-        const ops = scriptOperands(command, cwd)
-        if (!startsClaudeSession(command) && ops.scripts.length + ops.tests.length + ops.shells.length === 0) return false
-        return clientItemOpen($, commandDirs(command, cwd))
-      })
-      const sdkRoute = scoped === false ? false : await safely($, 'sdk reply guard', async () => {
-        let hit = startsClaudeSession(command)
-        if (!hit) {
-          const { scripts, tests, shells } = scriptOperands(command, cwd)
-          const read = async (f: string) => (async () => $.fs.read(f))().then((t) => String(t).slice(0, 200000), () => undefined)
-          // a script the guard cannot read is refused: it may be the Agent SDK script
-          for (const f of scripts.slice(0, 8)) {
-            const text = await read(f)
-            if (text === undefined || SDK_PACKAGE.test(text) || startsClaudeSession(text)) hit = true
-          }
-          for (const f of tests.slice(0, 8)) if ((await read(f)) === undefined) hit = true
-          for (const f of shells.slice(0, 8)) {
-            const text = await read(f)
-            if (text !== undefined && startsClaudeSession(text)) hit = true
-          }
-        }
-        if (hit) await logRule($, 'sdk reply guard refused a Bash call: it starts a claude session or runs an Agent SDK script')
-        return hit
+      // The claude-session guard applies only while the shared inbox of the session cwd, or of a directory a `cd` in the command names, holds an
+      // open item the client resolves: that is the only time a session started on the client's transcript has a use. The inbox is read only
+      // when the command starts one.
+      const sdkRoute = await safely($, 'sdk reply guard', async () => {
+        if (!startsClaudeSession(command)) return false
+        const cwd = (await safely($, 'sdk reply guard cwd', async () => $.session.cwd())) ?? '.'
+        if (!(await clientItemOpen($, commandDirs(command, cwd)))) return false
+        await logRule($, 'sdk reply guard refused a Bash call: it starts a claude session or the Agent SDK while a client item is open')
+        return true
       })
       if (sdkRoute === true) return refuse($, state, refusalsLogged, e, { deny: SDK_REPLY_REFUSAL })
     }
@@ -2979,8 +2925,9 @@ export const register: Register = on => {
     return result
   }).catch(failOpen)
 
-  // the main session learns where this session's ankur files live, and, on a start that loads its agents afresh, records
-  // when, in session-start.json; both name the folder of the event's own session id
+  // the main session learns the worktree brief rule (every source, with or without an ankur dir) and where this session's
+  // ankur files live, and, on a start that loads its agents afresh, records when, in session-start.json; both name the
+  // folder of the event's own session id
   on('classic.SessionStart', async ($, e, next) => {
     const result = await next(e)
     if (e.agent_id !== undefined) return result
@@ -2990,7 +2937,8 @@ export const register: Register = on => {
     if (dir !== undefined && typeof source === 'string' && SESSION_START_SOURCES.has(source)) {
       await safely($, 'session start record', async () => writeSessionStart($, dir, source, sid ?? (await $.session.id())))
     }
-    return dir === undefined ? result : { ...result, additionalContext: [...(result.additionalContext ?? []), `${DIR_NOTE} ${dir}`] }
+    const notes = dir === undefined ? [SHELL_RULES_NOTE] : [SHELL_RULES_NOTE, `${DIR_NOTE} ${dir}`]
+    return { ...result, additionalContext: [...(result.additionalContext ?? []), ...notes] }
   }).catch(failOpen)
 
   on('session.start', async ($, e, next) => {

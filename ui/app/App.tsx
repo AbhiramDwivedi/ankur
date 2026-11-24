@@ -310,6 +310,7 @@ export default function App() {
           onSelect={(id) => choose(id, true, true)}
           onOpen={() => setShowOpen(true)}
           onStop={(id) => void stopSession(id)}
+          onResume={store.resumeSession}
           onRetry={() => void store.refreshList()}
         />}
         {showOpenPanel ? (

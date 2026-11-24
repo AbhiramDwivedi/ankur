@@ -319,6 +319,143 @@ const replyNote = (reply: string, note: unknown): { note: string; unbound: boole
   return norm(reply).includes(n) ? { note: n.slice(0, 4000), unbound: false } : { note: all, unbound: true }
 }
 
+// ---- the card proof: the client's answer to a question card (AskUserQuestion) the main session showed ----
+
+// One question of a card: its text and header, the labels it offered, and the client's answer (an offered label, or their own words
+// typed into the card's free-text field), or undefined when the client gave none.
+type CardQuestion = { question: string; header: string; labels: string[]; answer: string | undefined }
+// An answered card: the tool_use id, the answer row's time, the answer row, and its questions as the main session asked them.
+type Card = { id: string; at: number; row: Obj; questions: CardQuestion[] }
+type CardScan = { sig: string; cards: Card[] }
+// One card scan per file and process, like scans: valid while the file signature is the same.
+const cardScans = new Map<string, CardScan>()
+
+/**
+ * Every answered card of `session` in `main`, in file order. A card counts only on the main chain: an AskUserQuestion tool_use in a
+ * main-thread (not sidechain) assistant row of this session, and a later main-thread user row of this session whose tool_result answers
+ * that tool_use, is not an error (a declined or denied card is), names its assistant row in sourceToolAssistantUUID and carries the answers
+ * in toolUseResult. Claude Code offers the tool only to an interactive main session or an SDK host that answers it (canUseTool): `claude -p`
+ * and a subagent do not have it, so an answered card is a human's click or words, or an SDK host's (the card amendment of the shared-store ADR).
+ */
+function cardScanFile(main: string, session: string): CardScan | null {
+  let st: { size: number; mtimeMs: number; ctimeMs: number; ino: number }
+  try {
+    st = statSync(main)
+  } catch {
+    return null
+  }
+  const sig = `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`
+  const had = cardScans.get(main)
+  if (had !== undefined && had.sig === sig) return had
+  let buf: Buffer
+  try {
+    buf = readProofFile(main)
+  } catch {
+    return null
+  }
+  const asked = new Map<string, { uuid: string; questions: any[] }>()
+  const cards: Card[] = []
+  const tool = Buffer.from('"AskUserQuestion"')
+  const answered = Buffer.from('"toolUseResult":{')
+  for (let ls = 0; ls < buf.length; ) {
+    let le = buf.indexOf(10, ls)
+    if (le === -1) le = buf.length
+    const line = buf.subarray(ls, le)
+    const next = le + 1
+    const isAsk = line.includes(tool)
+    if (!isAsk && !line.includes(answered)) {
+      ls = next
+      continue
+    }
+    let row: any
+    try {
+      row = JSON.parse(line.toString('utf8'))
+    } catch {
+      ls = next
+      continue
+    }
+    ls = next
+    if (row === null || typeof row !== 'object' || row.isSidechain || row.sessionId !== session || typeof row.uuid !== 'string') continue
+    const content = row.message?.content
+    if (!Array.isArray(content)) continue
+    if (row.type === 'assistant') {
+      for (const b of content) if (b?.type === 'tool_use' && b.name === 'AskUserQuestion' && typeof b.id === 'string' && Array.isArray(b.input?.questions)) asked.set(b.id, { uuid: row.uuid, questions: b.input.questions })
+      continue
+    }
+    if (row.type !== 'user' || row.isMeta) continue
+    const results = content.filter((b: any) => b?.type === 'tool_result')
+    if (results.length !== 1 || results[0].is_error === true) continue
+    const ask = asked.get(String(results[0].tool_use_id))
+    if (ask === undefined || row.sourceToolAssistantUUID !== ask.uuid) continue
+    const answers = row.toolUseResult?.answers
+    if (answers === null || typeof answers !== 'object' || Array.isArray(answers)) continue
+    const at = Date.parse(row.timestamp)
+    if (!Number.isFinite(at)) continue
+    const questions: CardQuestion[] = ask.questions
+      .filter((q: any) => q !== null && typeof q === 'object' && typeof q.question === 'string')
+      .map((q: any) => ({
+        question: q.question,
+        header: typeof q.header === 'string' ? q.header : '',
+        labels: (Array.isArray(q.options) ? q.options : []).map((o: any) => o?.label).filter((l: unknown): l is string => typeof l === 'string'),
+        answer: typeof answers[q.question] === 'string' && answers[q.question].trim() !== '' ? answers[q.question] : undefined,
+      }))
+    cards.push({ id: String(results[0].tool_use_id), at, row, questions })
+  }
+  const scan: CardScan = { sig, cards }
+  cardScans.set(main, scan)
+  return scan
+}
+
+// The decision word an offered label stands for: its first word, lowercased, with a trailing "(Recommended)" and punctuation dropped.
+const labelWord = (label: string): string => label.replace(/\s*\(recommended\)\s*$/i, '').trim().split(/[\s,.:;!?]+/)[0].toLowerCase()
+
+/**
+ * Why the card `card` does not prove a --card resolve of `open` with `c`, or the question and answer that do. The card is newer than the
+ * item; one of its questions names the item's id (in its text or header) and was answered; for approve, reject, done and dismiss the answer is
+ * an offered option whose first word is the decision (free text the client typed into the card is their reply, never an approval); for answer,
+ * any answer counts. A budget approve takes the amount the question proposed.
+ */
+function cardFails(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unknown }, card: Card): { why: string } | { q: CardQuestion; answer: string; raiseUsd?: number } {
+  const id = String(open.id)
+  if (!(card.at > Date.parse(open.ts))) return { why: `the card is older than ${id}` }
+  const q = card.questions.find((x) => (namesId(x.question, id) || namesId(x.header, id)) && x.answer !== undefined)
+  if (q === undefined) return { why: `the client's newest card answer names no question about ${id}` }
+  const answer = q.answer as string
+  if (c.decision !== 'answer') {
+    if (!q.labels.includes(answer)) return { why: `the client typed their own words into the card (${JSON.stringify(answer.slice(0, 200))}), not an option: read them as their reply and ask again` }
+    if (labelWord(answer) !== c.decision) return { why: `the client chose ${JSON.stringify(answer)} on the card, not ${String(c.decision)}` }
+  }
+  let usd = c.raiseUsd as number | undefined
+  if (String(open.kind) === 'budget' && c.decision === 'approve') {
+    const shown = shownAmounts({ row: {}, text: '', at: card.at, shown: [{ text: `${q.header}\n${q.question}`.replace(/^\n/, ''), at: card.at }] }, open)
+    if (usd === undefined) {
+      if (shown.length !== 1) return { why: `a budget approve by card needs the one amount the card's question about ${id} proposed, on the line that names it` }
+      usd = shown[0]
+    } else if (!shown.includes(usd)) return { why: `the card's question about ${id} does not propose the amount $${usd}` }
+  }
+  if (!ownsCwd(repo, card.row.cwd)) return { why: 'the card was answered in another repo' }
+  return { q, answer, ...(usd === undefined ? {} : { raiseUsd: usd }) }
+}
+
+/**
+ * The card behind a --card resolve of `open`: the one with tool_use id `cardId` when the row names it (the fold re-verifies a stored row),
+ * else the client's newest answered card at or before `before` that names the item. Its proof, or why it does not prove the resolve.
+ */
+function cardProof(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unknown }, cards: Card[], before: number, cardId?: unknown): { card: Card; q: CardQuestion; answer: string; raiseUsd?: number } | { why: string } {
+  if (typeof c.decision !== 'string' || !DECISIONS.includes(c.decision)) return { why: 'the decision is not one of ' + DECISIONS.join(', ') }
+  if (c.raiseUsd !== undefined && typeof c.raiseUsd !== 'number') return { why: 'raiseUsd is not a number' }
+  const id = String(open.id)
+  let card: Card | undefined
+  if (cardId !== undefined) card = cards.find((k) => k.id === cardId && k.at <= before)
+  else for (const k of cards) if (k.at <= before && k.at > Date.parse(open.ts) && k.questions.some((x) => (namesId(x.question, id) || namesId(x.header, id)) && x.answer !== undefined)) card = k
+  if (card === undefined) return { why: `the client has answered no card about ${id} since it was opened` }
+  const p = cardFails(repo, open, c, card)
+  return 'why' in p ? p : { card, ...p }
+}
+
+// The quote a card-proved row stores: the question the client read and the answer they gave.
+const cardQuote = (q: CardQuestion, answer: string): string => `${q.question} -> ${answer}`.slice(0, 1000)
+
 // The main transcript of `session` under the proof root, or null.
 function proofMain(session: string): string | null {
   if (!SLUG_RE.test(session) || session === '.' || session === '..') return null
@@ -406,14 +543,21 @@ export function verifiedItems(repo: string): Map<string, Item> {
   const items = fold(readJsonl(`${sharedDir(repo)}/inbox.jsonl`).rows)
   const ask = new Map<string, Set<string>>() // session -> ids whose client rows need a transcript
   const askReply = new Map<string, number>() // session -> the oldest open time of an item a reply row of it resolves
+  const askCard = new Set<string>() // sessions a card-proved row names
   for (const [id, it] of items) {
     for (const r of it.rows) {
       if (r.by !== 'client' || typeof r.session !== 'string') continue
       if (r.proof === 'reply') {
         const after = Date.parse(it.open.ts)
         if (Number.isFinite(after)) askReply.set(r.session, Math.min(askReply.get(r.session) ?? Infinity, after))
-      } else (ask.get(r.session) ?? ask.set(r.session, new Set()).get(r.session)!).add(id)
+      } else if (r.proof === 'card') askCard.add(r.session)
+      else (ask.get(r.session) ?? ask.set(r.session, new Set()).get(r.session)!).add(id)
     }
+  }
+  const carded = new Map<string, { scan: CardScan | null; main: string | null }>()
+  for (const session of askCard) {
+    const main = proofMain(session)
+    carded.set(session, { main, scan: main === null ? null : cardScanFile(main, session) })
   }
   const scanned = new Map<string, { scan: FileScan | null; main: string | null }>()
   for (const [session, ids] of ask) {
@@ -442,8 +586,21 @@ export function verifiedItems(repo: string): Map<string, Item> {
       else if (r.by === 'pm') why = ''
       else {
         const anyKind = KINDS[kind]?.by === 'any' // the row counts either way; an unproven note is flagged, never shown as the client's
-        const s = typeof r.session === 'string' ? (r.proof === 'reply' ? replied : scanned).get(r.session) : undefined
+        const s = typeof r.session === 'string' ? (r.proof === 'reply' ? replied : r.proof === 'card' ? carded : scanned).get(r.session) : undefined
         if (s === undefined) why = 'the row names no session'
+        else if (r.proof === 'card') {
+          // a card-proved row is re-verified against the card it names: answered on the main chain before the row was written
+          const cs = s.scan as CardScan | null
+          const at = Date.parse(String(r.ts))
+          const p = cs === null || !Number.isFinite(at) || typeof r.card !== 'string' ? null : cardProof(repo, it.open, r, cs.cards, at, r.card)
+          if (s.main === null) why = `no transcript of session ${r.session} under ${proofTranscriptRoot()}`
+          else if (cs === null) why = `the transcript of session ${r.session} cannot be read`
+          else if (p === null || 'why' in p) why = `no card answered by the client in session ${r.session} backs this ${String(r.decision)}${p !== null && 'why' in p ? `: ${p.why}` : ''}`
+          else {
+            proven = p.answer.slice(0, 4000)
+            typedAt = p.card.at
+          }
+        }
         else if (r.proof === 'reply') {
           // a reply-proved row is re-verified the same way: the client's newest typed reply when the row was written answers a message
           // that showed the item, and its quote is the stored one
@@ -642,12 +799,11 @@ function typedText(row: Obj): string | null {
   if (row.origin !== undefined && row.origin?.kind !== 'human') return null
   // A /loop wakeup line has no origin and no isMeta but its text is what the agent passed to ScheduleWakeup.
   if (row.wakeupSource !== undefined || row.scheduledTaskId !== undefined || row.scheduledFireId !== undefined) return null
-  // A prompt the SDK host sent (the ankur UI) is recorded with turnOrigin sdk, entrypoint sdk-*, and for a plain prompt promptSource sdk, no origin.
-  // It is the client's input through their own front end, so it counts as typed. An agent return in an SDK session keeps origin task-notification.
-  const sdkHost = row.turnOrigin === 'sdk' && typeof row.entrypoint === 'string' && row.entrypoint.startsWith('sdk-')
-  if (row.turnOrigin !== undefined && row.turnOrigin !== 'human' && !sdkHost) return null
+  // A prompt an SDK host sent (turnOrigin sdk, promptSource sdk, entrypoint sdk-*) is a program's line, like `claude -p`: never typed. A client
+  // in the ankur UI approves by clicking a question card instead (see cardScanFile).
+  if (row.turnOrigin !== undefined && row.turnOrigin !== 'human') return null
   // A plain prompt typed while the agent was busy is recorded as promptSource queued, with origin human: it counts like a typed one.
-  const source = row.promptSource === 'queued' && row.origin?.kind === 'human' ? 'typed' : sdkHost && row.promptSource === 'sdk' ? 'typed' : row.promptSource
+  const source = row.promptSource === 'queued' && row.origin?.kind === 'human' ? 'typed' : row.promptSource
   if (source !== undefined && source !== 'typed') return null
   const c = row.message?.content
   let text: string
@@ -659,7 +815,7 @@ function typedText(row: Obj): string | null {
   if (OUTPUT_TAG.test(text)) return null
   // A plain typed prompt carries origin human and promptSource typed. Without that, only the slash-command shape counts: the /ankur:inbox
   // rows on this machine's real transcripts have origin human and no promptSource, or no origin at all, and promptId is not always there.
-  if ((row.origin !== undefined || sdkHost) && source === 'typed') return text
+  if (row.origin !== undefined && source === 'typed') return text
   return source === undefined || source === 'typed' ? (SLASH_SHAPE.test(text) ? text : null) : null
 }
 
@@ -762,7 +918,7 @@ export function approvalProof(repo: string, dir: string, item: string | undefine
     else if (later && o.open.kind === it.open.kind && o.open.session === it.open.session && o.open.ref === it.open.ref) return `${item} is superseded by ${id}`
   }
   const r = it.resolve
-  if (r === null) return `no prompt typed by the client approves ${item}: the client types /ankur:inbox approve ${item} <code>`
+  if (r === null) return `no prompt typed or card answered by the client approves ${item}: ask them with a question card (AskUserQuestion) that names ${item}, with the options Approve and Reject, and resolve it with --card; or the client types /ankur:inbox approve ${item} <code>`
   if (r.by !== 'client' || r.decision !== 'approve') return `${item} was resolved ${String(r.decision)}, not approve`
   if (r.session !== session) return `${item} was approved in another session (${String(r.session)}), not ${session}: the client never saw this plan`
   // the client's approve must come after the plan was written: a resolve older than plan-write approved a plan the client never saw (replayed proof)
@@ -795,7 +951,7 @@ export function personaInstallProof(repo: string, dir: string, item: string | un
     else if (later && o.open.kind === it.open.kind && o.open.ref === it.open.ref) return `${item} is superseded by ${id}` // any session: the latest item for the draft holds the client's latest answer
   }
   const r = it.resolve
-  if (r === null) return `no prompt typed by the client approves ${item}: the client types /ankur:inbox approve ${item} <code>`
+  if (r === null) return `no prompt typed or card answered by the client approves ${item}: ask them with a question card (AskUserQuestion) that names ${item}, with the options Approve and Reject, and resolve it with --card; or the client types /ankur:inbox approve ${item} <code>`
   if (r.by !== 'client' || r.decision !== 'approve') return `${item} was resolved ${String(r.decision)}, not approve`
   if (r.session !== session) return `${item} was approved in another session (${String(r.session)}), not ${session}: the client never saw this draft`
   const at = typedAtOf(r) ?? Date.parse(String(r.ts)) // the typed line's time, not the time the row was stored: a stored row can come long after the typing
@@ -844,7 +1000,13 @@ function resolveItem(f: Flags): Obj {
   if (f.reply !== undefined && !reply) throw usage('--reply takes no value: put the item id first, as resolve <id> --reply ...')
   if (reply && by !== 'client') throw usage('--reply is for --by client')
   if (reply && f.code !== undefined) throw usage('--reply takes no --code: the reply proves the item without one')
-  const code = reply ? '' : need(f, 'code')
+  // --card: the client answered a question card (AskUserQuestion) that named the item; no code is typed
+  const card = f.card === true || f.card === 'true'
+  if (f.card !== undefined && !card) throw usage('--card takes no value: put the item id first, as resolve <id> --card ...')
+  if (card && reply) throw usage('--card and --reply are two proofs: pass one')
+  if (card && by !== 'client') throw usage('--card is for --by client')
+  if (card && f.code !== undefined) throw usage('--card takes no --code: the card answer proves the item without one')
+  const code = reply || card ? '' : need(f, 'code')
   if (!DECISIONS.includes(decision)) throw usage(`--decision must be one of ${DECISIONS.join(', ')}`)
   if (by !== 'client' && by !== 'pm') throw usage('--by must be client or pm')
   const noteGiven = textOf(f, 'note')
@@ -862,6 +1024,7 @@ function resolveItem(f: Flags): Obj {
   let firstCrew = 'main'
   let planItem = false as boolean
   let corrects: string | null = null
+  let cardId: string | null = null
   withLock(S, 'inbox', () => {
     const it = verifiedItems(repo).get(id)
     if (it === undefined) throw refuse({ error: `no such item: ${id}` })
@@ -881,22 +1044,34 @@ function resolveItem(f: Flags): Obj {
     if (raiseUsd !== undefined && kind !== 'budget') throw refuse({ error: '--raise-usd is for the budget kind only' })
     if (reply) {
       const p = replyTypedProof(repo, session, it.open, decision, raiseUsd)
-      if ('missing' in p) throw refuse({ error: `no reply typed by the client resolves ${id}: ${p.missing || 'no reply proves it'}. Show the client the item by its name in your message, and resolve it from the reply they type next; or the client types /ankur:inbox ${decision} ${id} <code>` })
+      if ('missing' in p) throw refuse({ error: `no reply typed by the client resolves ${id}: ${p.missing || 'no reply proves it'}. Show the client the item by its name in your message, and resolve it from the reply they type next; or ask with a question card that names ${id} and resolve it with --card` })
       // one typed reply resolves an item once: a correction needs a newer reply, to a newer message that names the item
       if (before !== null && !(p.at > (typedAtOf(before) as number))) throw refuse({ error: `${id} is already resolved from the client's reply ${JSON.stringify(String(before.quote ?? '').slice(0, 200))}: a correction needs a newer reply, to a message of yours that names ${id} again` })
       raiseUsd = p.raiseUsd
       // a note the agent passes must be the client's own words: a part of the reply
       if (noteGiven !== undefined && norm(note) !== '' && !norm(p.text).includes(norm(note))) throw refuse({ error: `--note is not part of what the client typed (${JSON.stringify(norm(p.text).slice(0, 200))}): pass a part of that text as the note, or none` })
       quote = p.quote
+    } else if (card) {
+      const main = proofMain(session)
+      if (main === null) throw refuse({ error: `no card answered by the client resolves ${id}: no transcript of session ${session} under ${proofTranscriptRoot()}` })
+      const scan = cardScanFile(main, session)
+      if (scan === null) throw refuse({ error: `no card answered by the client resolves ${id}: the transcript of session ${session} cannot be read` })
+      const p = cardProof(repo, it.open, { decision, raiseUsd }, scan.cards, Infinity)
+      if ('why' in p) throw refuse({ error: `no card answered by the client resolves ${id}: ${p.why}. Ask the client with AskUserQuestion: a question that names ${id} and says what they approve, with the options Approve and Reject` })
+      raiseUsd = p.raiseUsd
+      // a note the agent passes must be the client's own words: a part of the answer
+      if (noteGiven !== undefined && norm(note) !== '' && !norm(p.answer).includes(norm(note))) throw refuse({ error: `--note is not part of the client's card answer (${JSON.stringify(norm(p.answer).slice(0, 200))}): pass a part of it as the note, or none` })
+      cardId = p.card.id
+      quote = cardQuote(p.q, p.answer)
     } else if (codeHashOf(id, code) !== it.open.codeHash) throw refuse({ error: 'wrong code' })
-    if (by === 'client' && !reply) {
+    if (by === 'client' && !reply && !card) {
       const p = typedProof(repo, session, it.open, decision, raiseUsd)
       if ('missing' in p) {
         if (p.raiseTyped !== undefined) throw refuse({ error: `the client typed raise ${p.raiseTyped} for ${id}: pass --raise-usd ${p.raiseTyped}, a resolve without it cannot stand for a typed raise` })
         const line = `${decision} ${id} <code>${raiseUsd === undefined ? '' : ` raise ${raiseUsd}`}`
         const cfg = process.env.CLAUDE_CONFIG_DIR // read for this message only, never as a root
         const why = p.missing !== '' && cfg && flat(path.join(cfg, 'projects')) !== proofTranscriptRoot() ? `; CLAUDE_CONFIG_DIR is set to ${flat(cfg)} but the proof reads transcripts only under ${proofTranscriptRoot()}` : ''
-        throw refuse({ error: `no prompt typed by the client resolves ${id}: the client types this as a plain prompt in this session: ${line}${why}` })
+        throw refuse({ error: `no prompt typed by the client resolves ${id}: the client types this as a plain prompt in this session: ${line}${why}; or ask with a question card that names ${id} and resolve it with --card` })
       }
       // a note the agent passes is the client's typed words after the code, or empty when none were typed
       if (noteGiven !== undefined && norm(note) !== p.rest.slice(0, 4000)) throw refuse({ error: `--note differs from what the client typed after the code (${p.rest === '' ? 'nothing' : JSON.stringify(p.rest.slice(0, 200))}): pass that text as the note, or none` })
@@ -905,6 +1080,10 @@ function resolveItem(f: Flags): Obj {
     const op: Obj = { v: 1, op: 'resolve', id, ts: new Date().toISOString(), session, decision, by, note, quote }
     if (raiseUsd !== undefined) op.raiseUsd = raiseUsd
     if (reply) op.proof = 'reply'
+    if (card) {
+      op.proof = 'card'
+      op.card = cardId
+    }
     appendFileSync(file, JSON.stringify(op) + '\n')
     // the resolving session may differ from the one that raised the item: its sidecar is under the open row's session
     const raised = String(it.open.session)
@@ -918,7 +1097,7 @@ function resolveItem(f: Flags): Obj {
   })
   event(dir, { event: 'resolve', crew: firstCrew, id, decision, by })
   const out: Obj = { id, state: 'resolved', decision, quote }
-  if (reply && raiseUsd !== undefined) out.raiseUsd = raiseUsd // the amount the reply approved, read from the message that showed it
+  if ((reply || card) && raiseUsd !== undefined) out.raiseUsd = raiseUsd // the amount the reply or card approved, read from what showed it
   if (corrects !== null) out.corrects = corrects // the decision this reply replaced
   // the client's typed approve of this dir's plan-approval item approves the plan itself, outside the inbox lock. A refusal
   // (open long-term cost, already approved) leaves the resolve standing and rides in the output.
@@ -978,6 +1157,7 @@ function listItems(f: Flags): Obj {
       row.note = it.resolve.note
       row.quote = maskCode(it.resolve.quote ?? null, id, it.open.codeHash)
       if (it.resolve.raiseUsd !== undefined) row.raiseUsd = it.resolve.raiseUsd
+      if (it.resolve.proof === 'card') row.proof = 'card' // its quote is the card's question and answer, not a typed prompt
       if (it.noteUnbound === true) row.noteUnbound = true
     } else if (it.reopened !== undefined) row.reopened = it.reopened
     row.applied = applied

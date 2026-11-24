@@ -2,7 +2,7 @@
 // From 1024 px it is a 232 px column; below that it is a disclosure at the top of the page that opens in the flow.
 import { useState } from 'react'
 import { ChevronDown, Plus } from 'lucide-react'
-import type { WorkspaceItem } from '../../store/types.ts'
+import type { ResumeResult, WorkspaceItem } from '../../store/types.ts'
 import { Button } from '../../components/ui/button.tsx'
 import { Notice } from '../../components/ui/notice.tsx'
 import { Skeleton } from '../../components/ui/skeleton.tsx'
@@ -31,6 +31,7 @@ export interface WorkspaceRailProps {
   onSelect: (id: string) => void
   onOpen: () => void
   onStop: (id: string) => void
+  onResume?: (id: string, sessionId: string, force: boolean) => Promise<ResumeResult>
   onRetry: () => void
 }
 
@@ -128,6 +129,7 @@ export function WorkspaceRail(p: WorkspaceRailProps) {
                 stop={p.stops[w.id]}
                 onSelect={pick}
                 onStop={p.onStop}
+                onResume={p.onResume}
               />
             ))}
           </ul>

@@ -1,12 +1,12 @@
 ---
 name: inbox
-description: Lists the open ankur inbox items, or resolves one as the client with /ankur:inbox <approve|reject|answer|done|dismiss> <item> <code> [raise <usd>] [note]. Only the human can start it; resolve --by client accepts only a decision the human typed in this session.
+description: Lists the open ankur inbox items, or resolves one as the client with /ankur:inbox <approve|reject|answer|done|dismiss> <item> <code> [raise <usd>] [note]. Only the human can start it; resolve --by client accepts only a decision the human typed or picked on a question card in this session.
 disable-model-invocation: true
 ---
 
 # ankur inbox
 
-The human typed this command, so you act for the client here, and only for the decision they typed. Never pick a decision, an id or a code yourself, and never resolve an item their typed words don't answer: the command line, or a plain reply to a list you showed.
+The human typed this command, so you act for the client here, and only for the decision they gave. Never pick a decision, an id or a code yourself, and never resolve an item their own answer doesn't give: an option they picked on a question card, the command line, or a plain reply to a list you showed.
 
 Arguments: `$ARGUMENTS`
 
@@ -26,7 +26,7 @@ An item's `id` is its name, a few hyphenated words from its title (`several-sess
 
 The list carries no codes: the inbox stores only a hash of each one. Tell the human that an item's code is in the escalation message, the program manager's message or the notify row, and that they use the code of the item's first escalation: a deduped escalation prints `code: null` and makes no new code. They resolve an item by typing `/ankur:inbox <approve|reject|answer|done|dismiss> <item> <code> [raise <usd>] [note]`. Don't run a command to find a code, with one exception: when the client asks about an item whose code was lost (the escalation died before its code reached anyone), run `node <plugin>/bin/factory.ts inbox --recover-codes --repo <repo>`. It prints `{codes: [{id, code, session}]}` for open items only. Give the client the code of the item they asked about, and no other. Never resolve an item with a recovered code the client has not typed themselves.
 
-The human can also answer in plain words, with no code. When you list the items, show each one in plain words with its name (the `id`, exactly as printed): what it asks, and what happens on yes and on no. Then say they can reply in their own words, one reply for several items. See "Resolve from a plain reply" below.
+When you list the items, show each one in plain words with its name (the `id`, exactly as printed): what it asks, and what happens on yes and on no. Then ask about the items the client resolves (not those only the pm may resolve) with a question card; see "Resolve by a card" below. In a terminal the human can also answer in plain words, with no code; see "Resolve from a plain reply" below.
 
 An item the list shows with `reopened` was resolved once, but the typed line that backed that resolve can no longer be found (its transcript is gone, or the row never had one). Tell the human the `reopened.reason`, and who, when and what the old row said (`by`, `ts`, `decision`): the item blocks again until they type the decision. A resolved item's `note` is the text the human typed after the code, read from their typed line, never the note stored in the row. `noteUnbound` marks an item whose stored note differed from that typed text: tell the human the stored note was not theirs and was not used. For `blocked` and `stall-unrecovered` (anyone may resolve them) a `by: client` row with no typed line to back it still counts, but a stored note on it is flagged `noteUnbound`: it is not the human's words. A `by: pm` note there stays the pm's.
 
@@ -45,8 +45,24 @@ With arguments, read them as `<decision> <item> <code> [raise <usd>] [note…]`.
 3. Read the one JSON line it prints.
    - Exit 0 prints `{id, state: "resolved", decision, quote}`. Tell the human the item is resolved, with the decision and the quote it stored.
    - Approving a plan's approval item (a `client-trigger` item with ref `run`, opened for this ankur dir) also approves the plan. The output then carries `approved: {approvedAt}`: tell the human the plan is approved. When it carries `approveRefused` instead (an open long-term cost, or a plan already approved), the resolve stands but the plan is not approved: show its `error` as it is. Never run `approve --by client` yourself.
-   - Exit 1 whose `error` says no prompt typed by the client was found means the check found no line the human typed that holds the id, the decision word and the code. Ask the human to type the line again as a plain prompt, not a slash command: `<decision> <item> <code> [raise <usd>] [note]`. When they have, run the same command once more.
+   - Exit 1 whose `error` says no prompt typed by the client was found means the check found no line the human typed that holds the id, the decision word and the code. In the ankur UI that is expected: a line sent from the page is not the human's typing. Ask with a question card for that item instead, as in "Resolve by a card" below. In a terminal you may instead ask the human to type the line again as a plain prompt, not a slash command: `<decision> <item> <code> [raise <usd>] [note]`, and then run the same command once more.
    - Any other refusal (a wrong code, an item already resolved): show its `error` to the human as it is, and stop. Don't retry with other values.
+
+## Resolve by a card
+
+Call `AskUserQuestion` with one question per item (at most four per call; send another call for more). Each question names the item by its `id`, exactly as printed, and says in plain words what the human approves: `Approve the export page? (item several-sessions-per-ui)`. Offer `Approve` and `Reject`; for a push-pr or prod-deploy item offer `Done` and `Dismiss`; for a client question offer its answers as the options. For a budget item, put the amount you propose in the question (`Raise the run budget by $20? (item <id>)`).
+
+For each item the human answered, run:
+
+```
+node <plugin>/bin/factory.ts resolve <item> --card --decision <decision> --by client --repo <repo> --dir <ankur dir>
+```
+
+The decision is the option they picked (`approve` for `Approve`); for a client question it is `answer`. Put the item before `--card`.
+
+- The factory checks this session's transcript for the human's answer to a card on the main thread, newer than the item, whose question names the item, and stores the question and answer as the quote. A card answered by a subagent, a declined card, or a card about another item is refused.
+- When the human writes their own text into the card instead of picking an option, that is a reply, not an approval: the factory refuses it for approve, reject, done and dismiss. Read it, act on it, and ask again. For a client question their own text is the answer.
+- The output and the refusals read as in step 3 above.
 
 ## Resolve from a plain reply
 
@@ -68,4 +84,4 @@ Put the item before `--reply`. Add `--note-file <ankur dir>/inbox-note-<item>.tx
 
 ## How the check works
 
-`resolve --by client` reads this session's transcript for the human's own line, newer than the item, holding the id, the decision word and the code, and stores that line as the quote. With `--reply` it reads the human's newest typed message instead, as above. There is no flag that sets the quote, so only the human's typing can approve. A line the human typed while the agent was busy (recorded as queued) counts when the row's origin is human; a line the human typed into an Agent SDK host such as the ankur UI counts. A queued row with no human origin doesn't count. While a client item is open, the hook refuses an agent that starts a claude session or an Agent SDK script, so the agent can't send one in the human's name. If the check refuses, ask the human to type it again once the agent is idle.
+`resolve --by client` reads this session's transcript for the human's own line, newer than the item, holding the id, the decision word and the code, and stores that line as the quote. With `--reply` it reads the human's newest typed message instead, and with `--card` the human's answer to a question card that names the item, as above. There is no flag that sets the quote, so only the human's typing or clicking can approve. A line the human typed while the agent was busy (recorded as queued) counts when the row's origin is human. A line sent from an Agent SDK host such as the ankur UI doesn't count as typed: there the human approves by the card. The check keeps an agent from approving its own work by a shortcut; it is not a lock against someone who controls the human's account. While a client item is open, the hook refuses an agent that starts a claude session, so the agent can't answer a card or send a line in the human's name. If the check refuses, ask again once the agent is idle.
