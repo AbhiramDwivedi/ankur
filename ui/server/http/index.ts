@@ -27,6 +27,8 @@ export interface SessionControl {
 export interface WorkspaceHandle {
   state: StateSource;
   control: SessionControl;
+  sessions?(): Promise<unknown[]>;
+  resume?(id: unknown, opts?: { force?: boolean }): Promise<{ ok: true; workspace: unknown } | { ok: false; error: string }>;
 }
 export interface WorkspaceSource {
   list(): unknown[];

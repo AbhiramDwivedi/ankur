@@ -2,6 +2,28 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.43.0 (2026-11-23)
+
+An "ok" typed in the UI approves again, a crew follows your repository's own rules over ankur's brief, and the UI can resume an earlier Claude Code session or give you the command to resume it in a terminal.
+
+To update an existing install, run `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code. To update the UI, stop it, run `git pull` in your clone of the ankur repo, then `npm --prefix ui ci` and `npm --prefix ui run build`, and start it again with `npm --prefix ui start`.
+
+### Replies typed in the web UI now count
+
+- **Your "ok" in the local web UI approves again.** The UI sends your messages through the Agent SDK, which records them with `turnOrigin` `sdk` and `promptSource` `sdk` and no `origin`, and the approval proof refused every one, so a plan approval ("ok") or `/ankur:inbox approve <id> <code>` typed in the UI never registered. A user line from an SDK host (`entrypoint` starting `sdk-`) now counts as typed. Agent returns, tool results, meta lines and sidechain lines stay refused.
+- **Agents can't type for you.** Because a `claude -p --resume` run writes the same line, the Bash guard now refuses, while a request waits for your answer, an agent command that starts one, or that runs a script using the Agent SDK. An agent can no longer write a Claude Code transcript under `.claude/projects` or the shared inbox by hand. The guard is lexical, defense in depth rather than a proof.
+
+### A crew follows the target repository's own rules
+
+- **Your repository's setup wins over ankur's brief.** Every member brief now says the repository's CLAUDE.md, `.claude/rules` and documented conventions win over ankur's brief, which overrides them only for the Ankur-Crew and Ankur-Role trailers and the files a member owns.
+- **No attribution lines your rules forbid.** The commit-trailer guidance no longer tells agents to add `Co-Authored-By` or `Claude-Session` lines: ankur requires only its own two trailers, and any attribution line is added only when the harness asks for it and the repository's rules don't forbid it.
+
+### Resume an earlier session in the UI
+
+- **Pick up where you left off.** A workspace with no session going shows "Resume an earlier session" at the top of the Conversation tab. It lists the repository's earlier Claude Code sessions, newest first, with the first prompt line (or the run's goal), the last activity and a short id. "Resume" continues that session in the UI with the same id, so its transcript and run folder stay the same, and the tab shows the earlier conversation until you send a message. A restarted UI reconnects to its earlier session this way.
+- **A session open elsewhere asks first.** When another Claude Code process holds the session, such as a terminal `claude --resume` or another UI, the row says so and its button reads "Resume anyway". Close the other copy first: two live copies of one session do not see each other's messages.
+- **Copy resume command.** The header and each row of the list have a "Copy resume command" button. It copies the terminal command that resumes the session in its repository, for a macOS or Linux shell, or for PowerShell on Windows. When the browser has no clipboard, the command is shown selected in a field you can copy by keyboard.
+
 ## 0.42.0 (2026-11-23)
 
 The UI's Open screen can now browse your folders and clone a repository, and a new workspace no longer claims everything is answered before any work has started. The plugin itself is unchanged.

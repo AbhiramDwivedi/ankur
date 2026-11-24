@@ -53,8 +53,16 @@ export function createSession(opts: {
   claudeDir?: string // where installed_plugins.json lives; defaults to CLAUDE_CONFIG_DIR or ~/.claude
   hasPlan?: () => boolean // read when each message is sent
   crewSlugs?: () => string[] // the crew slugs a flow entry's `to` is matched against
+  // Continue this earlier Claude Code session: the SDK's `resume`. The session keeps its id, so its transcript and
+  // ankur dir stay the same. `history` is the earlier conversation, shown until the session says more.
+  resume?: string
+  history?: { role: 'user' | 'assistant'; text: string; ts: string }[]
 }): Session {
   let base: SessionView = initialView()
+  if (opts.resume !== undefined) {
+    const entries = (opts.history ?? []).map((h, i) => ({ n: i + 1, role: h.role, text: h.text, ts: h.ts, id: null, intent: null }))
+    base = { ...base, session: { ...base.session, sessionId: opts.resume }, transcript: entries }
+  }
   const subs = new Set<(v: SessionView) => void>()
   const registry: Registry = createRegistry(() => notify())
 
@@ -197,6 +205,7 @@ export function createSession(opts: {
         prompt: input(),
         options: {
           cwd: opts.repo,
+          ...(opts.resume === undefined ? {} : { resume: opts.resume }),
           plugins: resolvePlugins(opts.pluginPath, opts.claudeDir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')).plugins,
           canUseTool: (toolName: string, toolInput: Record<string, unknown>, o: unknown) =>
             canUseTool(toolName, toolInput, o),

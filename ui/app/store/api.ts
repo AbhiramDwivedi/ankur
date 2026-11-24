@@ -1,6 +1,6 @@
 // POSTs to the server. Neither function rejects, neither touches the
 // store, and the caller's text goes out exactly as given.
-import type { DirListing, DirsResult, Intent, ListResult, OpenResult, PostResult, StopResult, WorkspaceItem } from './types.ts'
+import type { DirListing, DirsResult, Intent, ListResult, OpenResult, PostResult, PriorSession, ResumeResult, SessionsResult, StopResult, WorkspaceItem } from './types.ts'
 
 /** A POST that has not answered in this long resolves {status: 0, error: 'timeout'}. */
 export const POST_TIMEOUT_MS = 15_000
@@ -114,6 +114,26 @@ export async function stopWorkspace(id: string): Promise<StopResult> {
   const r = await request(`/api/workspaces/${encodeURIComponent(id)}/stop`, { method: "POST" })
   const w = r.data?.workspace
   if (r.status === 200 && r.data?.ok === true && w !== null && typeof w === "object") return { ok: true, workspace: w as WorkspaceItem }
+  return { ok: false, status: r.status, error: r.failed ?? (typeof r.data?.error === 'string' ? r.data.error : 'http') }
+}
+
+/** GET /api/workspaces/<id>/sessions: the repository's earlier sessions, newest first. Never rejects. */
+export async function getSessions(id: string): Promise<SessionsResult> {
+  const r = await request(`/api/workspaces/${encodeURIComponent(id)}/sessions`, { method: 'GET' })
+  const list = r.data?.sessions
+  if (r.status === 200 && Array.isArray(list)) return { ok: true, sessions: list as PriorSession[] }
+  return { ok: false, status: r.status, error: r.failed ?? (typeof r.data?.error === 'string' ? r.data.error : 'http') }
+}
+
+/** POST /api/workspaces/<id>/resume {sessionId, force?}: the workspace's next session continues that one. Never rejects. */
+export async function resumeWorkspace(id: string, sessionId: string, force = false): Promise<ResumeResult> {
+  const r = await request(`/api/workspaces/${encodeURIComponent(id)}/resume`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(force ? { sessionId, force } : { sessionId }),
+  })
+  const w = r.data?.workspace
+  if (r.status === 200 && r.data?.ok === true && w !== null && typeof w === 'object') return { ok: true, workspace: w as WorkspaceItem }
   return { ok: false, status: r.status, error: r.failed ?? (typeof r.data?.error === 'string' ? r.data.error : 'http') }
 }
 

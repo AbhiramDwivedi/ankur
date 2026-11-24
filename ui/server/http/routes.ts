@@ -1,6 +1,6 @@
 // Routing and POST bodies.
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { SessionControl, StateSource, WorkspaceSource } from './index.ts';
+import type { SessionControl, StateSource, WorkspaceHandle, WorkspaceSource } from './index.ts';
 import type { SseHub } from './sse.ts';
 import { serveImage, serveMarked, serveStatic } from './static.ts';
 import { listDirs } from '../workspaces/browse.ts';
@@ -101,6 +101,19 @@ async function openWorkspace(ws: WorkspaceSource, req: IncomingMessage, res: Ser
   return sendJson(res, r.error === 'timeout' ? 504 : 400, { error: r.error });
 }
 
+// POST /api/workspaces/<id>/resume {sessionId, force?}: the workspace's next session continues that earlier one.
+// 400 `session` (not one of this repository's sessions), 409 `busy` (this workspace has a session going), 409 `live`
+// (another process holds the session; resend with force to go ahead), 409 `transcript` (nothing to resume from).
+const RESUME_STATUS: Record<string, number> = { session: 400, transcript: 409, busy: 409, live: 409 };
+async function postResume(w: { resume?: WorkspaceHandle['resume'] }, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const body = await readJson(req, res);
+  if (!body) return;
+  if (!w.resume) return sendJson(res, 404, { error: 'notfound' });
+  const r = await w.resume(body.value?.sessionId, { force: body.value?.force === true });
+  if (r.ok) return sendJson(res, 200, { ok: true, workspace: r.workspace });
+  return sendJson(res, RESUME_STATUS[r.error] ?? 400, { error: r.error });
+}
+
 // A clone refusal's status. Never 401 or 403: the page reads those as an expired link.
 const CLONE_STATUS: Record<string, number> = { url: 400, relative: 400, parent: 400, exists: 409, timeout: 504, auth: 502, notfound: 502, network: 502, nogit: 500, git: 502 };
 
@@ -142,10 +155,10 @@ async function workspaceRoute(
     if (method !== 'POST') return sendJson(res, 405, { error: 'method' });
     return cloneWorkspace(ws, opts.disk ?? DISK, req, res);
   }
-  const m = /^\/api\/workspaces\/([^/]+)\/(stop|events|message|image|requests\/([^/]+)\/answer)$/.exec(path);
+  const m = /^\/api\/workspaces\/([^/]+)\/(stop|events|message|image|sessions|resume|requests\/([^/]+)\/answer)$/.exec(path);
   if (!m) return sendJson(res, 404, { error: 'notfound' });
   const sub = m[2]!;
-  const wanted = sub === 'events' || sub === 'image' ? 'GET' : 'POST';
+  const wanted = sub === 'events' || sub === 'image' || sub === 'sessions' ? 'GET' : 'POST';
   if (method !== wanted) return sendJson(res, 405, { error: 'method' });
   let id = '';
   try { id = decodeURIComponent(m[1]!); } catch { /* no such workspace */ }
@@ -158,6 +171,11 @@ async function workspaceRoute(
   const w = ws.get(id);
   if (!w) return sendJson(res, 404, { error: 'workspace' });
   const t: Target = { state: w.state, session: w.control, sse: opts.hubFor(w.state) };
+  if (sub === 'sessions') {
+    if (!w.sessions) return sendJson(res, 404, { error: 'notfound' });
+    return sendJson(res, 200, { sessions: await w.sessions() });
+  }
+  if (sub === 'resume') return postResume(w, req, res);
   if (sub === 'events') return t.sse.handle(req, res);
   if (sub === 'message') return postMessage(t, req, res);
   if (sub === 'image') return serveImage(t.state, params, res);

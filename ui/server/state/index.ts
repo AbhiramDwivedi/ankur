@@ -50,7 +50,9 @@ export interface Store extends StateSource {
   close(): void
 }
 
-export { ankurDirFor }
+export { ankurDirFor, runRootFor }
+export { listPriorSessions, readConversation, transcriptFile, isSessionId, liveSessionIds } from './prior-sessions.ts'
+export type { PriorSession, ConversationEntry } from './prior-sessions.ts'
 
 const RING = 1024
 const TRANSCRIPT_MAX = 500

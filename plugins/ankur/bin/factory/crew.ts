@@ -48,7 +48,7 @@ export function cmdSync(f: Flags): Obj {
   return mergeIn(c.wt, [c.target])
 }
 // Commits in HEAD..branch whose message has a `Ankur-Crew:` or `Ankur-Role:` line that git's trailer parser doesn't see:
-// a blank line inside the trailer block, or between it and a later one such as Co-Authored-By. QC reads the role with
+// a blank line inside the trailer block, or between it and a later trailer. QC reads the role with
 // %(trailers:key=Ankur-Role), so such a commit would fail as a role violation. `<sha> <subject>` each; a commit the target already
 // holds (another crew's landed work) never counts. [] when the range can't be read.
 export function unparsedTrailers(wt: string, target: string, branch: string): string[] {

@@ -19,6 +19,7 @@ import { runStatusOf } from './runStatus.ts'
 import { RunStatus as RunNotices } from './RunStatus.tsx'
 import { useLinkTimers } from './useLinkTimers.ts'
 import { UnreachableNotice } from './UnreachableNotice.tsx'
+import { CopyResume } from '../resume/CopyResume.tsx'
 
 export interface BannerProps {
   state: RunState | null
@@ -160,6 +161,7 @@ export function Banner({ state, now, connection, workspace, lifecycle, loading =
               </>
             )}
           </p>{' '}
+          {state?.repo && session?.sessionId ? <CopyResume compact repo={state.repo} sessionId={session.sessionId} /> : null}
           <Button
             size="sm"
             variant="ghost"

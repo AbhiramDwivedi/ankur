@@ -410,7 +410,23 @@ export interface WorkspaceItem {
   session?: boolean // absent in the open answer when no session process exists
 }
 
-export type OpenError = 'path' | 'relative' | 'missing' | 'notgit' | 'timeout' | 'network'
+/** One row of GET /api/workspaces/<id>/sessions: an earlier Claude Code session of the repository. */
+export interface PriorSession {
+  id: string
+  lastActive: string
+  title: string | null
+  transcript: boolean
+  ankurDir: boolean
+  /** Another live process holds it. */
+  live: boolean
+}
+
+export type SessionsResult = { ok: true; sessions: PriorSession[] } | { ok: false; status: number; error: string }
+
+/** The answer to POST /api/workspaces/<id>/resume. */
+export type ResumeResult = { ok: true; workspace: WorkspaceItem } | { ok: false; status: number; error: string }
+
+export type OpenError ='path' | 'relative' | 'missing' | 'notgit' | 'timeout' | 'network'
 
 /** The answer to opening a directory: the workspace, and whether it was already open; or the refusal. */
 export type OpenResult =

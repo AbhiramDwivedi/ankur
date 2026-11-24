@@ -642,9 +642,12 @@ function typedText(row: Obj): string | null {
   if (row.origin !== undefined && row.origin?.kind !== 'human') return null
   // A /loop wakeup line has no origin and no isMeta but its text is what the agent passed to ScheduleWakeup.
   if (row.wakeupSource !== undefined || row.scheduledTaskId !== undefined || row.scheduledFireId !== undefined) return null
-  if (row.turnOrigin !== undefined && row.turnOrigin !== 'human') return null
+  // A prompt the SDK host sent (the ankur UI) is recorded with turnOrigin sdk, entrypoint sdk-*, and for a plain prompt promptSource sdk, no origin.
+  // It is the client's input through their own front end, so it counts as typed. An agent return in an SDK session keeps origin task-notification.
+  const sdkHost = row.turnOrigin === 'sdk' && typeof row.entrypoint === 'string' && row.entrypoint.startsWith('sdk-')
+  if (row.turnOrigin !== undefined && row.turnOrigin !== 'human' && !sdkHost) return null
   // A plain prompt typed while the agent was busy is recorded as promptSource queued, with origin human: it counts like a typed one.
-  const source = row.promptSource === 'queued' && row.origin?.kind === 'human' ? 'typed' : row.promptSource
+  const source = row.promptSource === 'queued' && row.origin?.kind === 'human' ? 'typed' : sdkHost && row.promptSource === 'sdk' ? 'typed' : row.promptSource
   if (source !== undefined && source !== 'typed') return null
   const c = row.message?.content
   let text: string
@@ -656,7 +659,7 @@ function typedText(row: Obj): string | null {
   if (OUTPUT_TAG.test(text)) return null
   // A plain typed prompt carries origin human and promptSource typed. Without that, only the slash-command shape counts: the /ankur:inbox
   // rows on this machine's real transcripts have origin human and no promptSource, or no origin at all, and promptId is not always there.
-  if (row.origin !== undefined && source === 'typed') return text
+  if ((row.origin !== undefined || sdkHost) && source === 'typed') return text
   return source === undefined || source === 'typed' ? (SLASH_SHAPE.test(text) ? text : null) : null
 }
 

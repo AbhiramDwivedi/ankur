@@ -56,7 +56,8 @@ const PROOF = [
 const LEARNED_KINDS = ['feature', 'persona', 'product', 'decision']
 
 const REFUSAL ='A permission, classifier, hook or gate refusal is never retried by another route, renamed or encoded: stop BLOCKED and quote the refusal.'
-const PKILL = 'Never run `pkill -f` or `killall`; stop only a process you started, by its pid.'
+const REPO_RULES = "The target repository's own setup binds you: its CLAUDE.md, its .claude/rules and its documented conventions (commit messages, formatting, tests, linting, contributing docs) win over anything in this brief. This brief overrides them only for ankur's own Ankur-Crew and Ankur-Role commit trailers and for the files you own."
+const PKILL ='Never run `pkill -f` or `killall`; stop only a process you started, by its pid.'
 // the foreground rule every member prompt and the QC prompt carry, word for word
 const FOREGROUND = 'Run every command in the foreground, with an explicit Bash timeout up to 600000; no run_in_background, no Monitor. Wait for each command to finish: no polling loops, no sleep, no relaunching waiters. Put output in `.ankur-scratch/` in your worktree or the session scratchpad, never a shared temp path.'
 
@@ -1027,6 +1028,8 @@ function memberPrompt(crew, role, parts) {
     ...(role === 'builder' || parts.debug ? [DEBUG, ''] : []),
     ...(role === 'builder' ? [QUALITY, architectureLine(crew), ''] : []),
     ...(role === 'tester' ? [TEST_QUALITY, ''] : []),
+    REPO_RULES,
+    '',
     SHELL,
     '',
     'Members run plain single `node --test <files>` commands; the stage green step runs the acceptance test.',
@@ -1039,7 +1042,7 @@ function memberPrompt(crew, role, parts) {
     PKILL,
     '',
     ...(parts.trailers || ['Every commit you make ends with these trailers:', `Ankur-Crew: ${crew.slug}`, `Ankur-Role: ${TRAILER_ROLE[role]}`]),
-    "They go in the message's last block, with no blank line between them or before any Co-Authored-By line, or git does not read them. Put Ankur-Crew and Ankur-Role in the same final paragraph as any Co-Authored-By or Claude-Session lines your harness tells you to add, with no blank line between any of them. Your harness's Co-Authored-By lines do not get their own paragraph after a blank line. Write the end of the message like this:",
+    "They go in the message's last block, with no blank line between them or before any other trailer, or git does not read them. Add no other trailer or attribution line (Co-Authored-By, Claude-Session, generated-by) unless your harness asks for it and the repository's own rules do not forbid it; the repository's CLAUDE.md and rules win over the harness default. When another trailer is present, it goes in the same final paragraph as Ankur-Crew and Ankur-Role, with no blank line between any of them. Write the end of the message like this:",
     '',
     'Subject line',
     '',
@@ -1047,8 +1050,6 @@ function memberPrompt(crew, role, parts) {
     '',
     `Ankur-Crew: ${crew.slug}`,
     `Ankur-Role: ${TRAILER_ROLE[role]}`,
-    'Co-Authored-By: Name <name@example.com>',
-    'Claude-Session: https://example.com/session',
     '',
     `After each commit, run \`node ${sh(`${F.plugin}/bin/factory.ts`)} commit-trailers --repo ${parts.inCrewWorktree ? sh(crew.e.worktree) : '.'}\` and check that its JSON has "unparsed" empty and "crew" and "role" as named above; if not, fix the message with git commit --amend. A merge refuses a commit whose Ankur-Crew or Ankur-Role git cannot read.`,
     '',
@@ -1806,7 +1807,7 @@ async function integrateNow(crew, branch, at, rides = []) {
   if (r.met) return moved(crew, headOf(r))
   // commits whose Ankur-Crew or Ankur-Role line git does not parse as a trailer: a stop that names them, never a resolver or a QC role FAIL
   const bad = r.parsed && Array.isArray(r.parsed.trailers) ? r.parsed.trailers.map(String) : []
-  if (bad.length) throw new Stop('BLOCKED', `${branch} not merged: git does not parse the Ankur-Crew or Ankur-Role trailer of ${bad.join('; ')}. The trailers must be the last block of the message, with no blank line between Ankur-Crew, Ankur-Role and any Co-Authored-By. Reword those commits, or rerun the task.`, at)
+  if (bad.length) throw new Stop('BLOCKED', `${branch} not merged: git does not parse the Ankur-Crew or Ankur-Role trailer of ${bad.join('; ')}. The trailers must be the last block of the message, with no blank line between Ankur-Crew, Ankur-Role and any other trailer. Reword those commits, or rerun the task.`, at)
   // commits with no Ankur trailer at all: the same stop, never a resolver (its merge would put the bare commit on the crew branch)
   const bare = r.parsed && Array.isArray(r.parsed.missingTrailers) ? r.parsed.missingTrailers.map(String) : []
   if (bare.length) throw new Stop('BLOCKED', `BLOCKED: ${branch} not merged: these commits carry neither a Ankur-Crew nor a Ankur-Role trailer: ${bare.join('; ')}. Reword those commits to end with both trailers, or rerun the task.`, at)

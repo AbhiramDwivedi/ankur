@@ -3,8 +3,8 @@
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
-import { ankurDirFor } from '../state/index.ts'
-import type { Store, createStore as CreateStore } from '../state/index.ts'
+import { ankurDirFor, isSessionId, listPriorSessions, readConversation, runRootFor, transcriptFile } from '../state/index.ts'
+import type { PriorSession, Store, createStore as CreateStore } from '../state/index.ts'
 import { endTree } from '../session/index.ts'
 import type { Session, SessionControl, createSession as CreateSession } from '../session/index.ts'
 import { checkRepoPath } from './open.ts'
@@ -26,7 +26,12 @@ export interface Workspace {
   item(): WorkspaceItem
   state: Store // this workspace's store
   control: SessionControl // sends to the current session, starting a new one when needed
+  sessions(): Promise<PriorSession[]> // the repository's earlier sessions, newest first, without this workspace's live one
+  resume(id: unknown, opts?: { force?: boolean }): Promise<ResumeResult> // the next session continues the earlier one
 }
+
+export type ResumeError = 'session' | 'transcript' | 'busy' | 'live'
+export type ResumeResult = { ok: true; workspace: WorkspaceItem } | { ok: false; error: ResumeError }
 
 export interface Workspaces {
   list(): WorkspaceItem[] // in open order
@@ -47,6 +52,9 @@ export interface WorkspaceDeps {
   platform?: NodeJS.Platform
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void
   treeKill?: (pid: number) => void
+  // The earlier sessions of a repository (tests inject fixtures); defaults to the transcripts and run dirs on disk.
+  priorSessions?: (repo: string, exclude: string | null) => Promise<PriorSession[]>
+  readHistory?: (repo: string, id: string) => ReturnType<typeof readConversation>
 }
 
 const CLOSE_MS = 5000 // how long stop waits for session.close()
@@ -65,6 +73,7 @@ interface Entry {
   stopped: boolean // stop() finished and no message has started a new session since
   stopping: Promise<void> | null
   lastSessionId: string | null
+  resumed: boolean // the session was made to continue an earlier one (until it starts, its history is not a live conversation)
 }
 
 const oneLine = (e: unknown): string => String((e as Error)?.message ?? e).split('\n')[0]!
@@ -88,16 +97,19 @@ export function createWorkspaces(deps: WorkspaceDeps): Workspaces {
   const liveRun = (e: Entry) => (e.store.snapshot().state as { run?: { version: number | null; crews: { slug: string }[] } | null }).run ?? null
 
   // Starts a session for `e`, wired the way main.ts wired the single one: subscribe, setSession, ankurDirFor on each new id.
-  function attach(e: Entry): void {
+  function attach(e: Entry, resume?: string): void {
+    const history = resume === undefined ? undefined : (deps.readHistory ?? ((repo, id) => readConversation(transcriptFile(deps.claudeDir, repo, id))))(e.path, resume)
     const session = deps.createSession({
       repo: e.path,
       pluginPath: deps.pluginPath,
       claudeDir: deps.claudeDir,
+      ...(resume === undefined ? {} : { resume, history }),
       hasPlan: () => { const r = liveRun(e); return r !== null && r.version !== null },
       crewSlugs: () => liveRun(e)?.crews.map((c) => c.slug) ?? [],
     })
     e.session = session
     e.stopped = false
+    e.resumed = resume !== undefined
     e.lastSessionId = null
     session.subscribe((view) => {
       if (e.session !== session || storesClosed) return // a replaced session's late views are dropped
@@ -116,7 +128,7 @@ export function createWorkspaces(deps: WorkspaceDeps): Workspaces {
   function create(p: string, ankurDir: string | undefined): Entry {
     const id = workspaceId(p)
     const store = deps.createStore(ankurDir === undefined ? { repo: p, pluginPath: deps.pluginPath, claudeDir: deps.claudeDir } : { repo: p, pluginPath: deps.pluginPath, claudeDir: deps.claudeDir, ankurDir })
-    const e = { id, name: path.basename(p) || p, path: p, store, ankurDirFlag: ankurDir, stopped: false, stopping: null, lastSessionId: null } as unknown as Entry
+    const e = { id, name: path.basename(p) || p, path: p, store, ankurDirFlag: ankurDir, stopped: false, stopping: null, lastSessionId: null, resumed: false } as unknown as Entry
     attach(e)
     entries.set(id, e)
     return e
@@ -131,7 +143,9 @@ export function createWorkspaces(deps: WorkspaceDeps): Workspaces {
     const openRequests = cards + inbox
     const status = s.session?.status as string | undefined
     const transcript: unknown[] = Array.isArray(s.transcript) ? s.transcript : []
-    const live = transcript.length > 0 || (status !== undefined && status !== 'idle')
+    // A resumed session that has not started yet holds the earlier conversation, but no process: it is not live.
+    const waitingToResume = e.resumed && status === 'idle'
+    const live = !waitingToResume && (transcript.length > 0 || (status !== undefined && status !== 'idle'))
     const base = { id: e.id, name: e.name, path: e.path, openRequests, session: live && !e.stopped }
     if (e.stopping !== null) return { ...base, status: 'stopping', reason: null }
     if (!e.stopped && (status === 'error' || status === 'ended')) {
@@ -174,8 +188,50 @@ export function createWorkspaces(deps: WorkspaceDeps): Workspaces {
     answer: (id, body) => e.session.answer(id, body),
   })
 
+  // The workspace has no session process doing anything: a fresh one, a stopped one, or one that ended or failed.
+  function replaceable(e: Entry): boolean {
+    if (e.stopping !== null) return false
+    const status = (e.store.snapshot().state as any).session?.status
+    return e.stopped || status === 'error' || status === 'ended' || !item(e).session
+  }
+
+  const defaultPrior = async (repo: string, exclude: string | null): Promise<PriorSession[]> =>
+    listPriorSessions({ repo, claudeDir: deps.claudeDir, runRoot: await runRootFor(repo), exclude })
+
+  const currentId = (e: Entry): string | null => {
+    const id = (e.store.snapshot().state as any).session?.sessionId
+    return typeof id === 'string' ? id : null
+  }
+
+  async function sessions(e: Entry): Promise<PriorSession[]> {
+    // The workspace's own live session is not "prior"; a stopped, failed or never-started one is.
+    return (deps.priorSessions ?? defaultPrior)(e.path, replaceable(e) ? null : currentId(e))
+  }
+
+  async function resume(e: Entry, id: unknown, o: { force?: boolean }): Promise<ResumeResult> {
+    if (!isSessionId(id)) return { ok: false, error: 'session' }
+    if (!replaceable(e)) return { ok: false, error: 'busy' }
+    const found = (await sessions(e)).find((s) => s.id === id)
+    if (found === undefined) return { ok: false, error: 'session' }
+    if (!found.transcript) return { ok: false, error: 'transcript' } // Claude Code has nothing to resume from
+    if (found.live && o.force !== true) return { ok: false, error: 'live' }
+    if (!replaceable(e)) return { ok: false, error: 'busy' } // the listing awaited: a message may have started a session
+    const old = e.session
+    const pid = e.stopped ? null : old.pid()
+    attach(e, id)
+    void old.close().catch(() => {})
+    if (pid !== null) void endTree(pid, { platform: deps.platform, kill: deps.kill, treeKill: deps.treeKill }).catch(() => {})
+    return { ok: true, workspace: item(e) }
+  }
+
   function view(e: Entry): Workspace {
-    return { item: () => item(e), state: e.store, control: control(e) }
+    return {
+      item: () => item(e),
+      state: e.store,
+      control: control(e),
+      sessions: () => sessions(e),
+      resume: (id, o = {}) => resume(e, id, o),
+    }
   }
 
   function stopEntry(e: Entry, closeMs: number, graceMs?: number): Promise<void> {

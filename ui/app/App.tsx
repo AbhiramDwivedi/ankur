@@ -15,6 +15,7 @@ import { BuildNetwork } from './views/crews/BuildNetwork.tsx'
 import { GOAL_BOX_ID, reasonOf } from './views/move/format.ts'
 import { YourMove } from './views/move/YourMove.tsx'
 import { Banner } from './views/shell/Banner.tsx'
+import { ResumePanel } from './views/resume/ResumePanel.tsx'
 import { OverviewTabs } from './views/shell/OverviewTabs.tsx'
 import { SkipLink } from './views/shell/SkipLink.tsx'
 import { SummaryStrip } from './views/shell/SummaryStrip.tsx'
@@ -186,7 +187,10 @@ export default function App() {
   // A workspace chosen before its snapshot arrives: its rail row may say Working, so no guessed words or New goal mode.
   const loading = state === null && current !== null
 
-  const hasOpenRequest = state?.requests.some((r) => r.status === 'open') ?? false
+  // The earlier sessions are offered while the workspace has no session process and no conversation on screen.
+  const canResume = current !== null && !single && !loading && state !== null && !current.session && current.status !== 'stopping' && state.transcript.length === 0
+
+  const hasOpenRequest =state?.requests.some((r) => r.status === 'open') ?? false
   const skipTarget = showOpenPanel ? '#main' : hasOpenRequest ? '#your-move' : wide ? '#main' : '#conversation'
   const skipLabel = !showOpenPanel && hasOpenRequest ? 'Skip to Your move' : 'Skip to content'
 
@@ -222,6 +226,16 @@ export default function App() {
       {...props}
       conversation={
         <>
+          {canResume && current ? (
+            <ResumePanel
+              workspace={current}
+              resume={store.resumeSession}
+              onResumed={() => {
+                focusComposer.current = 'always'
+                setNote(null)
+              }}
+            />
+          ) : null}
           <Transcript {...props} lifecycle={lifecycle} />
           {loading ? (
             <Skeleton className="h-24 shrink-0 border border-border bg-surface" />

@@ -1315,6 +1315,160 @@ export function decisionLogBashVerdict(command: unknown): { deny: string } | und
   return writesDecisionLogByHand(command) ? { deny: DECISION_LOG_REFUSAL } : undefined
 }
 
+// The inbox proof counts a main-chain user row an SDK host sent as the client's reply. `claude -p --resume <id> "ok"` and a script calling
+// the Agent SDK's query() with resume write the same row, so an agent must never start either: it would approve its own request.
+export const SDK_REPLY_REFUSAL = `${MARK} Refused: do not start claude with -p, --print, --resume, --continue or --session-id, or run a script that uses @anthropic-ai/claude-agent-sdk. A session started that way writes a line the approval proof counts as the client's own reply. Ask the client to answer in the UI or the terminal.`
+const SDK_PACKAGE = /claude[-_]agent[-_]sdk/i // the npm package, with or without its scope, and the Python one
+const CLAUDE_SESSION_FLAG = /^(?:--print|--resume|--continue|--session-id|-[a-zA-Z]*[pcr][a-zA-Z]*)(?:=|$)/
+const SHELL_LIKE = new Set(['bash', 'sh', 'zsh', 'dash', 'eval', 'xargs', 'timeout', 'npx', 'pwsh', 'powershell', 'cmd', 'cmd.exe'])
+const SCRIPT_RUNNERS = new Set(['node', 'tsx', 'bun', 'deno', 'ts-node', 'python', 'python3', 'py'])
+const isRunner = (w: string): boolean => SCRIPT_RUNNERS.has(w) || /^python[\d.]+$/.test(w)
+
+export function startsClaudeSession(command: unknown, depth = 0): boolean {
+  if (typeof command !== 'string' || depth > 3) return false
+  if (SDK_PACKAGE.test(command)) return true
+  if (!/claude/i.test(command)) return false
+  // claude as a command word next to a way to build or pipe a command line the words below cannot follow. A path or a grep pattern holding the word passes.
+  if (/(?:^|[\s;&|(`"'=])claude(?:\.exe)?(?=[\s"'`)]|$)/.test(command) && /\beval\b|\$\(|`|\|\s*(?:ba|z|da)?sh\b|\bxargs\b|-exec(?:dir)?\b/.test(command)) return true
+  for (const words of shellWords(command)) {
+    let n = 0
+    while (n < words.length && (/^\w+=/.test(words[n]) || SKIPPED_PREFIX.has(words[n]))) n++
+    const cmd = (words[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
+    const args = words.slice(n + 1)
+    if (cmd === 'claude' && args.some((w) => CLAUDE_SESSION_FLAG.test(w))) return true
+    // `bash -c "claude -p ..."`, `env claude -p`, `xargs claude -p`: look inside the words the shell-like command runs
+    if (SHELL_LIKE.has(cmd)) {
+      const at = args.findIndex((w) => w.split(/[\\/]/).pop() === 'claude')
+      if (at >= 0 && startsClaudeSession(args.slice(at).join(' '), depth + 1)) return true
+      if (args.some((w) => /\s/.test(w) && startsClaudeSession(w, depth + 1))) return true
+    }
+  }
+  return false
+}
+
+// The kinds the client resolves (`by: 'client'` in the inbox module's `KINDS`; a test pins the two lists together).
+export const CLIENT_KINDS = new Set(['client-question', 'scope-change', 'client-trigger', 'long-term-cost', 'budget', 'doctor-bundle', 'push-pr', 'prod-deploy', 'intake-triage'])
+
+// The directories a command works in: the session cwd, and the target of every `cd` in it (each resolved against the one before).
+export function commandDirs(command: unknown, cwd: string): string[] {
+  const dirs = [cwd]
+  if (typeof command !== 'string') return dirs
+  let at = cwd
+  for (const words of shellWords(command)) {
+    let n = 0
+    while (n < words.length && (/^\w+=/.test(words[n]) || SKIPPED_PREFIX.has(words[n]))) n++
+    if ((words[n] === 'cd' || words[n] === 'pushd') && words[n + 1] !== undefined && !words[n + 1].startsWith('-')) {
+      at = absPath(at, words[n + 1])
+      dirs.push(at)
+    }
+  }
+  return dirs
+}
+
+// Does the shared inbox of any of `dirs` hold an open item of a kind the client resolves? No repo or no inbox file: false. Cheap step: an inbox
+// with no client-kind `open` row at all: false, with only the inbox read. Otherwise the answer is the verified fold the approval proof uses
+// (`verifiedItems` in the inbox module), so a forged resolve row in the inbox file cannot switch the guard off: an item is open there until a
+// resolve row passes its proof. An inbox that exists but cannot be read, or a fold that throws: true.
+export async function clientItemOpen($: $, dirs: string[]): Promise<boolean> {
+  for (const dir of dirs) {
+    const common = await gitCommonDir($, dir)
+    if (common === undefined) continue
+    const file = `${slashed(common)}/${await runDirIn((p) => $.fs.exists(p), common)}/shared/inbox.jsonl`
+    if (!(await $.fs.exists(file))) continue
+    let text: string
+    try {
+      text = String(await $.fs.read(file))
+    } catch {
+      return true
+    }
+    let anyClientOpen = false
+    for (const line of text.split('\n')) {
+      if (line.trim() === '') continue
+      try {
+        const row = JSON.parse(line)
+        if (isRecord(row) && row.op === 'open' && CLIENT_KINDS.has(String(row.kind))) anyClientOpen = true
+      } catch {
+        // an unparsable line is not an open row
+      }
+    }
+    if (!anyClientOpen) continue
+    // A hook reaches no node module, so the fold runs through the plugin's own CLI. No plugin root, a failed run or unreadable output: on.
+    try {
+      const root = await $.env.get('CLAUDE_PLUGIN_ROOT')
+      if (root === undefined || root === '') return true
+      const r = await $.process.run(['node', `${slashed(root)}/bin/${'factory'}.ts` /* the name in parts: a literal would link every test that loads this hook to the CLI (select-bar-033) */, 'inbox', '--repo', dir, '--open'], { cwd: dir, timeoutMs: 20_000 })
+      if (r.exitCode !== 0) return true
+      const items = JSON.parse(r.stdout.trim().split('\n').pop() ?? '').items
+      if (!Array.isArray(items)) return true
+      if (items.some((it: any) => isRecord(it) && it.state === 'open' && CLIENT_KINDS.has(String(it.kind)))) return true
+    } catch {
+      return true
+    }
+  }
+  return false
+}
+
+const absPath = (cwd: string, p: string): string => (/^(?:[\\/]|[A-Za-z]:[\\/])/.test(p) ? p : `${cwd.replace(/[\\/]+$/, '')}/${p.replace(/^\.[\\/]/, '')}`)
+const WRAPPERS = new Set(['npx', 'bunx', 'pnpm', 'npm', 'yarn']) // npx tsx f.ts, npm exec tsx f.ts, pnpm dlx tsx f.ts
+const PY_WRAPPERS = new Set(['uv', 'pipx', 'poetry'])
+const SHELL_RUNNERS = new Set(['bash', 'sh', 'zsh', 'dash'])
+
+// The script files a command runs, each resolved against `cwd` (a `cd <dir>` earlier in the command moves it): `scripts` are the files of
+// node, tsx, bun or deno (also behind npx, npm exec, pnpm dlx) whose text may use the Agent SDK, `shells` the files given to sh, bash or zsh
+// whose text may start a claude session.
+export function scriptOperands(command: unknown, cwd = '.'): { scripts: string[]; tests: string[]; shells: string[] } {
+  const out = { scripts: [] as string[], tests: [] as string[], shells: [] as string[] }
+  if (typeof command !== 'string') return out
+  for (const words of shellWords(command)) {
+    let n = 0
+    while (n < words.length && (/^\w+=/.test(words[n]) || SKIPPED_PREFIX.has(words[n]))) n++
+    let cmd = (words[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
+    let args = words.slice(n + 1)
+    if (cmd === 'cd' && args[0] !== undefined) cwd = absPath(cwd, args[0])
+    if (WRAPPERS.has(cmd)) {
+      const at = args.findIndex(isRunner)
+      if (at < 0) continue
+      cmd = args[at]
+      args = args.slice(at + 1)
+    } else if (PY_WRAPPERS.has(cmd) && args[0] === 'run') {
+      cmd = 'python' // uv run f.py, pipx run f.py, poetry run python f.py
+      args = args.slice(1)
+    }
+    // a file under `node --test` is a test the runner loads: it may name the SDK to stub it, so only an unreadable one is refused
+    const into = cmd === 'node' && args.some((w) => w === '--test' || w.startsWith('--test-')) ? out.tests : out.scripts
+    if (isRunner(cmd)) for (const w of args) if (/\.(?:[cm]?[jt]s|tsx?|py)$/.test(w) && !w.startsWith('-') && !/[*?[\]{}]/.test(w)) into.push(absPath(cwd, w))
+    if (SHELL_RUNNERS.has(cmd) && !args.includes('-c')) for (const w of args) if (!w.startsWith('-')) { out.shells.push(absPath(cwd, w)); break }
+  }
+  return out
+}
+
+// A Write or Edit of a Claude Code transcript, and a shell command that writes one: the inbox proof reads these files as what the client typed.
+const TRANSCRIPT_FILE = /(?:(?:^|[\\/])\.claude[\\/]|CLAUDE_CONFIG_DIR\}?[\\/])(?:[^\\/]*[\\/])*projects[\\/](?:[^\\/]*[\\/])*[^\\/]*\.jsonl$/i
+// The shared inbox is written only by the factory CLI (the inbox module appends through node); an agent's Write, Edit or shell redirection of it is a forgery.
+const INBOX_FILE = /(?:^|[\\/])(?:ankur|truss)[\\/]shared[\\/]inbox\.jsonl$/i
+export const TRANSCRIPT_WRITE_REFUSAL = `${MARK} Refused: a Claude Code transcript under .claude/projects and the shared inbox.jsonl are the record of what the client typed and answered; an agent never writes one by hand. Ask the client to reply in the UI or the terminal, and use the inbox command for the inbox.`
+export function isTranscriptFile(p: unknown): boolean {
+  return typeof p === 'string' && (TRANSCRIPT_FILE.test(p.replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')) || INBOX_FILE.test(p.replace(/\\/g, '/')))
+}
+export function writesTranscriptByHand(command: unknown): boolean {
+  if (typeof command !== 'string' || !/\.jsonl/i.test(command)) return false
+  for (const words of shellWords(command)) {
+    for (let i = 0; i < words.length - 1; i++) if (/^\d*>>?&?$/.test(words[i]) && isTranscriptFile(words[i + 1])) return true
+    let n = 0
+    while (n < words.length && (/^\w+=/.test(words[n]) || SKIPPED_PREFIX.has(words[n]))) n++
+    const cmd = (words[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
+    const args = words.slice(n + 1)
+    const names = args.map((w) => w.replace(/^of=/, ''))
+    // cp, mv, ln and install write their last operand (the source of a copy may be a transcript)
+    const into = ['cp', 'mv', 'ln', 'install'].includes(cmd) ? names.filter((w) => !w.startsWith('-')).slice(-1) : names
+    if (['tee', 'cp', 'mv', 'dd', 'truncate', 'ln', 'install', 'sed', 'perl'].includes(cmd) && into.some(isTranscriptFile)) {
+      if ((cmd === 'sed' || cmd === 'perl') && !args.some((w) => inPlaceFlag(cmd, w))) continue
+      return true
+    }
+  }
+  return false
+}
+
 async function homeDir($: $): Promise<string | undefined> {
   return (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
 }
@@ -2543,6 +2697,42 @@ export const register: Register = on => {
   // push or git merge that scrub does not gate (not joined by && all the way) is refused. Members are never push-gated; a
   // member's command that backgrounds a process outside run_in_background is refused instead (the detach gate).
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+    {
+      // main session or member alike: a claude session or an Agent SDK script the agent starts writes a line the approval proof counts as the client's
+      const input = e as unknown as { command?: unknown; args?: unknown }
+      const command = typeof input.command === 'string' ? input.command : isRecord(input.args) ? input.args.command : undefined
+      // An agent never writes a transcript or the shared inbox by hand: no scope, there is no legitimate use.
+      if (writesTranscriptByHand(command)) return refuse($, state, refusalsLogged, e, { deny: TRANSCRIPT_WRITE_REFUSAL })
+      // The claude-session and SDK guard applies only while the shared inbox of the session cwd, or of a directory a `cd` in the command names,
+      // holds an open item the client resolves: that is the only time a forged reply has a use. The inbox is asked only when the command looks
+      // like a route, and no operand is read before it says so.
+      const cwd = (await safely($, 'sdk reply guard cwd', async () => $.session.cwd())) ?? '.'
+      const scoped = await safely($, 'sdk reply guard scope', async () => {
+        const ops = scriptOperands(command, cwd)
+        if (!startsClaudeSession(command) && ops.scripts.length + ops.tests.length + ops.shells.length === 0) return false
+        return clientItemOpen($, commandDirs(command, cwd))
+      })
+      const sdkRoute = scoped === false ? false : await safely($, 'sdk reply guard', async () => {
+        let hit = startsClaudeSession(command)
+        if (!hit) {
+          const { scripts, tests, shells } = scriptOperands(command, cwd)
+          const read = async (f: string) => (async () => $.fs.read(f))().then((t) => String(t).slice(0, 200000), () => undefined)
+          // a script the guard cannot read is refused: it may be the Agent SDK script
+          for (const f of scripts.slice(0, 8)) {
+            const text = await read(f)
+            if (text === undefined || SDK_PACKAGE.test(text) || startsClaudeSession(text)) hit = true
+          }
+          for (const f of tests.slice(0, 8)) if ((await read(f)) === undefined) hit = true
+          for (const f of shells.slice(0, 8)) {
+            const text = await read(f)
+            if (text !== undefined && startsClaudeSession(text)) hit = true
+          }
+        }
+        if (hit) await logRule($, 'sdk reply guard refused a Bash call: it starts a claude session or runs an Agent SDK script')
+        return hit
+      })
+      if (sdkRoute === true) return refuse($, state, refusalsLogged, e, { deny: SDK_REPLY_REFUSAL })
+    }
     if (e.agentId === undefined) {
       const input = e as unknown as { command?: unknown; args?: unknown }
       const command = typeof input.command === 'string' ? input.command : isRecord(input.args) ? input.args.command : undefined
@@ -2642,6 +2832,11 @@ export const register: Register = on => {
 
   // The decision log is written only by `factory.ts decide`, which stamps the clock's time. An Edit or Write of this
   // session's decisions.md is refused, never rewritten: a rewritten input gets no auto-mode verdict (retro F-9).
+  on('tool.call', { tool: ['Write', 'Edit', 'MultiEdit'] }, async ($, e, next) => {
+    if (isTranscriptFile(e.file_path)) return refuse($, state, refusalsLogged, e, { deny: TRANSCRIPT_WRITE_REFUSAL })
+    return next(e)
+  }).catch(failOpen)
+
   on('tool.call', { tool: ['Write', 'Edit'] }, async ($, e, next) => {
     const isLog = await safely($, 'decision log', async () => isDecisionLog(e.file_path))
     if (isLog === true) return refuse($, state, refusalsLogged, e, { deny: DECISION_LOG_REFUSAL })
