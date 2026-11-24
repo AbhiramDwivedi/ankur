@@ -1331,28 +1331,45 @@ export function decisionLogBashVerdict(command: unknown): { deny: string } | und
 export const SDK_REPLY_REFUSAL = `${MARK} Refused: do not start claude on an existing session (--resume, --continue, --session-id, --fork-session, -c or -r, with or without -p), or run the Agent SDK (@anthropic-ai/claude-agent-sdk), while a client item is open. A session started that way could answer the approval card in the client's name. claude -p on a new session is fine. Ask the client to answer the card in the UI or the terminal.`
 export const SDK_WRITE_REFUSAL = `${MARK} Refused: do not write a script that uses the Agent SDK (@anthropic-ai/claude-agent-sdk) while a client item is open. Such a script could answer the approval card in the client's name. Ask the client to answer the card in the UI or the terminal.`
 export const SDK_PACKAGE = /claude[-_]agent[-_]sdk/i // the npm package, with or without its scope, and the Python one
-const RESUME_FLAG = /^(?:--resume|--continue|--session-id|--fork-session|-[a-zA-Z]*[cr][a-zA-Z]*)(?:=|$)/
+// a single-dash cluster holding c or r, with or without a value stuck to it (`-r<id>`, `-pr<id>`)
+const RESUME_FLAG = /^(?:--(?:resume|continue|session-id|fork-session)(?:=|$)|-[a-zA-Z]*[cr])/
+// claude as a command word: after a separator or a path slash, with an optional Windows suffix
+const CLAUDE_WORD = /(?:^|[\s;&|(`"'=\\/])claude(?:\.(?:exe|cmd|ps1|bat))?(?=[\s"'`)]|$)/i
+const WIN_SUFFIX = /\.(?:exe|cmd|ps1|bat)$/
 // the same flags anywhere in a command line the words cannot follow
-const RESUME_TEXT = /(?:^|[\s"'`(])(?:--resume|--continue|--session-id|--fork-session|-[a-zA-Z]*[cr][a-zA-Z]*)(?=[\s"'`)=]|$)/
+const RESUME_TEXT = /(?:^|[\s"'`(])(?:--(?:resume|continue|session-id|fork-session)(?=[\s"'`)=]|$)|-[a-zA-Z]*[cr])/
+export const RESUME_WRITE_REFUSAL = `${MARK} Refused: do not write a script or file that starts claude on an existing session (--resume, --continue, --session-id, --fork-session, -c or -r) while a client item is open. A resumed session could answer the approval card in the client's name. claude -p on a new session is fine. Ask the client to answer the card in the UI or the terminal.`
+// text that runs claude on an existing session: a claude command word and a resume flag on one line
+export function writesResume(texts: string[]): boolean {
+  // a backslash or a PowerShell backtick at a line end continues the command on the next line
+  // an escaped backslash does not continue the line, so both the joined and the unjoined lines are checked
+  const hit = (l: string) => CLAUDE_WORD.test(l) && RESUME_TEXT.test(l)
+  return texts.some((t) => t.split('\n').some(hit) || t.replace(/[\\`]\r?\n/g, ' ').split('\n').some(hit))
+}
 // commands that run the words after them: a shell, a terminal multiplexer, `script`, `expect` (and its `spawn`)
 const SHELL_LIKE = new Set(['bash', 'sh', 'zsh', 'dash', 'eval', 'xargs', 'timeout', 'npx', 'pwsh', 'powershell', 'cmd', 'cmd.exe', 'tmux', 'screen', 'script', 'expect', 'spawn', 'setsid'])
 
 export function startsClaudeSession(command: unknown, depth = 0): boolean {
   if (typeof command !== 'string' || depth > 3) return false
+  // a line continuation (backslash, or PowerShell's backtick) joins the lines, unless the backslash is itself escaped: check both readings
+  const joined = command.replace(/[\\`]\r?\n/g, ' ')
+  return scanClaudeSession(command, depth) || (joined !== command && scanClaudeSession(joined, depth))
+}
+function scanClaudeSession(command: string, depth: number): boolean {
   if (SDK_PACKAGE.test(command)) return true
   if (!/claude/i.test(command)) return false
   // claude as a command word next to a way to build or pipe a command line the words below cannot follow, with a resume flag anywhere in
   // the text. A path or a grep pattern holding the word passes.
-  if (/(?:^|[\s;&|(`"'=])claude(?:\.exe)?(?=[\s"'`)]|$)/.test(command) && /\beval\b|\$\(|`|\|\s*(?:ba|z|da)?sh\b|\bxargs\b|-exec(?:dir)?\b/.test(command) && RESUME_TEXT.test(command)) return true
+  if (CLAUDE_WORD.test(command) && /\beval\b|\$\(|`|\|\s*(?:ba|z|da)?sh\b|\bxargs\b|-exec(?:dir)?\b/.test(command) && RESUME_TEXT.test(command)) return true
   for (const words of shellWords(command)) {
     let n = 0
     while (n < words.length && (/^\w+=/.test(words[n]) || SKIPPED_PREFIX.has(words[n]))) n++
-    const cmd = (words[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
+    const cmd = (words[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(WIN_SUFFIX, '')
     const args = words.slice(n + 1)
     if (cmd === 'claude' && args.some((w) => RESUME_FLAG.test(w))) return true
     // `bash -c "claude --resume ..."`, `env claude --resume`, `tmux new-session 'claude -r x'`: look inside the words the shell-like command runs
     if (SHELL_LIKE.has(cmd)) {
-      const at = args.findIndex((w) => w.split(/[\\/]/).pop() === 'claude')
+      const at = args.findIndex((w) => w.split(/[\\/]/).pop()!.toLowerCase().replace(WIN_SUFFIX, '') === 'claude')
       if (at >= 0 && startsClaudeSession(args.slice(at).join(' '), depth + 1)) return true
       if (args.some((w) => /\s/.test(w) && startsClaudeSession(w, depth + 1))) return true
     }
@@ -1380,14 +1397,19 @@ export function commandDirs(command: unknown, cwd: string): string[] {
 }
 
 // Does the shared inbox of any of `dirs` hold an open item of a kind the client resolves: a client-kind `open` row whose id no `resolve` row
-// names? No repo or no inbox file: false. An inbox that exists but cannot be read: true. A read of one file, no fold: an agent never writes the
+// names? No repo or no shared dir: false. A shared dir with no inbox file, or an inbox that cannot be read: true. A read of one file, no fold: an agent never writes the
 // inbox by hand (the transcript-write guard refuses it), and the guard stops a shortcut, not a forger.
 export async function clientItemOpen($: $, dirs: string[]): Promise<boolean> {
   for (const dir of dirs) {
     const common = await gitCommonDir($, dir)
     if (common === undefined) continue
-    const file = `${slashed(common)}/${await runDirIn((p) => $.fs.exists(p), common)}/shared/inbox.jsonl`
-    if (!(await $.fs.exists(file))) continue
+    const root = `${slashed(common)}/${await runDirIn((p) => $.fs.exists(p), common)}`
+    const file = `${root}/shared/inbox.jsonl`
+    if (!(await $.fs.exists(file))) {
+      // a shared dir with no inbox file: the inbox was removed; fail closed. No shared dir (a fresh session, or no ankur run root): off.
+      if (await $.fs.exists(`${root}/shared`)) return true
+      continue
+    }
     let text: string
     try {
       text = String(await $.fs.read(file))
@@ -2846,8 +2868,10 @@ export const register: Register = on => {
   // a missing or unreadable target counts as new.
   on('tool.call', { tool: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] }, async ($, e, next) => {
     const input = e as unknown as { file_path?: unknown; notebook_path?: unknown }
+    const written = writtenText(e)
+    const pattern = written.some((t) => SDK_PACKAGE.test(t)) ? 'sdk' : writesResume(written) ? 'resume' : undefined
     const sdkWrite = await safely($, 'sdk write guard', async () => {
-      if (!writtenText(e).some((t) => SDK_PACKAGE.test(t))) return false
+      if (pattern === undefined) return false
       const cwd = (await safely($, 'sdk write guard cwd', async () => $.session.cwd())) ?? '.'
       const target = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : undefined
       const abs = target === undefined ? undefined : absPath(cwd, target)
@@ -2860,12 +2884,12 @@ export const register: Register = on => {
         } catch {
           current = '' // unreadable: judged as a new file
         }
-        if (SDK_PACKAGE.test(current)) return false
+        if (pattern === 'sdk' ? SDK_PACKAGE.test(current) : writesResume([current])) return false
       }
-      await logRule($, 'sdk write guard refused a file write: its new text brings the Agent SDK into a file while a client item is open')
+      await logRule($, pattern === 'sdk' ? 'sdk write guard refused a file write: its new text brings the Agent SDK into a file while a client item is open' : 'resume write guard refused a file write: its new text starts claude on an existing session while a client item is open')
       return true
     })
-    if (sdkWrite === true) return refuse($, state, refusalsLogged, e, { deny: SDK_WRITE_REFUSAL })
+    if (sdkWrite === true) return refuse($, state, refusalsLogged, e, { deny: pattern === 'sdk' ? SDK_WRITE_REFUSAL : RESUME_WRITE_REFUSAL })
     if (e.agentId !== undefined) return next(e)
     const verdict = await safely($, 'main-edit gate', async () => {
       const listed = await $.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: await $.session.cwd(), timeoutMs: 15_000 })

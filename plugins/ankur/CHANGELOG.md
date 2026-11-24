@@ -2,6 +2,18 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.44.2 (2026-11-24)
+
+The command guard now also catches the remaining ways an agent could resume a session or start one through a script while a request waits for you.
+
+To update an existing install, run `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code. The web UI is unchanged.
+
+### The command guard is tighter
+
+- The approval guard now also refuses `claude -r<id>` and `claude -pr<id>`, where the session id is attached to the short option.
+- While a client item is open, ankur refuses to write a script or file that runs claude on an existing session, since running it with `bash` would get past the command check. A file that already holds such a command stays editable, and `claude -p` on a new session is fine.
+- If a repo's ankur shared folder exists but its inbox file is gone, ankur now treats a client item as open instead of switching the guard off. A fresh session with no inbox yet is not affected.
+
 ## 0.44.1 (2026-11-24)
 
 The command guard now blocks the ways an agent could still answer your approval card, and a fresh `claude -p` runs again while a request waits.
