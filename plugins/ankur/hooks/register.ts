@@ -1322,27 +1322,35 @@ export function decisionLogBashVerdict(command: unknown): { deny: string } | und
   return writesDecisionLogByHand(command) ? { deny: DECISION_LOG_REFUSAL } : undefined
 }
 
-// The inbox proof counts the client's answer to a question card on the main chain. A session the agent starts on the client's transcript
-// (`claude --resume <id>`, or an Agent SDK host with its own canUseTool) could answer that card itself, so while a client item is open an agent
-// never starts one. A lexical guard against the agent's shortcut, not a lock against someone with the client's account.
-export const SDK_REPLY_REFUSAL = `${MARK} Refused: do not start claude with -p, --print, --resume, --continue or --session-id, or the Agent SDK (@anthropic-ai/claude-agent-sdk), while a client item is open. A session started that way could answer the approval card in the client's name. Ask the client to answer the card in the UI or the terminal.`
-const SDK_PACKAGE = /claude[-_]agent[-_]sdk/i // the npm package, with or without its scope, and the Python one
-const CLAUDE_SESSION_FLAG = /^(?:--print|--resume|--continue|--session-id|-[a-zA-Z]*[pcr][a-zA-Z]*)(?:=|$)/
-const SHELL_LIKE = new Set(['bash', 'sh', 'zsh', 'dash', 'eval', 'xargs', 'timeout', 'npx', 'pwsh', 'powershell', 'cmd', 'cmd.exe'])
+// The inbox proof counts the client's answer to a question card on the main chain, or a line typed in an interactive terminal. A claude
+// started on the client's existing session (`--resume`, `--continue`, `--session-id`, `--fork-session`) could answer that card, print mode
+// included: `claude -p --resume <id> --input-format stream-json --permission-prompt-tool stdio` is the transport the Agent SDK itself uses, so
+// hand-written control lines can answer the card without naming the SDK. While a client item is open an agent therefore never starts claude
+// on an existing session, in any mode, and never writes a script that names the SDK. `claude -p` on a new session passes: it cannot write into
+// the client's transcript. A lexical guard against the agent's shortcut, not a lock against someone with the client's account.
+export const SDK_REPLY_REFUSAL = `${MARK} Refused: do not start claude on an existing session (--resume, --continue, --session-id, --fork-session, -c or -r, with or without -p), or run the Agent SDK (@anthropic-ai/claude-agent-sdk), while a client item is open. A session started that way could answer the approval card in the client's name. claude -p on a new session is fine. Ask the client to answer the card in the UI or the terminal.`
+export const SDK_WRITE_REFUSAL = `${MARK} Refused: do not write a script that uses the Agent SDK (@anthropic-ai/claude-agent-sdk) while a client item is open. Such a script could answer the approval card in the client's name. Ask the client to answer the card in the UI or the terminal.`
+export const SDK_PACKAGE = /claude[-_]agent[-_]sdk/i // the npm package, with or without its scope, and the Python one
+const RESUME_FLAG = /^(?:--resume|--continue|--session-id|--fork-session|-[a-zA-Z]*[cr][a-zA-Z]*)(?:=|$)/
+// the same flags anywhere in a command line the words cannot follow
+const RESUME_TEXT = /(?:^|[\s"'`(])(?:--resume|--continue|--session-id|--fork-session|-[a-zA-Z]*[cr][a-zA-Z]*)(?=[\s"'`)=]|$)/
+// commands that run the words after them: a shell, a terminal multiplexer, `script`, `expect` (and its `spawn`)
+const SHELL_LIKE = new Set(['bash', 'sh', 'zsh', 'dash', 'eval', 'xargs', 'timeout', 'npx', 'pwsh', 'powershell', 'cmd', 'cmd.exe', 'tmux', 'screen', 'script', 'expect', 'spawn', 'setsid'])
 
 export function startsClaudeSession(command: unknown, depth = 0): boolean {
   if (typeof command !== 'string' || depth > 3) return false
   if (SDK_PACKAGE.test(command)) return true
   if (!/claude/i.test(command)) return false
-  // claude as a command word next to a way to build or pipe a command line the words below cannot follow. A path or a grep pattern holding the word passes.
-  if (/(?:^|[\s;&|(`"'=])claude(?:\.exe)?(?=[\s"'`)]|$)/.test(command) && /\beval\b|\$\(|`|\|\s*(?:ba|z|da)?sh\b|\bxargs\b|-exec(?:dir)?\b/.test(command)) return true
+  // claude as a command word next to a way to build or pipe a command line the words below cannot follow, with a resume flag anywhere in
+  // the text. A path or a grep pattern holding the word passes.
+  if (/(?:^|[\s;&|(`"'=])claude(?:\.exe)?(?=[\s"'`)]|$)/.test(command) && /\beval\b|\$\(|`|\|\s*(?:ba|z|da)?sh\b|\bxargs\b|-exec(?:dir)?\b/.test(command) && RESUME_TEXT.test(command)) return true
   for (const words of shellWords(command)) {
     let n = 0
     while (n < words.length && (/^\w+=/.test(words[n]) || SKIPPED_PREFIX.has(words[n]))) n++
     const cmd = (words[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
     const args = words.slice(n + 1)
-    if (cmd === 'claude' && args.some((w) => CLAUDE_SESSION_FLAG.test(w))) return true
-    // `bash -c "claude -p ..."`, `env claude -p`, `xargs claude -p`: look inside the words the shell-like command runs
+    if (cmd === 'claude' && args.some((w) => RESUME_FLAG.test(w))) return true
+    // `bash -c "claude --resume ..."`, `env claude --resume`, `tmux new-session 'claude -r x'`: look inside the words the shell-like command runs
     if (SHELL_LIKE.has(cmd)) {
       const at = args.findIndex((w) => w.split(/[\\/]/).pop() === 'claude')
       if (at >= 0 && startsClaudeSession(args.slice(at).join(' '), depth + 1)) return true
@@ -1431,6 +1439,43 @@ export function writesTranscriptByHand(command: unknown): boolean {
     }
   }
   return false
+}
+
+// A shell command that deletes or moves the shared inbox, the shared dir or the run root under .git: with no inbox the client-item
+// check sees nothing open and the guards above switch off. An agent never does it: no scope, there is no legitimate use.
+export const INBOX_REMOVE_REFUSAL = `${MARK} Refused: an agent never deletes or moves the shared inbox.jsonl or the shared dir that holds it; it records the client's open items. Use the inbox command to resolve an item, or ask the client.`
+const REMOVERS = new Set(['rm', 'unlink', 'mv', 'shred', 'truncate', 'rmdir', 'del', 'erase', 'rd', 'remove-item', 'move-item', 'ri', 'mi'])
+function isSharedInboxPath(p: string): boolean {
+  const s = p.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (INBOX_FILE.test(s)) return true
+  if (/(?:^|\/)(?:ankur|truss)\/shared$/i.test(s)) return true
+  // a glob inside the shared dir (`shared/*`, `shared/inbox*`)
+  if (/(?:^|\/)(?:ankur|truss)\/shared\/[^/]*[*?[]/i.test(s)) return true
+  // the run root under the git dir
+  return /(?:^|\/)\.git\/(?:ankur|truss)$/i.test(s)
+}
+export function removesSharedInbox(command: unknown): boolean {
+  if (typeof command !== 'string' || !/shared|ankur|truss|\.git/i.test(command)) return false
+  for (const words of shellWords(command)) {
+    let n = 0
+    while (n < words.length && (/^\w+=/.test(words[n]) || SKIPPED_PREFIX.has(words[n]))) n++
+    const cmd = (words[n] ?? '').split(/[\\/]/).pop()!.toLowerCase().replace(/\.exe$/, '')
+    if (!REMOVERS.has(cmd)) continue
+    if (words.slice(n + 1).some((w) => !w.startsWith('-') && isSharedInboxPath(w))) return true
+  }
+  return false
+}
+
+// The new text a Write, Edit, MultiEdit or NotebookEdit puts in a file, from the tool input only.
+export function writtenText(input: unknown): string[] {
+  if (!isRecord(input)) return []
+  const out: string[] = []
+  for (const src of [input, isRecord(input.args) ? input.args : undefined]) {
+    if (src === undefined) continue
+    for (const key of ['content', 'new_string', 'new_source']) if (typeof src[key] === 'string') out.push(src[key] as string)
+    if (Array.isArray(src.edits)) for (const ed of src.edits) if (isRecord(ed) && typeof ed.new_string === 'string') out.push(ed.new_string)
+  }
+  return out
 }
 
 async function homeDir($: $): Promise<string | undefined> {
@@ -2667,6 +2712,8 @@ export const register: Register = on => {
       const command = typeof input.command === 'string' ? input.command : isRecord(input.args) ? input.args.command : undefined
       // An agent never writes a transcript or the shared inbox by hand: no scope, there is no legitimate use.
       if (writesTranscriptByHand(command)) return refuse($, state, refusalsLogged, e, { deny: TRANSCRIPT_WRITE_REFUSAL })
+      // Nor deletes or moves the shared inbox: with no inbox the guard below sees no open item.
+      if ((await safely($, 'inbox remove guard', async () => removesSharedInbox(command))) === true) return refuse($, state, refusalsLogged, e, { deny: INBOX_REMOVE_REFUSAL })
       // The claude-session guard applies only while the shared inbox of the session cwd, or of a directory a `cd` in the command names, holds an
       // open item the client resolves: that is the only time a session started on the client's transcript has a use. The inbox is read only
       // when the command starts one.
@@ -2783,6 +2830,8 @@ export const register: Register = on => {
     return next(e)
   }).catch(failOpen)
 
+  // main session or member alike: while a client item is open, a file written with Agent SDK code could host its own canUseTool and answer the
+  // approval card. Judged on the tool input only; no file is read but the inbox, and only when the new text names the SDK.
   on('tool.call', { tool: ['Write', 'Edit'] }, async ($, e, next) => {
     const isLog = await safely($, 'decision log', async () => isDecisionLog(e.file_path))
     if (isLog === true) return refuse($, state, refusalsLogged, e, { deny: DECISION_LOG_REFUSAL })
@@ -2791,9 +2840,33 @@ export const register: Register = on => {
 
   // The main-thread edit gate: refuses a main-thread Edit, Write, MultiEdit or NotebookEdit on
   // repo files while a run is active. Subagents are never gated; every failure lets the call through.
+  // First, for the main session and members alike, the SDK write guard: a write whose new text brings the
+  // Agent SDK into a file that did not use it is refused while a client item is open, since such a script
+  // could answer the approval card. A file that already uses the SDK (a project built on it) stays editable;
+  // a missing or unreadable target counts as new.
   on('tool.call', { tool: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] }, async ($, e, next) => {
-    if (e.agentId !== undefined) return next(e)
     const input = e as unknown as { file_path?: unknown; notebook_path?: unknown }
+    const sdkWrite = await safely($, 'sdk write guard', async () => {
+      if (!writtenText(e).some((t) => SDK_PACKAGE.test(t))) return false
+      const cwd = (await safely($, 'sdk write guard cwd', async () => $.session.cwd())) ?? '.'
+      const target = typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : undefined
+      const abs = target === undefined ? undefined : absPath(cwd, target)
+      const dirs = abs === undefined ? [cwd] : [cwd, abs.replace(/[\\/][^\\/]*$/, '')]
+      if (!(await clientItemOpen($, dirs))) return false
+      if (abs !== undefined) {
+        let current = ''
+        try {
+          if (await $.fs.exists(abs)) current = String(await $.fs.read(abs))
+        } catch {
+          current = '' // unreadable: judged as a new file
+        }
+        if (SDK_PACKAGE.test(current)) return false
+      }
+      await logRule($, 'sdk write guard refused a file write: its new text brings the Agent SDK into a file while a client item is open')
+      return true
+    })
+    if (sdkWrite === true) return refuse($, state, refusalsLogged, e, { deny: SDK_WRITE_REFUSAL })
+    if (e.agentId !== undefined) return next(e)
     const verdict = await safely($, 'main-edit gate', async () => {
       const listed = await $.process.run(['git', 'worktree', 'list', '--porcelain'], { cwd: await $.session.cwd(), timeoutMs: 15_000 })
       if (listed.exitCode !== 0) return undefined

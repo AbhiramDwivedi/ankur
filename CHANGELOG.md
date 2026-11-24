@@ -2,6 +2,20 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.44.1 (2026-11-24)
+
+The command guard now blocks the ways an agent could still answer your approval card, and a fresh `claude -p` runs again while a request waits.
+
+To update an existing install, run `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code. The web UI is unchanged.
+
+### The command guard blocks what can still approve
+
+- **A fresh `claude -p` runs again while a request waits for you.** A new print-mode session can't reach your approval card, so ankur no longer refuses it. It still refuses an agent that starts claude on an existing session (`--resume`, `--continue`, `-c`, `-r`), with or without `-p`, also inside `tmux`, `screen`, `script`, `expect` or `bash -c`: a resumed session could answer your card.
+- **No new Agent SDK scripts while a request waits.** An agent's Write or Edit that brings the Agent SDK into a new file, or into a file that didn't use it, is refused while a request waits for you, as a command that names the SDK already was. Files that already use the SDK stay editable.
+- **The inbox can't be deleted.** ankur refuses an agent command that deletes or moves the shared inbox or the folder that holds it, at any time. Without the inbox the guard would see no waiting request and switch off.
+- **An approval card must ask about the whole request.** A card approves a request only when its question quotes the request's title and its options are exactly Approve and Reject (Done and Dismiss for a push or deploy), and you picked the one that is the decision itself. A card that asks something narrower, adds a third option, or offers "Approve reading" no longer approves the request.
+- **Clearer approval hints.** Messages that told the program manager you approve by typing `/ankur:inbox approve <name> <code>` now name the question card first, with the typed line as the terminal alternative.
+
 ## 0.44.0 (2026-11-24)
 
 You now approve a request by clicking Approve on a question card, in the web UI and in the terminal. A line typed in the UI no longer approves by itself. The UI can resume your last session with one click, and the first worktree agent of a session is no longer refused.

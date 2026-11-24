@@ -220,7 +220,7 @@ export function cmdPersonaInstall(f: Flags): Obj {
       const why = items.map((it) => personaInstallProof(repo, dir, it, j.name, drafted))
       if (!why.some((w) => w === null)) {
         held.push(j.name)
-        unproven.push(items.length === 0 ? `${j.name}: needs --item <item>, the client-question item persona:${j.name} the client approved by typing /ankur:inbox approve <item> <code>` : `${j.name}: ${why.join('; ')}`)
+        unproven.push(items.length === 0 ? `${j.name}: needs --item <item>, the client-question item persona:${j.name} the client approved by picking Approve on a question card that holds the item's id and title (or, in a terminal, by typing /ankur:inbox approve <item> <code>)` : `${j.name}: ${why.join('; ')}`)
       }
     }
     if (pending.length > 0 && held.length === pending.length) throw refuse({ error: `persona-install --dir installs nothing without the client's yes: ${unproven.join(' | ')}`, installed: [] })

@@ -406,14 +406,20 @@ function cardScanFile(main: string, session: string): CardScan | null {
   return scan
 }
 
-// The decision word an offered label stands for: its first word, lowercased, with a trailing "(Recommended)" and punctuation dropped.
-const labelWord = (label: string): string => label.replace(/\s*\(recommended\)\s*$/i, '').trim().split(/[\s,.:;!?]+/)[0].toLowerCase()
+// An offered label without a trailing "(Recommended)", lowercased: a card for approve, reject, done or dismiss counts only when this is the
+// decision word itself.
+const labelWord = (label: string): string => label.replace(/\s*\(recommended\)\s*$/i, '').trim().toLowerCase()
+// The two options a card for each decision offers, no more: the PM writes the card, so a third option or a longer label could approve
+// something narrower than the item.
+const CARD_PAIRS: Record<string, readonly [string, string]> = { approve: ['approve', 'reject'], reject: ['approve', 'reject'], done: ['done', 'dismiss'], dismiss: ['done', 'dismiss'] }
+const squash = (s: string): string => s.replace(/\s+/g, ' ').trim().toLowerCase()
 
 /**
  * Why the card `card` does not prove a --card resolve of `open` with `c`, or the question and answer that do. The card is newer than the
- * item; one of its questions names the item's id (in its text or header) and was answered; for approve, reject, done and dismiss the answer is
- * an offered option whose first word is the decision (free text the client typed into the card is their reply, never an approval); for answer,
- * any answer counts. A budget approve takes the amount the question proposed.
+ * item; one of its questions names the item's id (in its text or header) and was answered; for approve, reject, done and dismiss the question
+ * quotes the item's title (case and runs of whitespace aside), the options are exactly Approve and Reject (or Done and Dismiss), one of them
+ * perhaps marked "(Recommended)", and the answer is the option that is the decision word (free text the client typed into the card is their
+ * reply, never an approval); for answer, any options and any answer count. A budget approve takes the amount the question proposed.
  */
 function cardFails(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: unknown }, card: Card): { why: string } | { q: CardQuestion; answer: string; raiseUsd?: number } {
   const id = String(open.id)
@@ -422,6 +428,14 @@ function cardFails(repo: string, open: Obj, c: { decision: unknown; raiseUsd?: u
   if (q === undefined) return { why: `the client's newest card answer names no question about ${id}` }
   const answer = q.answer as string
   if (c.decision !== 'answer') {
+    const title = squash(String(open.title ?? ''))
+    if (title === '' || !squash(q.question).includes(title)) return { why: `the card's question about ${id} does not quote its title ${JSON.stringify(String(open.title ?? ''))}: ask a card whose question holds the id and the title word for word` }
+    const pair = CARD_PAIRS[String(c.decision)]
+    const words = q.labels.map(labelWord)
+    const recommended = q.labels.filter((l) => /\(recommended\)\s*$/i.test(l)).length
+    if (words.length !== 2 || !pair.every((w) => words.includes(w)) || recommended > 1) {
+      return { why: `the card's options were ${JSON.stringify(q.labels)}, not exactly ${pair.map((w) => w[0].toUpperCase() + w.slice(1)).join(' and ')}` }
+    }
     if (!q.labels.includes(answer)) return { why: `the client typed their own words into the card (${JSON.stringify(answer.slice(0, 200))}), not an option: read them as their reply and ask again` }
     if (labelWord(answer) !== c.decision) return { why: `the client chose ${JSON.stringify(answer)} on the card, not ${String(c.decision)}` }
   }
@@ -903,7 +917,7 @@ function actionRan(repo: string, dir: string, it: Item, session: string): string
  * open row of the same kind, session and ref. Else the reason it does not count. Fails closed: a stored row alone proves nothing.
  */
 export function approvalProof(repo: string, dir: string, item: string | undefined, approved = false): string | null {
-  if (item === undefined || item === '') return 'approve --by client needs --item <item>: the client-trigger item for this plan, which the client approves by typing /ankur:inbox approve <item> <code>'
+  if (item === undefined || item === '') return 'approve --by client needs --item <item>: the client-trigger item for this plan, which the client approves by picking Approve on a question card that holds the item id and title (or, in a terminal, by typing /ankur:inbox approve <item> <code>)'
   const items = verifiedItems(repo)
   const it = items.get(item)
   if (it === undefined) return `no such item: ${item}`
@@ -918,7 +932,7 @@ export function approvalProof(repo: string, dir: string, item: string | undefine
     else if (later && o.open.kind === it.open.kind && o.open.session === it.open.session && o.open.ref === it.open.ref) return `${item} is superseded by ${id}`
   }
   const r = it.resolve
-  if (r === null) return `no prompt typed or card answered by the client approves ${item}: ask them with a question card (AskUserQuestion) that names ${item}, with the options Approve and Reject, and resolve it with --card; or the client types /ankur:inbox approve ${item} <code>`
+  if (r === null) return `no prompt typed or card answered by the client approves ${item}: ask them with a question card (AskUserQuestion) whose question holds ${item} and its title word for word, with exactly the options Approve and Reject, and resolve it with --card; or the client types /ankur:inbox approve ${item} <code>`
   if (r.by !== 'client' || r.decision !== 'approve') return `${item} was resolved ${String(r.decision)}, not approve`
   if (r.session !== session) return `${item} was approved in another session (${String(r.session)}), not ${session}: the client never saw this plan`
   // the client's approve must come after the plan was written: a resolve older than plan-write approved a plan the client never saw (replayed proof)
@@ -951,7 +965,7 @@ export function personaInstallProof(repo: string, dir: string, item: string | un
     else if (later && o.open.kind === it.open.kind && o.open.ref === it.open.ref) return `${item} is superseded by ${id}` // any session: the latest item for the draft holds the client's latest answer
   }
   const r = it.resolve
-  if (r === null) return `no prompt typed or card answered by the client approves ${item}: ask them with a question card (AskUserQuestion) that names ${item}, with the options Approve and Reject, and resolve it with --card; or the client types /ankur:inbox approve ${item} <code>`
+  if (r === null) return `no prompt typed or card answered by the client approves ${item}: ask them with a question card (AskUserQuestion) whose question holds ${item} and its title word for word, with exactly the options Approve and Reject, and resolve it with --card; or the client types /ankur:inbox approve ${item} <code>`
   if (r.by !== 'client' || r.decision !== 'approve') return `${item} was resolved ${String(r.decision)}, not approve`
   if (r.session !== session) return `${item} was approved in another session (${String(r.session)}), not ${session}: the client never saw this draft`
   const at = typedAtOf(r) ?? Date.parse(String(r.ts)) // the typed line's time, not the time the row was stored: a stored row can come long after the typing
@@ -1057,7 +1071,7 @@ function resolveItem(f: Flags): Obj {
       const scan = cardScanFile(main, session)
       if (scan === null) throw refuse({ error: `no card answered by the client resolves ${id}: the transcript of session ${session} cannot be read` })
       const p = cardProof(repo, it.open, { decision, raiseUsd }, scan.cards, Infinity)
-      if ('why' in p) throw refuse({ error: `no card answered by the client resolves ${id}: ${p.why}. Ask the client with AskUserQuestion: a question that names ${id} and says what they approve, with the options Approve and Reject` })
+      if ('why' in p) throw refuse({ error: `no card answered by the client resolves ${id}: ${p.why}. Ask the client with AskUserQuestion: a question that holds ${id} and its title word for word, with exactly the options Approve and Reject (Done and Dismiss for done or dismiss)` })
       raiseUsd = p.raiseUsd
       // a note the agent passes must be the client's own words: a part of the answer
       if (noteGiven !== undefined && norm(note) !== '' && !norm(p.answer).includes(norm(note))) throw refuse({ error: `--note is not part of the client's card answer (${JSON.stringify(norm(p.answer).slice(0, 200))}): pass a part of it as the note, or none` })

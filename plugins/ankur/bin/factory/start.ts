@@ -221,7 +221,7 @@ function draftQuestions(c: StartCtx, personas: Obj, entries: Obj[]): string[] {
       escalate(c.repo, c.dir, {
         kind: 'client-question', title: `install persona ${name}`, ref, ownSession: true, crews: entries.map((e) => String(e.slug)),
         risk: `Standards of a persona become checks on every later diff; until you approve it, ${name} tasks run as general-purpose`, onYes: `The PM installs the persona ${name}, and its standards apply to later diffs`, onNo: `Tasks for ${name} keep running as general-purpose with the draft inlined`,
-        detail: `The plan drafted the project persona ${name} (${flat(String(p.file))}). Until you approve it, its tasks run as general-purpose with the draft inlined, and no crew waits. Standards of a persona become checks on every later diff. To install it, type /ankur:inbox approve <this id> <code>; the PM then runs factory persona-install --from ${flat(path.dirname(String(p.file)))} --dir ${flat(c.dir)} --item <this id>.`,
+        detail: `The plan drafted the project persona ${name} (${flat(String(p.file))}). Until you approve it, its tasks run as general-purpose with the draft inlined, and no crew waits. Standards of a persona become checks on every later diff. To install it, approve this item on its question card (or, in a terminal, type /ankur:inbox approve <this id> <code>); the PM then runs factory persona-install --from ${flat(path.dirname(String(p.file)))} --dir ${flat(c.dir)} --item <this id>.`,
       })
     } catch (e) {
       out.push(`persona draft ${name}: the client-question item could not be opened (${(e as Error).message}); its tasks still run as general-purpose with the draft inlined`)
