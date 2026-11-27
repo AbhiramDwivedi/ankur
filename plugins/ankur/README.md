@@ -124,6 +124,7 @@ The tests prove the rules are written into the prompts and enforced by hooks whe
 ## Learn more
 
 - [CHANGELOG.md](CHANGELOG.md): what changed in each version.
+- [docs/floor-verify.md](docs/floor-verify.md): the hand checklist for the floor (the band above the prompt and the `/floor` pane), with the steps tests cannot cover: the desktop app, remote control, macOS and Windows.
 
 ## The client brief
 

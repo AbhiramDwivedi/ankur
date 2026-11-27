@@ -1,4 +1,4 @@
-import type { AgentInfo, ClassicResult, EngineInterface, Register, Timer, ToolCallResult } from 'claude-code'
+import type { AgentInfo, ClassicResult, EngineInterface, On, Register, Timer, ToolCallResult } from 'claude-code'
 
 import { withAcceptanceTest } from '../bin/factory/goal-file.ts'
 import { NEW, OLD, roleOf, runDirName } from '../bin/names-pure.ts'
@@ -2443,7 +2443,7 @@ async function refuse<R>($: $, state: State, logged: WeakSet<object>, e: { reado
   return refused
 }
 
-export const register: Register = on => {
+export function registerGates(on: On): void {
   const state: State = {
     known: new Map(),
     seq: 0,
@@ -3053,6 +3053,9 @@ export const register: Register = on => {
     return { text: text ?? 'ankur could not read the crews; see the debug log.' }
   })
 }
+
+// the hooks module the plugin names is main.tsx; node code imports this file, so it never reaches a .tsx file
+export const register: Register = on => registerGates(on)
 
 // whether an agent type is the crew lead's: the one place the type is compared (PROJECT_MANAGER_TYPE)
 export function isLeadType(type: unknown): boolean {

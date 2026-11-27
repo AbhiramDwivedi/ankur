@@ -53,6 +53,16 @@ claude plugin update ankur@ankur
 
 Then restart Claude Code. The new version loads on the restart.
 
+## The floor
+
+The floor shows a run inside Claude Code. It comes with the plugin, so Option 1 is enough.
+
+- **The band.** While a repo holds a run, one line above the prompt shows the goal, the stage timeline, how many crews are running or stuck, how many items need you, and an `f: Floor` button.
+- **The pane.** Type `/floor` to open it beside the chat. Its tabs are Crews, Your move, Decisions, ADRs and Design. Every tab and action is a button you can click or press by the key drawn beside it.
+- **Acting from Your move.** Approve or reject a plan, answer a question in your own words, or restart, re-plan or ask about a stuck crew. Each action first shows the exact line it will use. Confirm puts that line in your prompt box and sends nothing: you press Enter yourself.
+
+The floor only reads the run. It never writes to the run folder or the inbox. It starts only in a session with a person at the prompt, so a `claude -p` run shows no band. What tests cannot check, such as the desktop app, remote control, macOS and Windows, is in the hand checklist [plugins/ankur/docs/floor-verify.md](plugins/ankur/docs/floor-verify.md).
+
 ## What a run costs
 
 A run costs tokens and time. One goal starts several agents: a project manager, builders, a QC engineer and sometimes a stress tester per crew. The agents run in parallel, so a run finishes sooner than one session would, and it spends more tokens in total. A large goal with several crews costs more than a small one.

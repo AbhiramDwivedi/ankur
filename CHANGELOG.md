@@ -2,6 +2,41 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.45.0 (2026-11-27)
+
+You can now follow an ankur run and act on it without leaving Claude Code. A band above the prompt shows the run at a glance, and `/floor` opens a pane with the crews, what needs you, the decisions, the ADRs and the design diagrams. From the pane you can approve or reject a plan, answer a question and act on a stuck crew. The floor never sends anything: it puts the line in your prompt box, and only your own Enter sends it.
+
+To update an existing install, run `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code. The floor is part of the plugin, so there is nothing else to add. The web UI is unchanged.
+
+### The band above the prompt
+
+- **The run at a glance.** While the repository's `.git/ankur/` holds a run, a one-line band above the prompt shows the goal, the stage timeline (`S0–S3 ✓  S4 ●  S5–S11 ○`), how many crews are running or stuck, how many items need you, and an `f: Floor` button that opens the pane. In a repository with no run there is no band.
+- **One line, always.** When the line runs out of room, for example beside the docked pane in a 120-column terminal, the goal shortens with `…` and then drops, then the stage timeline, the name, the running count and the stuck count give way in that order. The Floor button and the "need you" count always stay.
+- **`f` opens the floor, and nothing else does.** The Floor button does not borrow Claude Code's `app:cycleDiffBase` keybinding, so a chord you bound to cycle the diff base never opens the floor.
+- **Only where you are at the prompt.** The band and `/floor` start only in an interactive session. A `claude -p` run or an Agent SDK session shows no band and has no `/floor`.
+
+### The /floor pane
+
+- **Open it with `/floor`.** The pane opens beside the chat with the keyboard focus, so its keys work at once. `/floor <run dir>` opens another run. The tabs are `c` Crews, `y` Your move, `d` Decisions, `a` ADRs and `g` Design. Every tab and action is a button you can click or press by its key.
+- **Crews.** Crews are grouped by stage, with finished stages folded behind `f`. Pick a crew to see its goal, latest text, QC verdict and members, counted as work, QC, runner and retry agents.
+- **Your move.** Stuck crews come first, then the items that need you, each named in words ("Plan approval", "Question") with its title in full.
+- **Decisions, ADRs and Design.** Decisions lists the run's decisions newest first. ADRs lists the repository's ADRs with their status. Design shows the architecture doc's mermaid diagrams one at a time (`b` Previous, `n` Next); a diagram wider than the pane scrolls sideways with `h` and `l` instead of being cut off.
+- **It reads, it never writes.** The floor reads the run folder every 5 seconds, rolled event and message logs included, so no line is lost or counted twice when a log rolls. It writes nothing to the run folder or the inbox. Long titles, lines and decisions wrap instead of being cut off.
+
+### Act from Your move
+
+- **Pick an action.** A plan approval offers `p` Approve and `r` Reject, with what happens on each shown above them. A question offers `w` Answer in my own words. A stuck crew offers Restart (or Start a successor project manager for an idle one), Re-plan crew and Ask Claude.
+- **See the exact line first.** Every action opens a preview of the exact line it will use, with `o` Confirm and `x` Cancel. Cancel holds the focus, so a stray Enter cancels.
+- **Confirm fills your prompt box; it never sends.** Confirm puts the line in your prompt box: `/ankur:inbox approve <item> <code>` or `reject <item> <code>` for a plan approval, `/ankur:inbox answer <item> <code> ` for a question, with your own words to follow, or the stuck-crew message for a crew. You read it and press Enter yourself; until then nothing is decided. The floor never submits a prompt.
+- **The code stays in the pane.** The floor reads an item's confirmation code only from this session's own run folder, and shows it only in the pane you opened. The toast says "Line put in your prompt box" and carries neither the line nor the code.
+- **Why the code is in the line.** A live check on Claude Code 2.1.332 put an approval line in the prompt box, pressed Enter, and confirmed that ankur's typed-prompt approval check accepts the row it writes. Had that check failed, the floor would leave the code out and tell you to type it, and the plugin's tests fail if the code is in the line without that proof. The check pressed Enter through `tmux`, so it also shows the limit: a program that can send keystrokes into your terminal can send that Enter too, as it could send any line you might type.
+- **It checks again when you confirm.** The floor reads the item again at Confirm. An item resolved in the meantime is refused with its decision. A code that changed redraws the line, and you confirm again. Text already in your prompt box is never replaced: the line stays on screen to copy. A check that takes over 5 seconds offers Try again, and a fill Claude Code refuses (a dialog open, no prompt box) says why and keeps the line on screen.
+- **Questions take your own words for now.** A question item has no option buttons yet: answer it in your own words after the line.
+
+### Check it by hand
+
+- The plugin ships `docs/floor-verify.md`, the steps tests cannot cover: the real terminal and desktop app on Linux, macOS and Windows, and remote control. Nobody has yet checked by hand how the fill behaves over remote control; that step is open in the checklist.
+
 ## 0.44.2 (2026-11-24)
 
 The command guard now also catches the remaining ways an agent could resume a session or start one through a script while a request waits for you.
