@@ -312,17 +312,20 @@ export function parseTriage(text: string, findings: { id: string; target: { kind
       dropped.push({ line, reason: 'not `TRIAGE: <finding id> | <fix now|defer|drop> | <reason>`' })
       continue
     }
-    const f = findings.find((x) => x.id === m[1])
-    if (!f) {
-      dropped.push({ line, reason: `no finding ${m[1]}` })
-      continue
+    // a merged-id line `F-2+F-22` decides each id it names
+    for (const id of m[1].split('+')) {
+      const f = findings.find((x) => x.id === id)
+      if (!f) {
+        dropped.push({ line, reason: `no finding ${id}` })
+        continue
+      }
+      if (decisions.some((d) => d.id === f.id)) {
+        dropped.push({ line, reason: `${f.id} is already decided` })
+        continue
+      }
+      decisions.push({ id: f.id, decision: m[2] as TriageDecision['decision'], reason: m[3].trim() })
+      if (m[2] === 'fix now') (f.target.kind === 'proposed-goal' ? proposedGoals : fixGoal).push(f.id)
     }
-    if (decisions.some((d) => d.id === f.id)) {
-      dropped.push({ line, reason: `${f.id} is already decided` })
-      continue
-    }
-    decisions.push({ id: f.id, decision: m[2] as TriageDecision['decision'], reason: m[3].trim() })
-    if (m[2] === 'fix now') (f.target.kind === 'proposed-goal' ? proposedGoals : fixGoal).push(f.id)
   }
   return { decisions, fixGoal, proposedGoals, dropped }
 }
@@ -340,9 +343,29 @@ function runTriage(ankurDir: string, reportPath: string): string[] {
     if (!isObj(f) || !nonEmpty(f.id) || known.some((k) => k.id === f.id)) continue
     known.push({ id: f.id, target: { kind: isObj(f.target) && nonEmpty(f.target.kind) ? f.target.kind : 'plugin' } })
   }
-  const t = parseTriage(report, known)
+  const parsed = parseTriage(report, known)
+  // a second call merges: an earlier decision this report does not mention is kept, one it decides again is replaced
+  let prior: unknown = null
+  try { prior = JSON.parse(readFileSync(join(ankurDir, 'retro', 'triage.json'), 'utf8')) } catch { /* no earlier triage */ }
+  const earlier: TriageDecision[] = isObj(prior) && Array.isArray(prior.decisions) ? (prior.decisions as unknown[]).filter((d): d is TriageDecision => isObj(d) && nonEmpty(d.id) && nonEmpty(d.decision)) : []
+  const replaced: string[] = []
+  const decisions: TriageDecision[] = earlier.filter((d) => !parsed.decisions.some((n) => n.id === d.id))
+  for (const n of parsed.decisions) {
+    const old = earlier.find((d) => d.id === n.id)
+    if (old && old.decision !== n.decision) replaced.push(`${n.id}: ${old.decision} -> ${n.decision}`)
+  }
+  decisions.push(...parsed.decisions)
+  const fixGoal: string[] = []
+  const proposedGoals: string[] = []
+  for (const d of decisions) {
+    if (d.decision !== 'fix now') continue
+    const kind = known.find((k) => k.id === d.id)?.target.kind
+    ;(kind === 'proposed-goal' ? proposedGoals : fixGoal).push(d.id)
+  }
+  const t = { decisions, fixGoal, proposedGoals, dropped: parsed.dropped }
   writeAtomic(join(ankurDir, 'retro', 'triage.json'), JSON.stringify({ v: 1, ...t }, null, 2) + '\n')
   return [
+    ...(replaced.length ? [`REPLACED: ${replaced.length} earlier decision(s) replaced: ${replaced.join('; ')}`] : []),
     ...t.dropped.map((d) => `DROPPED: ${d.line} | ${d.reason}`),
     `OK: ${t.decisions.length} decided, ${t.fixGoal.length} for the fix goal, ${t.proposedGoals.length} proposed goals, ${t.dropped.length} dropped`,
   ]

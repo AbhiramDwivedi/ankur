@@ -2,6 +2,28 @@
 
 Newest first. The [README](README.md) covers what Ankur does and how to use it. The plugin was called truss before 0.36.0 and foundry before 0.12.0; entries below 0.36.0 use the old names. <!-- ankur-allow-truss --> Since 0.27.0, every entry uses the role names of the project manager rename: the project manager leads a crew, and the program manager (PM) is the main session.
 
+## 0.45.1 (2026-11-27)
+
+A fix release from the retro of the 0.45.0 run. It changes how ankur briefs its agents, counts a run and stitches docs. Update with `claude plugin marketplace update ankur`, then `claude plugin update ankur@ankur`, then restart Claude Code.
+
+- **UX agents follow the shell rules.** The UX direction and review prompts and the UX engineer agent now carry the foreground and shell rules the other agents already had.
+- **Direct agents are counted.** Agents the PM starts itself, such as a direct crew or a fix agent, are charged to their crew by the brief's `Ankur-Crew` line instead of showing as unattributed spend.
+- **The design engineer checks a plan that adds plugin files.** Before review it validates the plugin and imports each changed shared module on its own, so a broken layout is caught in the plan.
+- **A move or refactor keeps behaviour.** The builder brief says behaviour must stay the same, and a behaviour change is a question to the PM.
+- **Every UX crew goal has a `## UX` section.** The design engineer writes it, and the plan check refuses `ux: true` when the goal file exists and has no `## UX` section, and warns when two crews of a stage share a file with no `Owner of <file>: <crew>` line.
+- **A UX fix round shows the fix live.** It reproduces the finding at the reviewed size before and after the fix.
+- **A stopped fix is no longer hidden on resume.** A newer unmerged fix stop is no longer hidden by an older finished task of the same name, and the two halves of a fix round now get their own names.
+- **A member's check runs only the tests it names.** The full suite stays at the merge gate.
+- **UX briefs carry the PM's standing rulings** on labels and wording.
+- **One shell block everywhere.** A factory command prints the exact shell, foreground, refusal and process-kill block, the run skill requires it in every hand-written worktree brief, and the shell rules now say never to skip or redirect git hooks.
+- **`plan-args --fix` carries the errors.** It no longer reads the fix file and drops it.
+- **Stitch refuses a fragment with text before its first heading.** It used to drop that text and delete the fragment. Now it exits 1, names each doc and fragment in `preambles`, and writes nothing.
+- **Stitch helps you reconcile.** Its output lists each doc two or more fragments changed (`reconcile`) and each knowledge-lint failure on a stitched doc (`lint`), and the run skill has a reconcile step that reads them.
+- **The retro counts right.** A red check on purpose is no longer a failed check, QC tokens are not counted twice, and the time lost to a failed QC round is its own.
+- **A crashed test runner is never green.** A check whose runner died, for example on a closed pipe, is no longer recorded as green.
+- **Land reads the QC verdict robustly.** It accepts the verdict and head the QC engineer reports in any of the usual layouts, and says exactly what it needs when it finds none.
+- **Retro triage keeps every answer.** A line that names several findings, such as `F-2+F-22`, is accepted, and a second triage call keeps the decisions the first made.
+
 ## 0.45.0 (2026-11-27)
 
 You can now follow an ankur run and act on it without leaving Claude Code. A band above the prompt shows the run at a glance, and `/floor` opens a pane with the crews, what needs you, the decisions, the ADRs and the design diagrams. From the pane you can approve or reject a plan, answer a question and act on a stuck crew. The floor never sends anything: it puts the line in your prompt box, and only your own Enter sends it.

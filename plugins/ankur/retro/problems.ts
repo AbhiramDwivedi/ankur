@@ -330,7 +330,8 @@ function qualityPart(ctx: Ctx): Part {
     if (!isObj(j)) continue
     const c = checks.get(m[1]) ?? { n: 0, fail: 0 }
     c.n++
-    if (j.exit !== 0) c.fail++
+    // an `expect: red` record fails as it should: it is a failure only when it exited 0
+    if (j.expect === 'red' ? j.exit === 0 : j.exit !== 0) c.fail++
     checks.set(m[1], c)
   }
   const allowance = new Map<string, number>()
@@ -342,7 +343,8 @@ function qualityPart(ctx: Ctx): Part {
     const failed = (c.qcRounds as Json[]).filter((q) => q.verdict === 'FAIL')
     const failMs = failed.reduce((n, q) => n + q.ms, 0)
     let failTokens = 0
-    for (const q of failed) for (const id of ctx.byName.get(`${c.slug}|${q.agent}`) ?? []) for (const r of ctx.rowsOf.get(id) ?? []) failTokens += rowTokens(r)
+    // each failed round is its own agent id: a name shared by two rounds must not sum both agents
+    for (const q of failed) for (const r of ctx.rowsOf.get(q.id) ?? []) failTokens += rowTokens(r)
     let rulings = 0
     for (const a of (readJson(join(ctx.dir, 'crews', String(c.slug), 'answers.json')) as Json[] | null) ?? []) if (a?.at === 'qc') rulings++
     const ck = checks.get(c.slug)

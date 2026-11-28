@@ -44,6 +44,9 @@ function designerPrompt(extra) {
     '',
     'Return the plan blocks in two places: put the plan JSON in `planJson` and the plan markdown in `planMd`, and also fence both in `report`.',
     'The plan version is 4; give every crew a workType (one of feature, bugfix, migration, dependency, docs, refactor), and in an unattended run it is required.',
+    'When the plan adds plugin entry files or modules, validate before review: run `claude plugin validate <plugin dir>`, and a plain `node` import of each changed shared module on a scratch layout (a temp copy of the plugin, no build step); fix what either reports.',
+    'Every ux-on crew goal file gets a `## UX` section, and every file two crews of a stage touch gets an owner: write `Owner of <file>: <crew>` in plan.md.',
+    ...(F.fix === true && typeof F.fixErrors === 'string' && F.fixErrors.trim() ? ['', 'The plan-check refused the earlier plan with these errors. Fix each one in the plan you return:', F.fixErrors.trim()] : []),
     ...(extra ? ['', extra] : []),
   ].join('\n')
 }

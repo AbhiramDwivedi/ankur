@@ -350,16 +350,17 @@ function doneTasks(runs: WfRun[], slug: string, wt: string, target: string): str
   const names = agents.map((a) => memberTaskOf(a, slug))
   const newest = new Map<string, number>()
   names.forEach((n, i) => {
-    if (n !== undefined) newest.set(n, i)
+    const r = agents[i]?.result
+    if (n !== undefined && isObj(r) && typeof r.branch === 'string') newest.set(n, i)
   })
   for (const [i, a] of agents.entries()) {
     const r = a.result
     const name = names[i]
     if (name === undefined || !isObj(r) || typeof r.branch !== 'string') continue
     if (done.includes(name)) continue
-    // A result that isn't DONE counts only when it is the task's newest: an older hand-merged BLOCKED branch
-    // never makes done a task whose newer result stopped again on an unmerged branch.
-    if (r.marker !== 'DONE' && newest.get(name) !== i) continue
+    // Only a task's newest result decides: an older merged DONE or hand-merged BLOCKED branch never hides a newer
+    // result that stopped (or was never merged) on another branch.
+    if (newest.get(name) !== i) continue
     // A CHECKPOINT says the member stopped with work left, so its merged commits are partial and never make the task done.
     if (r.marker === 'CHECKPOINT' || (r.marker !== 'DONE' && ownCommits(r.branch) === 0)) continue
     if (run(wt, ['merge-base', '--is-ancestor', r.branch, crewBranch]).status === 0 || picked(r.branch)) done.push(name)

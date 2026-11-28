@@ -112,7 +112,9 @@ In the draft:
 - List in every crew its `needs` from the host, each with a probe from the schema; omit the key when none.
 - A whole-goal check goes in `goalCheck`; a release bump goes to an existing crew.
 - Every crew gets a `workType` (`feature`, `docs`, `refactor`, `bugfix`, `dependency`, `migration`) and a `process`: `solo` (one agent, no QC, `estAgents` 1), `lean` (one or two members, with required booleans `qc` and `red`, `estAgents` at most 3, or 2 without `qc`) or `full` (red record and QC engineer). The work type sets the least process: `bugfix` and `dependency` need at least `lean`, `migration` needs `full` and a stress test, and `bugfix` also requires `red` unless the crew is `full`.
-- Set `ux: true` only when the crew adds a new user-facing screen, page or flow.
+- Set `ux: true` only when the crew adds a new user-facing screen, page or flow. Write a `## UX` section in every ux-on crew goal file; plan-check refuses a ux-on crew whose goal file has none.
+- Give an owner to every file two crews of a stage touch (identical literal `owns` entries): write `Owner of <file>: <crew>` on its own line in plan.md. Crews may share files, so plan-check only warns when the line is missing.
+- When the plan adds plugin entry files or modules, validate before the review: run `claude plugin validate <plugin dir>`, and a plain `node` import of each changed shared module on a scratch layout (a temp copy of the plugin, no build step, no node_modules). Fix what either reports before you return the plan.
 - `acceptanceTestProved` is `true` only when you ran the test and it failed because the work isn't built (or only because an earlier stage hasn't merged); else `false`, with the reason in `plan.md`.
 
 `plan.md` gives per crew its high-impact paths; a stress test, yes only when its owned paths include auth or permission code, money or payment code, a stored data migration or schema change, code that deletes stored data, CI or deploy config, or a lockfile, or its work type is `migration`, or the client asks; and a resource slice with its ports as one of:

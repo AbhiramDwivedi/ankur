@@ -181,7 +181,7 @@ export function rolledEventsPath(dir: string, n: number): string {
 // One event-log line past the fields every line carries (v, ts, crew, agent). No field holds message, prompt or
 // report text (P8).
 export type AnkurEvent =
-  | { event: 'spawn'; crew: string; agent: string; agentId: string | null; type: string; model: string | null; effort: string | null; by: string }
+  | { event: 'spawn'; crew: string; role?: string; agent: string; agentId: string | null; type: string; model: string | null; effort: string | null; by: string }
   | { event: 'stall'; crew: string; agent: string; kind: 'agent' | 'idle-project-manager'; minutes: number }
   | { event: 'tag'; crew: string; agent: string; tag: 'QUESTION' | 'BLOCKED' | 'PROPOSAL' }
   | { event: 'report'; crew: string; agent: string; marker: ReportMarker | null }
@@ -574,8 +574,8 @@ export const ALLOWANCE_SPENT_EVENT = 'allowance-spent'
 export const PATCH_COMMAND = 'git diff --no-color --no-ext-diff --no-renames --src-prefix=a/ --dst-prefix=b/ <base>...<head> | git patch-id --stable'
 
 export const ALLOWANCE_REFUSAL = `${MARK} Refused: rework allowance spent:`
-export const NO_PASS_REASON = `${MARK} Not done yet: the crew's latest QC file this run is not a clean VERDICT: PASS. Send your final report only after a QC's PASS, or start your final message with BLOCKED: or CHECKPOINT:.`
-export const NO_HEAD_REASON = `${MARK} Not done yet: the crew's latest QC PASS has no "${HEAD_LINE.trim()}" and "${PATCH_LINE.trim()}" lines under ## Proof checked, so no hook can tell which head it ruled on. Start a fresh QC under the next unused name.`
+export const NO_PASS_REASON = `${MARK} Not done yet: the crew's latest QC file this run is not a clean VERDICT: PASS. Land needs a QC file whose first line (after blank lines or a heading) is "VERDICT: PASS", with "${HEAD_LINE}<sha>" and "${PATCH_LINE}<id>" lines under a "## Proof checked" heading, each 40 lowercase hex. Send your final report only after a QC's PASS, or start your final message with BLOCKED: or CHECKPOINT:.`
+export const NO_HEAD_REASON = `${MARK} Not done yet: the crew's latest QC file is a "VERDICT: PASS" but lacks a valid "${HEAD_LINE}<sha>" or "${PATCH_LINE}<id>" line under ## Proof checked (40 lowercase hex and nothing after it; a list dash, bold or backticks are fine), so no hook can tell which head it ruled on. Start a fresh QC under the next unused name.`
 export const HEAD_MOVED = `${MARK} Not done yet: the head moved:`
 export const EXAMINED_REASON = `${MARK} Not done yet: on this plan your final report also needs the sections "${EXAMINED}" (what the crew checked, each with its scope) and "${NOT_EXAMINED}" (what nobody checked, or None.), each a heading of its own.`
 export const MAIN_MODEL_REFUSAL = `${MARK} Refused: on a version 2 or later plan, every ankur:* Agent call from the main session sets \`model\`. Call Agent again with model set.`
@@ -657,13 +657,16 @@ const linesOf = (text: string) => text.replace(/^﻿/, '').replace(/\r/g, '').sp
 // the UNSCOPED lines under ## Findings. A section runs to the next line starting "## ".
 export function qcRuling(text: string): QcRuling {
   const lines = linesOf(text)
-  const marker = markerOf(lines.join('\n'))
+  // the verdict is the first line that is not blank or a heading; a fence or a quote there is no verdict
+  const first = unbannered(lines.join('\n')).split('\n').find(l => l.trim() !== '' && !/^#{1,6}\s/.test(l.trimStart()))?.trimStart() ?? ''
+  const marker = /^VERDICT: (PASS|FAIL) \| /.test(first) ? null : (['VERDICT: PASS', 'VERDICT: FAIL'] as const).find(m => first.startsWith(m)) ?? null
   const ruling: QcRuling = { verdict: marker === 'VERDICT: PASS' ? 'PASS' : marker === 'VERDICT: FAIL' ? 'FAIL' : undefined, head: undefined, patch: undefined, unscoped: 0 }
   let section: string | undefined
+  // the literal ("Head: ") may carry a list dash, bold and backticks around the value; the value is 40 lowercase hex and nothing follows
   const sha = (line: string, literal: string) => {
-    if (!line.startsWith(literal)) return undefined
-    const rest = trimEnd(line.slice(literal.length))
-    return SHA40.test(rest) ? rest : undefined
+    const label = literal.trim().replace(/:$/, '')
+    const m = new RegExp('^(?:- )?\\*{0,2}' + label + '(?:\\*\\*)?:(?:\\*\\*)? ?(`?)([0-9a-f]{40})\\1$').exec(trimEnd(line))
+    return m === null ? undefined : m[2]
   }
   for (const line of lines) {
     if (line.startsWith('## ')) {
@@ -971,7 +974,7 @@ export const DECISION_LOG_REFUSAL = `${MARK} Refused: decisions.md is written on
 // The shell rules every brief for an Agent in a worktree carries, word for word. skills/run/SKILL.md quotes the same text
 // (a test pins the two together).
 export const SHELL_RULES =
-  "Your worktree is guarded by Claude Code: it refuses a Bash command it can't show stays inside the worktree, and each refusal costs a turn. Write and change files with the Write and Edit tools, never a shell heredoc (`cat > f <<'EOF'`). Run one plain command per Bash call: no `&&`, `;`, `cd`, for-loop or `$VAR` argument; give paths in full. Put a script in a file and run that, rather than feeding python or node inline text that names git. Quote a git format that holds parentheses. Never cd into the main checkout. Never pass `git -C` with the main checkout's path; read main's state from inside the worktree with `git show main:<path>` or `git log main`. Run tests and builds in the foreground with an explicit Bash timeout up to 600000; never sleep-poll a background task or misuse Monitor (pass its documented arguments only). Start a long-running process (a server, a watcher) only with Bash `run_in_background`, never `&`, `nohup`, `setsid` or `disown`: those escape the session and nothing can stop them. Stop it with TaskStop when you are done. Stop only a process you started, by its pid; never pkill or kill by pattern."
+  "Your worktree is guarded by Claude Code: it refuses a Bash command it can't show stays inside the worktree, and each refusal costs a turn. Write and change files with the Write and Edit tools, never a shell heredoc (`cat > f <<'EOF'`). Run one plain command per Bash call: no `&&`, `;`, `cd`, for-loop or `$VAR` argument; give paths in full. Put a script in a file and run that, rather than feeding python or node inline text that names git. Quote a git format that holds parentheses. Never cd into the main checkout. Never pass `git -C` with the main checkout's path; read main's state from inside the worktree with `git show main:<path>` or `git log main`. Run tests and builds in the foreground with an explicit Bash timeout up to 600000; never sleep-poll a background task or misuse Monitor (pass its documented arguments only). Start a long-running process (a server, a watcher) only with Bash `run_in_background`, never `&`, `nohup`, `setsid` or `disown`: those escape the session and nothing can stop them. Stop it with TaskStop when you are done. Stop only a process you started, by its pid; never pkill or kill by pattern. Never skip or redirect git hooks: no `-c core.hookspath`, no `--no-verify`."
 
 // What the main session is told at every start, resume, clear and compact, so its first worktree brief carries the rules
 // and the refusal below does not fire.
@@ -2633,18 +2636,32 @@ export function registerGates(on: On): void {
     const raw = (result.result as { agentId?: unknown } | undefined)?.agentId
     const id = typeof raw === 'string' ? raw : undefined
     if (planCall !== undefined && id !== undefined) state.planDesigners.set(id, planCall)
-    if (caller?.crew === undefined && !startsProjectManager) return result
+    // an agent the main session starts directly: its brief's `Ankur-Crew:` line names a crew of the plan
+    let direct: { crew: string; role: string | undefined } | undefined
+    if (caller?.crew === undefined && !startsProjectManager && e.agentId === undefined && typeof e.prompt === 'string') {
+      const crewLine = /^Ankur-Crew:[ \t]*(\S+)[ \t]*\r?$/m.exec(e.prompt)?.[1]
+      if (crewLine !== undefined) {
+        const roleLine = /^Ankur-Role:[ \t]*(\S+)[ \t]*\r?$/m.exec(e.prompt)?.[1]
+        direct = await safely($, 'direct spawn crew', async () => {
+          const plan = await planOf($, state)
+          return plan !== undefined && plan.crews.some(c => isRecord(c) && c.slug === crewLine) ? { crew: crewLine, role: roleLine } : undefined
+        })
+      }
+    }
+    if (caller?.crew === undefined && !startsProjectManager && direct === undefined) return result
     // the name agent.spawn recorded, which the report file will carry
     const name = (id === undefined ? undefined : state.labels.get(id)) ?? (typeof e.name === 'string' && e.name !== '' ? e.name : id)
     const note = await safely($, 'report note', async () => {
       const dir = await rootOf($, state)
-      if (dir === undefined || id === undefined || name === undefined) return undefined
+      // an agent the main session started directly has no project manager above it, so no report file is written for it
+      if (dir === undefined || id === undefined || name === undefined || (caller?.crew === undefined && !startsProjectManager)) return undefined
       return reportNote(name, reportPath(dir, caller?.crew?.crew ?? name, name))
     })
     const agent = name ?? 'unknown'
     await logEvent($, state, {
       event: 'spawn',
-      crew: caller?.crew?.crew ?? agent,
+      crew: caller?.crew?.crew ?? direct?.crew ?? agent,
+      ...(direct?.role === undefined ? {} : { role: direct.role }),
       agent,
       agentId: id ?? null,
       type: typeof e.subagent_type === 'string' && e.subagent_type !== '' ? e.subagent_type : 'general-purpose',

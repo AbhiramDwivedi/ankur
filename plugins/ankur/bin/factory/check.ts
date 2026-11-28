@@ -380,7 +380,7 @@ function rerunFlakes(dir: string, slug: string, cwd: string, r: { exit: number; 
 const VALUE_FLAGS = new Set(['--import', '--require', '-r', '--loader', '--env-file', '--test-reporter', '--test-reporter-destination', '--test-name-pattern', '--test-skip-pattern', '--test-concurrency', '--test-timeout'])
 export function missingTestFiles(command: string, cwd: string, exists: (p: string) => boolean = existsSync, platform: string = process.platform): string[] {
   const out: string[] = []
-  // an MSYS-style /c/Users/x on Windows is C:/Users/x
+  // an MSYS-style drive path on Windows, /c/..., is C:/...
   const msys = (p: string): string => (platform === 'win32' ? p.replace(/^\/([a-zA-Z])(?=\/|$)/, (_m, d: string) => `${d.toUpperCase()}:`) : p)
   let base = flat(cwd).replace(/\/+$/, '')
   for (const raw of command.split(/&&|\|\||;|\||\r?\n/)) {
@@ -454,6 +454,12 @@ export function cmdCheck(f: Flags): Obj {
   if (exit === 0 && missing.length > 0) {
     exit = 1
     text += `\nacceptance test names a file that does not exist: ${missing.join(', ')}\n`
+  }
+  // A pipe ending in `grep -q` can close early; node's test runner then dies with an uncaught `write EPIPE` while the shell exits 0.
+  // Only that crash shape counts (all three lines), never the word EPIPE in a test title. Red keeps its exit as is.
+  if (expect === 'green' && exit === 0 && /^Error: write EPIPE\b/m.test(text) && /^\s*code: 'EPIPE'/m.test(text) && /^\s*syscall: 'write'/m.test(text)) {
+    exit = 1
+    text += `\nthe node test runner crashed with EPIPE (write to a closed pipe) though the shell exited 0; drop the early-exiting \`grep -q\` from the acceptance command so the runner can finish writing\n`
   }
   let tests: Obj | undefined = suiteOnly ? { mode: 'full', why: ['the acceptance test is the full suite'], files: [], commands: [command] } : undefined
   let slot: Obj | undefined = 'slot' in acc ? acc.slot : undefined

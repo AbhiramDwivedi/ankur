@@ -55,7 +55,7 @@ export const isFragment = (file: string, rulesDir = '.claude/rules'): boolean =>
 // ==== frontmatter ====
 
 type Field = { key: string; raw: string[]; value: string | string[] }
-type Front = { fields: Field[]; body: string[] }
+type Front = { fields: Field[]; body: string[]; stray?: string[] }
 
 // Splits a doc into its top-level YAML frontmatter fields and its body. A field is `key: scalar` or `key:` with `  - item` lines
 // (or any indented lines, kept raw). No frontmatter: fields is [].
@@ -65,6 +65,8 @@ export function splitFront(text: string): Front {
   const end = lines.findIndex((l, i) => i > 0 && l.trim() === '---')
   if (end < 0) return { fields: [], body: lines }
   const fields: Field[] = []
+  const stray: string[] = []
+  const listStray: { field: Field; line: string }[] = []
   for (const l of lines.slice(1, end)) {
     const m = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(l)
     if (m && !/^\s/.test(l)) {
@@ -72,12 +74,20 @@ export function splitFront(text: string): Front {
       continue
     }
     const last = fields[fields.length - 1]
-    if (last === undefined) continue
+    if (last === undefined) { if (l.trim() !== '') stray.push(l); continue }
     last.raw.push(l)
+    if (l.trim() !== '' && !/^\s+-\s+/.test(l)) listStray.push({ field: last, line: l })
     const item = /^\s+-\s+(.*)$/.exec(l)
     if (item) last.value = [...(Array.isArray(last.value) ? last.value : last.value === '' ? [] : [last.value]), item[1].trim()]
   }
-  return { fields, body: lines.slice(end + 1) }
+  // lines the merge would not carry: before the first key, or a non-item line under a list key (the merge rebuilds a list from its items)
+  for (const s of listStray) stray.push(s.line)
+  // an inline value with continuation lines (items under `key: a.ts`, or a wrapped scalar): the merge rebuilds a list from items only,
+  // and compares a scalar by its first line, so the inline text or the continuation would be lost
+  for (const f of fields) {
+    if (/^[A-Za-z_][\w-]*\s*:\s*\S/.test(f.raw[0]) && f.raw.slice(1).some((l) => /^\s+-\s+/.test(l))) stray.push(f.raw[0])
+  }
+  return { fields, body: lines.slice(end + 1), stray }
 }
 
 const same = (a: Field | undefined, b: Field | undefined): boolean => JSON.stringify(a?.value ?? null) === JSON.stringify(b?.value ?? null)
@@ -137,7 +147,7 @@ function headings(lines: string[]): { i: number; depth: number; title: string }[
 }
 
 // A fragment's sections: each heading of the fragment's shallowest depth starts one, which runs to the next such heading.
-// Text before the first heading is returned as `preamble` (the stitch ignores it, with a warning).
+// Text before the first heading is returned as `preamble` (the stitch refuses a fragment that has any).
 export function fragmentSections(body: string[]): { sections: Section[]; preamble: string[] } {
   const hs = headings(body)
   if (hs.length === 0) return { sections: [], preamble: trimEnd(body).filter((l) => l.trim() !== '') }
@@ -190,8 +200,10 @@ function intact(body: string[], s: Section): boolean {
 // crew wrote it (a removal: absent). When one is not, nothing is folded: `text` is the doc as it came, and `overlaps` names each
 // section that did not survive with the fragments involved (one or two, sorted).
 // The check inside the loop only serves to name the pair; the pass after the fold decides the outcome.
-export function stitchDoc(doc: string, fragments: Fragment[]): { text: string; warnings: string[]; overlaps: { section: string; fragments: string[] }[] } {
-  const warnings: string[] = []
+// `preambles` names each fragment that has text before its first heading: such text has no section to land in, so the result is
+// the doc as it came (nothing folded) and the caller refuses.
+export function stitchDoc(doc: string, fragments: Fragment[]): { text: string; preambles: string[]; overlaps: { section: string; fragments: string[] }[] } {
+  const preambles: string[] = []
   const front = splitFront(doc)
   let fields = front.fields
   let body = front.body
@@ -206,7 +218,7 @@ export function stitchDoc(doc: string, fragments: Fragment[]): { text: string; w
       fields = cur === undefined ? [...fields, merged] : fields.map((x) => (x.key === fl.key ? merged : x))
     }
     const { sections, preamble } = fragmentSections(fr.body)
-    if (preamble.length) warnings.push(`${f.name}: text before the first heading is ignored`)
+    if (preamble.length || (fr.stray?.length ?? 0) > 0) preambles.push(f.name)
     for (const s of sections) {
       body = applySection(body, s)
       for (const prior of applied.filter((x) => x.name !== f.name && !x.lost && !intact(body, x.s))) {
@@ -218,13 +230,13 @@ export function stitchDoc(doc: string, fragments: Fragment[]): { text: string; w
   }
   // the check that decides: after the whole fold every section of every fragment, a fragment's own included, is in the body as written
   for (const x of applied.filter((y) => !y.lost && !intact(body, y.s))) overlaps.push({ section: x.s.title, fragments: [x.name] })
-  if (overlaps.length > 0) return { text: doc, warnings, overlaps }
-  return { text: `${trimEnd(lf(joinFront(fields, body)).split('\n')).join('\n')}\n`, warnings, overlaps }
+  if (overlaps.length > 0 || preambles.length > 0) return { text: doc, preambles, overlaps }
+  return { text: `${trimEnd(lf(joinFront(fields, body)).split('\n')).join('\n')}\n`, preambles, overlaps }
 }
 
 // ==== the repo step ====
 
-export type StitchResult = { stitched: { doc: string; fragments: string[] }[]; removed: string[]; warnings: string[]; overlaps: { doc: string; section: string; fragments: string[] }[] }
+export type StitchResult = { stitched: { doc: string; fragments: string[] }[]; removed: string[]; preambles: { doc: string; fragment: string }[]; overlaps: { doc: string; section: string; fragments: string[] }[] }
 
 // Stitches every fragment among `files` (repo-relative, posix) under `root` into its doc and deletes the fragment. A fragment
 // whose doc does not exist creates it. Writes only when `write`; returns what it did (or would do), sorted.
@@ -236,13 +248,13 @@ export function stitchTree(root: string, files: string[], opts: { rulesDir?: str
     if (doc === undefined) continue
     byDoc.set(doc, [...(byDoc.get(doc) ?? []), f])
   }
-  const out: StitchResult = { stitched: [], removed: [], warnings: [], overlaps: [] }
+  const out: StitchResult = { stitched: [], removed: [], preambles: [], overlaps: [] }
   for (const [doc, frags] of [...byDoc.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
     const abs = (p: string): string => path.join(root, ...p.split('/'))
     const cur = existsSync(abs(doc)) ? readFileSync(abs(doc), 'utf8') : ''
     const r = stitchDoc(cur, frags.map((f) => ({ name: f, text: readFileSync(abs(f), 'utf8') })))
-    out.warnings.push(...r.warnings.map((w) => `${doc}: ${w}`))
-    if (r.overlaps.length > 0) {
+    out.preambles.push(...r.preambles.map((fragment) => ({ doc, fragment })))
+    if (r.overlaps.length > 0 || r.preambles.length > 0) {
       out.overlaps.push(...r.overlaps.map((o) => ({ doc, ...o })))
       continue
     }

@@ -293,6 +293,46 @@ export function startedDirectly(name: unknown, slugs: string[]): boolean {
   return !HOTFIX_NAME.test(name) && !slugs.some((s) => name.startsWith(`${s}-`))
 }
 
+const BRIEF_BYTES = 262144
+// The text of an agent transcript's first user message (its brief), '' when none can be read.
+function briefOf(file: string): string {
+  let fd: number
+  try {
+    fd = openSync(file, 'r')
+  } catch {
+    return ''
+  }
+  try {
+    const buf = Buffer.alloc(Math.min(fstatSync(fd).size, BRIEF_BYTES))
+    const n = readSync(fd, buf, 0, buf.length, 0)
+    for (const l of buf.subarray(0, n).toString('utf8').split('\n')) {
+      let r: unknown
+      try {
+        r = JSON.parse(l)
+      } catch {
+        continue
+      }
+      if (!isObj(r) || r.type !== 'user' || !isObj(r.message)) continue
+      const c = r.message.content
+      if (typeof c === 'string') return c
+      return Array.isArray(c) ? c.map((b) => (isObj(b) && typeof b.text === 'string' ? b.text : '')).join('\n') : ''
+    }
+    return ''
+  } catch {
+    return ''
+  } finally {
+    closeSync(fd)
+  }
+}
+
+/** Pure: the crew a brief names, by an `Ankur-Crew: <slug>` line, else a `reports/<slug>/` path, when the plan has it. */
+export function crewOfBrief(brief: string, slugs: string[]): string | undefined {
+  const line = /^Ankur-Crew:[ \t]*(\S+)[ \t]*\r?$/m.exec(brief)?.[1]
+  if (line !== undefined) return slugs.includes(line) ? line : undefined
+  for (const m of brief.matchAll(/\/reports\/([A-Za-z0-9._-]+)\//g)) if (slugs.includes(m[1])) return m[1]
+  return undefined
+}
+
 /** Maps each row to a crew slug, `main` or `unattributed`, in the order of contract-025 section 4. */
 export function attributor(dir: string, repo: string, slugs: string[], platform: NodeJS.Platform): (row: Obj) => string {
   const plan = new Set(slugs)
@@ -326,6 +366,11 @@ export function attributor(dir: string, repo: string, slugs: string[], platform:
     }
     const s = slugOfLabel(meta?.description)
     if (s !== undefined) return s
+    // the brief's Ankur-Crew line or a reports/<crew>/ path
+    if (a !== undefined) {
+      const b = crewOfBrief(briefOf(a.path), slugs)
+      if (b !== undefined) return b
+    }
     // no rule placed the agent: a named agent of no crew is one the PM started directly (F-19)
     return startedDirectly(nameOfMeta(meta) ?? row.agent, slugs) ? MAIN : UNATTRIBUTED
   }

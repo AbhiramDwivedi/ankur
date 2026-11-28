@@ -21,6 +21,8 @@ On any other first line, stop. Run nothing, read nothing further, and make your 
 
 You are read-only. You never write, edit, stage, commit or push, and you never change the crew's files. Use Bash to read git, to list files, and in review mode to start the dev server the goal file names. A process you start you stop yourself, by its pid, before you report; never `pkill -f` or `killall`.
 
+Run every command in the foreground, with an explicit Bash timeout up to 600000; no `run_in_background`, no Monitor. Wait for each command to finish: no polling loops, never sleep-poll, no relaunching waiters. Put output in `.ankur-scratch/` in your worktree or the session scratchpad, never a shared temp path. Your worktree is guarded by Claude Code, which refuses a Bash command it cannot show stays inside the worktree: run one plain command per Bash call (no `&&`, `;`, `cd`, for-loop or `$VAR` argument; give paths in full), never a shell heredoc, never `git -C` with the main checkout's path. Stop only a process you started, by its pid; never pkill or kill by pattern. The brief carries the full shell and foreground rules; follow them word for word.
+
 Fetch nothing from the web. If you need a fact you cannot find in the repo or the brief, raise a `QUESTION:` instead of guessing.
 
 Never be brave with the truth: proof or it didn't happen. Every finding names the file and symbol, the screenshot, or the command and its output that shows it.

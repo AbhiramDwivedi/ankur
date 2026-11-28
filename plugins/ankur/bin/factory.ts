@@ -29,6 +29,7 @@ const CORE_COMMANDS: Record<string, Cmd> = {
   'knowledge-migrate': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdKnowledgeMigrate(f),
   'migrate-names': async (f) => (await import('./factory/runs.ts')).cmdMigrateNames(f),
   'rule-quote': async (f) => (await import('./factory/rule-quote.ts')).cmdRuleQuote(f),
+  'brief-rules': async (f) => (await import('./factory/brief-rules.ts')).cmdBriefRules(f),
   'rules-index': async (f) => (await import('./factory/knowledge-cmds.ts')).cmdRulesIndex(f),
   stitch: async (f) => (await import('./factory/knowledge-cmds.ts')).cmdStitch(f),
   consolidate: async (f) => (await import('./factory/consolidate.ts')).cmdConsolidate(f),
@@ -200,7 +201,9 @@ if (isMain) {
     if (admitted) body.admittedFirst = admitted
     // persona-install refuses with one stderr line too (ankur:init shows it), besides the JSON line every command prints
     if (argv[0] === 'persona-install' && code !== 0) process.stderr.write(`persona-install: ${typeof body.error === 'string' ? body.error : JSON.stringify(body)}\n`.replace(/\n(?=.)/g, ' '))
-    process.stdout.write(JSON.stringify(body) + '\n' + (on ? statusLine(body) + '\n' : ''))
+    // brief-rules prints its block as plain text, to paste into a brief; its refusals stay JSON
+    if (argv[0] === 'brief-rules' && code === 0 && typeof body.text === 'string') process.stdout.write(body.text)
+    else process.stdout.write(JSON.stringify(body) + '\n' + (on ? statusLine(body) + '\n' : ''))
     process.exitCode = code
   }
 }

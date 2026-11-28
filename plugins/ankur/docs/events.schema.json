@@ -248,6 +248,7 @@
           "model": { "description": "The model the call asked for, or null.", "type": ["string", "null"] },
           "effort": { "description": "The effort the call asked for, or null.", "type": ["string", "null"] },
           "persona": { "description": "The persona the stage.js member ran as, or null. Absent on lines written before personas were recorded.", "type": ["string", "null"] },
+          "role": { "description": "The Ankur-Role line of the brief of an agent the main session started directly for a plan crew (the crew is then its Ankur-Crew line). Absent otherwise.", "type": "string", "minLength": 1 },
           "by": { "description": "main for the PM, else the calling agent's spawn name; factory for a workflow crew factory.ts started, workflow:<run id> for an agent a stage.js run started.", "type": "string", "minLength": 1 }
         }
       }

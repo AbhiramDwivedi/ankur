@@ -280,7 +280,7 @@ export function cmdLand(f: Flags): Obj {
     const files = reportsOf(dir, slug).map((r) => (/^qc(-\d+)?\.md$/.test(r.name) ? { ...r, name: `${slug}-${r.name}` } : r))
     const newest = latestQc(slug, files, since)
     ruling = newest === undefined ? undefined : qcRuling(newest.text)
-    if (ruling === undefined || ruling.verdict !== 'PASS') throw no('qc: the newest QC file is not a PASS')
+    if (ruling === undefined || ruling.verdict !== 'PASS') throw no(`qc: ${NO_PASS_REASON}`)
     fails = qcFails(slug, countedQc(dir, slug, files), since)
   }
   const r = mergeCrew(f, dir, repo, settings.target, crew, ruling, [], fails, { process, qc, red })

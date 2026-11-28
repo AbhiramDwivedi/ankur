@@ -41,7 +41,7 @@ const DIFF = "Change only the lines your task needs. Extract logic the change wo
 const DEBUG = "On a bug, reproduce it first with a test that fails, then fix the cause. A guard that hides an unexpected null, empty or error value is a fix only when your report says why the value occurs."
 // Claude Code's own worktree guard (not a plugin) refuses a Bash command it can't show stays in the worktree; most of a
 // stage's refusals were these shapes (heredoc writes, compounds, cd, $VAR arguments, inline scripts naming git)
-const SHELL = "Your worktree is guarded by Claude Code: it refuses a Bash command it can't show stays inside the worktree, and each refusal costs a turn. Write and change files with the Write and Edit tools, never a shell heredoc (`cat > f <<'EOF'`). Run one plain command per Bash call: no `&&`, `;`, `cd`, for-loop or `$VAR` argument; give paths in full. Put a script in a file and run that, rather than feeding python or node inline text that names git. Quote a git format that holds parentheses. Never cd into the main checkout. Never pass `git -C` with the main checkout's path; read main's state from inside the worktree with `git show main:<path>` or `git log main`. Run tests and builds in the foreground with an explicit Bash timeout up to 600000; never sleep-poll a background task or misuse Monitor (pass its documented arguments only). Start a long-running process (a server, a watcher) only with Bash `run_in_background`, never `&`, `nohup`, `setsid` or `disown`: those escape the session and nothing can stop them. Stop it with TaskStop when you are done. Stop only a process you started, by its pid; never pkill or kill by pattern."
+const SHELL = "Your worktree is guarded by Claude Code: it refuses a Bash command it can't show stays inside the worktree, and each refusal costs a turn. Write and change files with the Write and Edit tools, never a shell heredoc (`cat > f <<'EOF'`). Run one plain command per Bash call: no `&&`, `;`, `cd`, for-loop or `$VAR` argument; give paths in full. Put a script in a file and run that, rather than feeding python or node inline text that names git. Quote a git format that holds parentheses. Never cd into the main checkout. Never pass `git -C` with the main checkout's path; read main's state from inside the worktree with `git show main:<path>` or `git log main`. Run tests and builds in the foreground with an explicit Bash timeout up to 600000; never sleep-poll a background task or misuse Monitor (pass its documented arguments only). Start a long-running process (a server, a watcher) only with Bash `run_in_background`, never `&`, `nohup`, `setsid` or `disown`: those escape the session and nothing can stop them. Stop it with TaskStop when you are done. Stop only a process you started, by its pid; never pkill or kill by pattern. Never skip or redirect git hooks: no `-c core.hookspath`, no `--no-verify`."
 const PROOF = [
   'Every member report carries proof: the command and its output, before and after numbers, or a walk through the real flow. These are not evidence:',
   '',
@@ -1016,6 +1016,7 @@ function memberPrompt(crew, role, parts) {
   const dl = directionLines(crew)
   if (dl.length) lines.push(...dl, '')
   lines.push(`Acceptance test: ${acceptanceOf(e)}`, '')
+  if (role === 'builder' && e.workType === 'refactor') lines.push('This is a move or refactor crew: behaviour must stay the same, and any behaviour change is a QUESTION, never part of the diff.', '')
   lines.push(...parts.body)
   if (role === 'builder') lines.push('', ...docsLines(crew))
   lines.push(
@@ -2089,7 +2090,8 @@ async function fixFindings(crew, what, header, findingsText, wholeDetail, isDefe
     await fixBuilder(crew, what, wholeDetail, 'builder', '', undefined, true)
     return testsBackstop(crew, what)
   }
-  await fixBuilder(crew, defects.length ? `${what}, regression cases first` : what, regressionDetail(crew, header, mine, defects), 'tester')
+  // the tester half has its own task name, so no two members of a round share one (resume keys done and prior by name)
+  await fixBuilder(crew, defects.length ? `${what}, regression cases first` : `${what}, tester files`, regressionDetail(crew, header, mine, defects), 'tester')
   // a finding that names a tester file and a code file also goes to the builder, for its code half
   const rest = all.filter((f) => !mine.includes(f) || namesCode(f, tf))
   if (!rest.length) return
@@ -2211,6 +2213,8 @@ function validateTasks(tasks, owns, ownTests = null, guarded = []) {
       if (hit) errors.push(`task ${t.name} has persona null, but persona ${hit.n} covers its file ${hit.f}; give the task that persona (split the task when it also changes files of another persona), whatever its noPersona reason says`)
       else if (typeof t.noPersona !== 'string' || t.noPersona.trim() === '') errors.push(`task ${t.name} has persona null and no noPersona reason; name the persona that fits, or set noPersona to why no persona covers its files`)
     }
+    // a member Check runs only the test files that hold the named titles; the full suite stays at the merge gate
+    if (typeof t.brief === 'string' && /`(?:claude plugin test(?:\s+(?!\S*tests?(?:\/|`))\S+)?|npm (?:run )?test)`/.test(t.brief)) errors.push(`task ${t.name} has a Check that runs the whole suite; a member Check runs only the test files that hold the named titles, and the full suite stays at the merge gate`)
     for (const f of t.files || []) {
       if (typeof f !== 'string' || f === '' || f.endsWith('/') || /\\|\/\/|^\/|^\.\//.test(f) || f.split('/').some((seg) => seg === '.' || seg === '..')) errors.push(`task ${t.name} lists file ${f}, which is not a canonical repo-relative path; use forward slashes, no leading / or ./, no // and no . or .. segments`)
       else if (/[*?[{]/.test(f)) errors.push(`task ${t.name} lists file ${f}, which is a glob; list exact file paths`)
@@ -3155,19 +3159,28 @@ const firstLineOf = (text) => (unbannered(text).split('\n').find((l) => l.trim()
 const stopTagOf = (first) => ['QUESTION', 'BLOCKED', 'PROPOSAL'].find((t) => first.startsWith(`${t}:`))
 const replyOf = (v) => unbannered(typeof v === 'string' ? v : '').replace(/\r/g, '').trim()
 
+// the PM's standing rulings, shared by the direction prompt, the review prompt and the fix detail: the approved scope and
+// every answer the crew has had at any step (labels and wording rulings come from build and QC steps too), except one given at a UX step that is not
+// this one (own): an answer at ux-direction or ux-review reaches only its own step, never the other step or a fix member
+function uxRulings(e, own) {
+  const answers = (e.answers || []).filter((a) => !['ux-direction', 'ux-review'].includes(a.at) || a.at === own).map((a) => `- ${a.text}`)
+  const lines = ['Standing rulings (the approved scope and the PM answers at every step):', `Approved scope: ${scopeOf(e)}`]
+  if (answers.length) lines.push('Answers to questions, from every step:', ...answers)
+  return lines
+}
+
 function uxDirectionPrompt(crew) {
   const e = crew.e
-  const answers = (e.answers || []).filter((a) => a.at === 'ux-direction').map((a) => `- ${a.text}`)
   const lines = [
     `UX direction: crew ${crew.slug}`,
     `Goal file: ${e.goalFile}`,
     `Crew worktree: ${e.worktree}`,
-    `Approved scope: ${scopeOf(e)}`,
     `Architecture doc: ${e.architecture}`,
     `ADRs: ${(e.adrs || []).join(', ') || 'none'}`,
+    '',
+    ...uxRulings(e, 'ux-direction'),
   ]
-  if (answers.length) lines.push('', 'Answers to your earlier questions:', ...answers)
-  lines.push('', REFUSAL, PKILL)
+  lines.push('', REFUSAL, PKILL, SHELL, FOREGROUND)
   return lines.join('\n')
 }
 
@@ -3237,10 +3250,8 @@ function uxReviewPrompt(crew, previous) {
     clip(crew.greenOut || 'none'),
   ]
   if (previous) lines.push('', `The previous review (report ${previous.label}) asked for rework:`, previous.text)
-  // an answer to a QUESTION: stop at ux-review reaches the next reviewer, as uxDirectionPrompt passes ux-direction answers
-  const answers = (e.answers || []).filter((a) => a.at === 'ux-review').map((a) => `- ${a.text}`)
-  if (answers.length) lines.push('', 'Answers to your earlier questions:', ...answers)
-  lines.push('', REFUSAL, PKILL)
+  lines.push('', ...uxRulings(e, 'ux-review'))
+  lines.push('', REFUSAL, PKILL, SHELL, FOREGROUND)
   return lines.join('\n')
 }
 
@@ -3280,7 +3291,14 @@ async function uxReview(crew) {
     if (rv.verdict === 'PASS') return
     crew.fails++
     if (spendOf(crew) > F.reworkAllowance) throw allowanceStop(crew, 'ux-review', rv.text)
-    const header = 'The UX review asked for rework, with these findings:'
+    // the header reaches the builder and the tester alike (fixFindings), so the live reproduction and the rulings ride in it
+    const header = [
+      'The UX review asked for rework. Before you change anything, reproduce each finding live at the size the review names (a tmux capture of the screen at that width and height, or the review\'s own screenshot method). Reproduce it again the same way after the fix, and put the before and the after captures in your proof.',
+      '',
+      ...uxRulings(crew.e, null),
+      '',
+      'The findings:',
+    ].join('\n')
     const findings = rv.findings.length ? rv.findings.map((f) => `- ${f}`).join('\n') : rv.text
     await fixFindings(crew, 'UX findings', header, findings, `${header}\n${findings}`)
     await green(crew)

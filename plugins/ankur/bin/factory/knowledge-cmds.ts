@@ -334,7 +334,8 @@ export function sharedDocOf(file: string, cfg: KCfg, arch: string): string | und
 
 // `stitch [--repo R] [--dry]`: folds every committed doc fragment in the checkout into its shared doc, deletes the fragments and commits
 // the result as one `docs: stitch doc fragments` commit (no commit when there is no fragment). --dry reports and writes
-// nothing. Refuses when a stitched doc or tracked fragment has uncommitted changes, so the commit holds only the stitch.
+// nothing and reports `lint: []`. Exits 1 with `preambles` (nothing written) when a fragment has text before its first heading. The
+// output also lists `reconcile` (docs two or more fragments changed) and `lint` (knowledge-lint failures the stitch caused, on the stitched docs). Refuses when a stitched doc or tracked fragment has uncommitted changes, so the commit holds only the stitch.
 export function cmdStitch(f: Flags): Obj {
   const repo = repoOf(f)
   const cfg = knowledgeCfgOf(repo)
@@ -349,14 +350,24 @@ export function cmdStitch(f: Flags): Obj {
     if (body.overlaps.length > 0) throw refuse({ ...body, ok: false, why: 'a fragment section is not in the result as its crew wrote it; nothing of that doc was folded' })
     return body
   }
-  if (f.dry === true || touched.length === 0) return result({ ok: true, dry: f.dry === true, ...plan, committed: false })
+  // text before a fragment's first heading has no section to land in: refuse before any write, so every fragment and doc stays as it was
+  if (plan.preambles.length > 0) throw refuse({ ok: false, dry: f.dry === true, ...plan, lint: [], reconcile: [], committed: false, why: 'these fragments have text before their first heading, which a stitch would drop: put it under a heading or remove it, then stitch again' })
+  // the docs two or more fragments changed: the PM re-checks each for a claim a later fragment contradicts
+  const reconcile = plan.stitched.filter((s) => s.fragments.length >= 2).map((s) => ({ doc: s.doc, fragments: [...s.fragments].sort() }))
+  // --dry writes nothing, so there is no stitched doc to lint: it reports `lint: []` and the real run reports the findings
+  if (f.dry === true || touched.length === 0) return result({ ok: true, dry: f.dry === true, ...plan, reconcile, lint: [], committed: false })
   const dirty = run(repo, ['-c', 'core.quotepath=off', 'status', '--porcelain', '--', ...touched])
   const unclean = dirty.out.split('\n').filter((l) => l.trim() !== '' && !l.startsWith('?? '))
   if (unclean.length > 0) throw refuse({ ok: false, why: 'commit or discard the changes to these docs and fragments first', dirty: unclean })
+  const before = run(repo, ['rev-parse', 'HEAD']).out
   const done = stitchTree(repo, frags, { rulesDir: cfg.rulesDir, write: true })
   const add = run(repo, ['add', '-A', '--', ...touched])
   if (add.status !== 0) throw usage(`git add failed: ${add.err}`)
   const c = run(repo, ['commit', '-m', 'docs: stitch doc fragments', '--', ...touched])
   if (c.status !== 0) throw usage(`git commit failed: ${c.err || c.out}`)
-  return result({ ok: true, dry: false, ...done, committed: true, head: run(repo, ['rev-parse', 'HEAD']).out })
+  // knowledge-lint failures on the stitched docs only; the commit has happened and the exit stays 0, the PM fixes or delegates each path
+  const stitchedDocs = new Set(done.stitched.map((s) => s.doc))
+  // against the head before the stitch, so only a failure the stitch caused is listed, never one the doc already had
+  const lint = (cmdKnowledgeLint({ repo, base: before }).failures as Finding[]).filter((x) => x.new && stitchedDocs.has(x.path)).map((x) => ({ check: x.check, path: x.path, message: x.message }))
+  return result({ ok: true, dry: false, ...done, reconcile, lint, committed: true, head: run(repo, ['rev-parse', 'HEAD']).out })
 }

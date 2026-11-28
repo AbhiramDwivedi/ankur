@@ -214,13 +214,19 @@ export function analyze(dir: string): Json {
     const cat = { agentWorkMs: 0, heavyWaitMs: 0, testRunMs: 0, qcMs: 0, conflictMs: 0, waitRulingMs: 0, restartLagMs: 0, idleMs: 0, noUsageMs: 0, stampLagMs: 0, noSessionMs: 0 }
     const qcRounds: Json[] = []
     const ivs: Iv[] = []
-    for (const a of ags) {
+    // QC rounds of one crew can share one usage name under several agent ids (no spawn events); only the report files
+    // `<name>.md`, `<name>-2.md`, ... tell them apart, so the k-th agent of a name, by first use, is round k+1
+    const qcSeen = new Map<string, number>()
+    for (const a of [...ags].sort((x, y) => x.span[0] - y.span[0])) {
       const [s, e] = a.span
       const name = String(a.agent)
       if (/-qc(-\d+)?$/.test(name)) {
         ivs.push([s, e, 'qc'])
-        const v = existsSync(join(dir, 'reports', slug, `${name}.md`)) ? /VERDICT:\s*(\w+)/.exec(readFileSync(join(dir, 'reports', slug, `${name}.md`), 'utf8'))?.[1] ?? null : null
-        qcRounds.push({ agent: name, verdict: v, ms: e - s, startTs: new Date(s).toISOString() })
+        const k = qcSeen.get(name) ?? 0
+        qcSeen.set(name, k + 1)
+        const rep = join(dir, 'reports', slug, k === 0 || /-qc-\d+$/.test(name) ? `${name}.md` : `${name}-${k + 1}.md`)
+        const v = existsSync(rep) ? /VERDICT:\s*(\w+)/.exec(readFileSync(rep, 'utf8'))?.[1] ?? null : null
+        qcRounds.push({ agent: name, id: a.id, verdict: v, ms: e - s, startTs: new Date(s).toISOString() })
       } else if (/-resolver(-\d+)?$/.test(name)) ivs.push([s, e, 'conflict'])
       else {
         const h = /-runner(-\d+)?$/.test(name) ? heavyOf(join(dir, 'reports', slug, `${name}.md`)) : null

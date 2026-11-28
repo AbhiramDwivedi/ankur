@@ -340,11 +340,11 @@
         "qc-at\\.sh > .{0,200}run_in_background\\\\?\":true",
         "for i in \\$\\(seq 1 \\d+\\); do grep -q [^;]*; sleep \\d+; done"
       ],
-      "fix": "qcPrompt carries the member foreground line and agents/qc-engineer.md says the same.",
+      "fix": "qcPrompt carries the member foreground line and agents/qc-engineer.md says the same; uxDirectionPrompt and uxReviewPrompt and agents/ux-engineer.md carry the FOREGROUND and SHELL rules as well.",
       "fixedBy": {
-        "finding": "361b2630-4123-451d-98e0-e36681a3c70c/F-72",
-        "date": "2026-11-03",
-        "version": "0.19.0"
+        "finding": "c72b6372-cf4a-4271-a59e-ec29fd214a9e/F-2",
+        "date": "2026-11-27",
+        "version": "0.45.1"
       }
     },
     {
@@ -423,6 +423,83 @@
         "finding": "6e95264e-96a9-486a-9179-671d5920b67e/F-12",
         "date": "2026-11-07",
         "version": "0.19.0"
+      }
+    },
+    {
+      "id": "plugin-wiring-unvalidated",
+      "kind": "missing hook or gate",
+      "title": "A plan that added plugin entry files or modules was not validated against the real plugin loader, so design changes and re-recorded red checks followed",
+      "anchor": "module",
+      "patterns": [
+        "design change( 2)?: the floor runs inside the one hooks module",
+        "validate refuses a second modules entry"
+      ],
+      "fix": "The design engineer validates a plan that adds plugin entry files or modules (claude plugin validate, a plain-node import) before review (F-6; the same fix covers F-4, F-7 and F-23).",
+      "fixedBy": {
+        "finding": "c72b6372-cf4a-4271-a59e-ec29fd214a9e/F-6",
+        "date": "2026-11-27",
+        "version": "0.45.1"
+      }
+    },
+    {
+      "id": "ux-fix-no-live-repro",
+      "kind": "misleading prompt",
+      "title": "A UX fix round did not reproduce the finding live at the reviewed size, so the review loop spent its rework allowance",
+      "anchor": "rework allowance spent on UX reworks",
+      "patterns": [
+        "re-planned: floor-look from qc-1 \\| rework allowance spent on UX reworks"
+      ],
+      "fix": "The UX fix brief requires the builder to reproduce each finding live at the reviewer's size before and after the fix (F-10; also F-21).",
+      "fixedBy": {
+        "finding": "c72b6372-cf4a-4271-a59e-ec29fd214a9e/F-10",
+        "date": "2026-11-27",
+        "version": "0.45.1"
+      }
+    },
+    {
+      "id": "member-check-whole-suite",
+      "kind": "friction",
+      "title": "A member Check ran the whole plugin suite and grepped the named titles, about five minutes a run",
+      "anchor": "claude plugin test plugins/ankur",
+      "patterns": [
+        "claude plugin test plugins/ankur 2>&1 \\| grep"
+      ],
+      "fix": "A member Check runs only the files holding the named titles, and split sends back a whole-suite Check (F-12).",
+      "fixedBy": {
+        "finding": "c72b6372-cf4a-4271-a59e-ec29fd214a9e/F-12",
+        "date": "2026-11-27",
+        "version": "0.45.1"
+      }
+    },
+    {
+      "id": "ux-section-missing",
+      "kind": "missing hook or gate",
+      "title": "A crew with ux on had no ## UX section in its goal file, so it stopped at start for a PM answer",
+      "anchor": "no ## UX section",
+      "patterns": [
+        "QUESTION answered \\(no ## UX section\\)"
+      ],
+      "fix": "The design engineer writes ## UX into every ux-on goal file; plan-check refuses ux without it and warns on a shared file with no owner (F-8; also F-17).",
+      "fixedBy": {
+        "finding": "c72b6372-cf4a-4271-a59e-ec29fd214a9e/F-8",
+        "date": "2026-11-27",
+        "version": "0.45.1"
+      }
+    },
+    {
+      "id": "fix-step-cached-unmerged",
+      "kind": "mechanical bug",
+      "title": "A fix step cached as done whose branch never merged was skipped on resume, so the next review re-found the same defects",
+      "anchor": "cached",
+      "patterns": [
+        "fix step was cached as done",
+        "cached fix step whose branch never merged"
+      ],
+      "fix": "On resume a newer unmerged fix stop is not hidden by an older finished task of the same name, and the two halves of a fix round get their own names (F-11; also F-16).",
+      "fixedBy": {
+        "finding": "c72b6372-cf4a-4271-a59e-ec29fd214a9e/F-11",
+        "date": "2026-11-28",
+        "version": "0.45.1"
       }
     }
   ]

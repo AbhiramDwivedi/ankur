@@ -58,7 +58,7 @@ export function cmdPlanArgs(f: Flags): Obj {
   const repo = repoOf(f)
   const brief = readText(need(f, 'brief-file'))
   const fix = str(f, 'fix')
-  if (fix !== undefined) readText(fix)
+  const fixErrors = fix !== undefined ? readText(fix) : undefined
   worthGate(dir)
   excludeScratch(repo)
   const cfg = configOf(repo)
@@ -70,6 +70,8 @@ export function cmdPlanArgs(f: Flags): Obj {
       maxParallelCrews: intOr(cfg.maxParallelCrews, 4, 1), reworkAllowance: intOr(cfg.reworkAllowance, 1, 0), roles: rolesWithTypes(PLUGIN, [], cfg.roles),
       scriptPath: scriptPathAuto(PLUGIN, 'plan.js', str(f, 'scripts-dir'), repo, dir), personas: buildPersonas(repo, dir).personas, workTypes: profilesOf(cfg).profiles,
       ...(existsSync(`${repo}/${featureMap}`) ? { featureMap } : {}),
+      // --fix: the plan-check errors the design engineer must fix; the workflow reads `fix` for its labels and `fixErrors` for the prompt
+      ...(fixErrors !== undefined ? { fix: true, fixErrors } : {}),
       ...knowledgeArgsOf(repo, false),
     },
     brief,
@@ -367,6 +369,7 @@ export function cmdPlanCheck(f: Flags): Obj {
     if (typeof c.ux === 'boolean' && typeof c.slug === 'string' && SLUG.test(c.slug)) {
       const gf = `${dirOf(f)}/goals/${c.slug}.md`
       const uxSection = existsSync(gf) ? goalSections(readFileSync(gf, 'utf8')).UX : undefined
+      if (c.ux === true && existsSync(gf) && (uxSection === undefined || uxSection === '')) errors.push(`${s}: ux is true but the goal file ${gf} has no ## UX section; the design engineer writes one into every ux-on crew goal file`)
       if (uxSection !== undefined && uxSection !== '') {
         if (c.ux === false && !uxSaysOff(uxSection)) errors.push(`${s}: plan.json ux is false but the goal file's ## UX section asks for UX; make the section say "none" or set ux true`)
         if (c.ux === true && uxSaysOff(uxSection)) errors.push(`${s}: plan.json ux is true but the goal file's ## UX section says UX is off; change one of them`)
@@ -379,6 +382,7 @@ export function cmdPlanCheck(f: Flags): Obj {
   for (const e of profiles.errors) addOnce(e)
   if (errors.length > 0) throw refuse({ ok: false, errors })
   const warnings = stageWarnings(dirOf(f), crews)
+  warnings.push(...sharedFileWarnings(dirOf(f), crews))
   // a bare-directory owns entry (`dir/`) is read as `dir/**` by owns-check and the stage split; say so, so a plan that meant it is explicit
   for (const c of crews) for (const g of Array.isArray(c.owns) ? c.owns : []) if (typeof g === 'string' && g.endsWith('/')) warnings.push(`crew ${name(c)}: owns entry ${g} is a bare directory, read as ${g}**; write ${g}** to say so`)
   // 0.31.0 item 1: the green check runs the tests the diff reaches, and the full suite runs before merge only when the selection
@@ -395,6 +399,41 @@ export function cmdPlanCheck(f: Flags): Obj {
     for (const [p, s] of owners) if (s.size * 2 > gc.length) warnings.push(`hotspot: ${p} is owned by ${s.size} of ${gc.length} crews${g === RUN_GOAL ? '' : ` of goal ${g}`}; propose a refactor goal first or one crew that owns it instead of serial merges`)
   }
   return { ok: true, unproved: crews.filter((c) => c.acceptanceTestProved === false).map(name), warnings }
+}
+
+// A file two crews of one stage list in owns (identical literal entries only) needs an `Owner of <file>: <crew>` line in the goal's
+// plan.md. Crews may share files, so a missing line only warns.
+function sharedFileWarnings(dir: string, crews: Obj[]): string[] {
+  const out: string[] = []
+  const mdOf = (g: string): string => {
+    try {
+      return readFileSync(`${dir}/${g === RUN_GOAL ? 'plan.md' : `plan-${g}.md`}`, 'utf8')
+    } catch {
+      return ''
+    }
+  }
+  const groups = new Map<string, Map<string, string[]>>()
+  for (const c of crews) {
+    if (!Number.isInteger(c.stage)) continue
+    const key = `${goalOf(c)}\n${c.stage}`
+    const files = groups.get(key) ?? new Map<string, string[]>()
+    for (const o of new Set(Array.isArray(c.owns) ? c.owns : [])) {
+      if (typeof o !== 'string' || /[*?[\]{}]/.test(o) || o.endsWith('/')) continue
+      files.set(o, [...(files.get(o) ?? []), typeof c.slug === 'string' ? c.slug : '?'])
+    }
+    groups.set(key, files)
+  }
+  for (const [key, files] of groups) {
+    const [g, stage] = key.split('\n')
+    const md = mdOf(g)
+    for (const [file, owners] of files) {
+      if (owners.length < 2) continue
+      const esc = file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      if (new RegExp(`^[\\s>*|-]*(?:\\*\\*)?Owner of \`?${esc}\`?(?:\\*\\*)?\\s*:`, 'mi').test(md)) continue
+      out.push(`stage ${stage}: ${file} is owned by crews ${owners.join(' and ')}; add an owner line to ${g === RUN_GOAL ? 'plan.md' : `plan-${g}.md`}: \`Owner of ${file}: <crew>\``)
+    }
+  }
+  return out
 }
 
 // A stage after a goal's first needs a `Why stage <n>: <crew> needs <crew>'s merged <what>` line in the goal's
